@@ -1,0 +1,283 @@
+{
+    "version": "1.0.0",
+    "description": "Hyperparameter Optimization Configuration for MoE Trading System",
+    "optimization": {
+        "framework": "optuna",
+        "objective_metric": "sortino_ratio",
+        "direction": "maximize",
+        "n_trials": 100,
+        "timeout_seconds": 7200,
+        "n_jobs": 4,
+        "sampler": "TPESampler",
+        "pruner": "HyperbandPruner"
+    },
+    "walk_forward": {
+        "n_splits": 5,
+        "train_ratio": 0.7,
+        "gap_periods": 50,
+        "min_train_samples": 1000,
+        "min_test_samples": 200,
+        "expanding_window": false
+    },
+    "search_spaces": {
+        "soft_gating_network": {
+            "hidden_dim": {
+                "type": "categorical",
+                "choices": [
+                    32,
+                    64,
+                    128
+                ]
+            },
+            "dropout": {
+                "type": "uniform",
+                "low": 0.0,
+                "high": 0.3
+            },
+            "temperature": {
+                "type": "uniform",
+                "low": 0.5,
+                "high": 2.0
+            },
+            "min_expert_weight": {
+                "type": "uniform",
+                "low": 0.01,
+                "high": 0.1
+            },
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-5,
+                "high": 1e-3
+            }
+        },
+        "bull_specialist": {
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-5,
+                "high": 1e-3
+            },
+            "buffer_size": {
+                "type": "categorical",
+                "choices": [
+                    25000,
+                    50000,
+                    100000
+                ]
+            },
+            "batch_size": {
+                "type": "categorical",
+                "choices": [
+                    256,
+                    512,
+                    1024
+                ]
+            },
+            "gamma": {
+                "type": "uniform",
+                "low": 0.95,
+                "high": 0.999
+            },
+            "tau": {
+                "type": "uniform",
+                "low": 0.005,
+                "high": 0.02
+            },
+            "train_freq": {
+                "type": "categorical",
+                "choices": [
+                    8,
+                    16,
+                    32
+                ]
+            },
+            "ent_coef": {
+                "type": "categorical",
+                "choices": [
+                    "auto_0.05",
+                    "auto_0.1",
+                    "auto_0.2"
+                ]
+            },
+            "trend_threshold_entry": {
+                "type": "uniform",
+                "low": 0.15,
+                "high": 0.4
+            },
+            "trend_threshold_exit": {
+                "type": "uniform",
+                "low": 0.05,
+                "high": 0.2
+            },
+            "min_trade_duration": {
+                "type": "int",
+                "low": 10,
+                "high": 30
+            }
+        },
+        "bear_specialist": {
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-5,
+                "high": 1e-3
+            },
+            "buffer_size": {
+                "type": "categorical",
+                "choices": [
+                    25000,
+                    50000,
+                    100000
+                ]
+            },
+            "batch_size": {
+                "type": "categorical",
+                "choices": [
+                    256,
+                    512,
+                    1024
+                ]
+            },
+            "gamma": {
+                "type": "uniform",
+                "low": 0.95,
+                "high": 0.999
+            },
+            "tau": {
+                "type": "uniform",
+                "low": 0.005,
+                "high": 0.02
+            },
+            "train_freq": {
+                "type": "categorical",
+                "choices": [
+                    8,
+                    16,
+                    32
+                ]
+            },
+            "ent_coef": {
+                "type": "categorical",
+                "choices": [
+                    "auto_0.05",
+                    "auto_0.1",
+                    "auto_0.2"
+                ]
+            },
+            "trend_threshold_entry": {
+                "type": "uniform",
+                "low": 0.15,
+                "high": 0.4
+            },
+            "trend_threshold_exit": {
+                "type": "uniform",
+                "low": 0.05,
+                "high": 0.2
+            },
+            "min_trade_duration": {
+                "type": "int",
+                "low": 10,
+                "high": 30
+            }
+        },
+        "ranger_specialist": {
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-5,
+                "high": 1e-3
+            },
+            "buffer_size": {
+                "type": "categorical",
+                "choices": [
+                    25000,
+                    50000,
+                    100000
+                ]
+            },
+            "batch_size": {
+                "type": "categorical",
+                "choices": [
+                    256,
+                    512,
+                    1024
+                ]
+            },
+            "gamma": {
+                "type": "uniform",
+                "low": 0.95,
+                "high": 0.999
+            },
+            "mean_reversion_strength": {
+                "type": "uniform",
+                "low": 1.0,
+                "high": 2.5
+            },
+            "take_profit_threshold": {
+                "type": "uniform",
+                "low": 0.005,
+                "high": 0.015
+            },
+            "max_hold_periods": {
+                "type": "int",
+                "low": 20,
+                "high": 60
+            }
+        },
+        "online_learner": {
+            "learning_rate": {
+                "type": "loguniform",
+                "low": 1e-6,
+                "high": 1e-4
+            },
+            "adaptation_window": {
+                "type": "int",
+                "low": 10,
+                "high": 50
+            },
+            "reward_decay": {
+                "type": "uniform",
+                "low": 0.9,
+                "high": 0.99
+            },
+            "min_trades_for_update": {
+                "type": "int",
+                "low": 3,
+                "high": 10
+            },
+            "gradient_clip": {
+                "type": "uniform",
+                "low": 0.5,
+                "high": 2.0
+            }
+        }
+    },
+    "objective_constraints": {
+        "max_drawdown": {
+            "max": 0.20,
+            "penalty_weight": 2.0
+        },
+        "min_trades": {
+            "min": 50,
+            "penalty_weight": 1.0
+        },
+        "min_sharpe": {
+            "min": 0.5,
+            "penalty_weight": 1.5
+        }
+    },
+    "training_defaults": {
+        "specialist_timesteps": 500000,
+        "gating_epochs": 200,
+        "warmup_episodes": 10,
+        "eval_frequency": 5000,
+        "checkpoint_frequency": 10000,
+        "early_stopping_patience": 20
+    },
+    "model_paths": {
+        "soft_gating_network": "models_ai/soft_gating_network.pt",
+        "bull_specialist": "models_ai/bull_specialist_sac.zip",
+        "bear_specialist": "models_ai/bear_specialist_sac.zip",
+        "ranger_specialist": "models_ai/ranger_specialist_sac.zip",
+        "online_learner_checkpoint": "checkpoints_ai/online_learner.pt",
+        "walk_forward_results": "logs/walk_forward_results.json",
+        "optuna_database": "logs/moe_hpo_optuna.db"
+    }
+}

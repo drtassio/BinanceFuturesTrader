@@ -1,0 +1,13 @@
+{
+    "TREND_DRAWDOWN_PENALTY_WEIGHT": 0.5403704015706717,
+    "TREND_DURATION_PRESSURE_WEIGHT": 0.31812190588709827,
+    "TREND_DURATION_PRESSURE_START": 37,
+    "learning_rate": 2.69745508753454e-05,
+    "max_grad_norm": 0.5,
+    "use_sde": false,
+    "batch_size": 512,
+    "buffer_size": 30000,
+    "tau": 0.003219809733978058,
+    "target_entropy": -1.0,
+    "gamma": 0.9932212872703879
+}

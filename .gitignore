@@ -1,0 +1,59 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.DS_Store
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Data and Databases
+*.db
+*.sqlite3
+*.csv
+*.parquet
+*.gz
+
+# ML Frameworks & Models (Binary Files - High VRAM/Storage)
+models_ai/
+checkpoints_ai/
+*.zip
+*.pt
+*.pth
+*.joblib
+*.pkl
+*.onnx
+*.h5
+
+# Optimization & Studies
+optuna_studies/
+*.optuna
+
+# Logs and Tensorboard
+logs/*
+!logs/*.json
+tensorboard/
+
+# Local configuration
+.vscode/
+.idea/
+.project
+.pydevproject
+.settings/
