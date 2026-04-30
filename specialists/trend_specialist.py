@@ -3007,6 +3007,28 @@ class OnlineFeatureCalculator:
         return float(ece)
 
 class TrendSpecialist:
+    def _filter_to_core_features(self, all_features: List[str]) -> List[str]:
+        """Reduz features ao conjunto essencial — v3.1 (López de Prado / SAC convergence)."""
+        core_indicators = [
+            'log_return', 'hl_range_pct', 'close_frac',
+            'realized_vol', 'rsi', 'macd_hist', 'macd_cross',
+            'adx', 'plus_di', 'minus_di', 'bb_width', 'atr_percentage',
+            'bb_squeeze', 'bb_expansion', 'rsi_oversold', 'rsi_overbought',
+            'money_flow', 'volume_pressure', 'ema_trend', 'psar_trend',
+            'hidden_feature', 'sdae_recon', 'regime_conf', 'tp_prior',
+        ]
+        # Preserva todas as latents e meta-features
+        filtered = [f for f in all_features if any(ind in f for ind in core_indicators)]
+        # Filtra por timeframes específicos para reduzir ruído (15m para precisão, 1h para tendência)
+        # Mantém latents independentemente do timeframe
+        final_cols = []
+        for col in filtered:
+            if 'hidden_feature' in col or 'sdae_recon' in col or 'regime_conf' in col or 'tp_prior' in col:
+                final_cols.append(col)
+            elif '_15m' in col or '_1h' in col:
+                final_cols.append(col)
+        return final_cols
+
     """
 
     [CORRIGIDO] Agente especialista em tendÃªncia, utilizando SAC para
@@ -5470,30 +5492,25 @@ class TrendSpecialist:
         if not self.is_trained or self.model is None:
             return None
         try:
-            # [SCIENTIFIC FIX] Aplica o scaler na observação se disponível (Inferência)
+            # Aplica o scaler APENAS nas market features (primeiras n_features_in_ dims).
+            # O scaler foi treinado só nas features de mercado; agent_state/time/prior
+            # são concatenados crus depois e NÃO devem ser escalados.
             if self.feature_scaler is not None:
                 try:
-                    # Determina a dimensão das features de mercado (base)
-                    market_dim = len(self.feature_columns) if hasattr(self, 'feature_columns') and self.feature_columns else self.input_dim
-                    
-                    # O scaler foi treinado apenas nas market features (ex: 36 colunas)
-                    # A observação completa do SAC tem mais (ex: 49 colunas)
-                    # Precisamos escalar apenas o subset correto para evitar erro de dimensão
-                    if isinstance(self.feature_scaler, ColumnTransformer) and hasattr(self, 'feature_columns') and self.feature_columns:
-                        obs_market = observation[:market_dim].reshape(1, -1)
-                        if obs_market.shape[1] == len(self.feature_columns):
-                            obs_market_df = pd.DataFrame(obs_market, columns=self.feature_columns)
-                            market_obs_scaled = self.feature_scaler.transform(obs_market_df).flatten()
-                            observation[:len(market_obs_scaled)] = market_obs_scaled
+                    market_dim = getattr(self.feature_scaler, 'n_features_in_', len(self.feature_columns) if self.feature_columns else 65)
+                    obs_subset = observation[:market_dim].reshape(1, -1)
+
+                    if isinstance(self.feature_scaler, ColumnTransformer):
+                        feat_names = getattr(self.feature_scaler, 'feature_names_in_', None)
+                        if feat_names is not None and len(feat_names) == obs_subset.shape[1]:
+                            obs_df = pd.DataFrame(obs_subset, columns=feat_names)
+                            scaled_values = self.feature_scaler.transform(obs_df).flatten()
                         else:
-                            # Fallback se dimensão não bater
-                            market_obs_scaled = self.feature_scaler.transform(obs_market).flatten()
-                            observation[:len(market_obs_scaled)] = market_obs_scaled
+                            scaled_values = self.feature_scaler.transform(obs_subset).flatten()
                     else:
-                        # Fallback para RobustScaler/StandardScaler simples
-                        market_obs = observation[:market_dim].reshape(1, -1)
-                        market_obs_scaled = self.feature_scaler.transform(market_obs).flatten()
-                        observation[:market_dim] = market_obs_scaled
+                        scaled_values = self.feature_scaler.transform(obs_subset).flatten()
+
+                    observation[:market_dim] = scaled_values
                 except Exception as e:
                     logger.warning(f"[SCALER INFERENCE] Falha ao aplicar scaler: {e}")
 
@@ -5582,6 +5599,21 @@ class TrendSpecialist:
                 final_action = Action.HOLD
                 position_size_pct = float(self.trading_config.MAX_POSITION_SIZE_PERCENT * confidence * 0.5)  # Reduce size
                 
+            # [FIX PRODUÇÃO] Filtro de direção — replica _specialist_long_only do ambiente de treino.
+            # Bull: apenas BUY (long_only). Bear: apenas SELL (short_only).
+            # Se o modelo gerar sinal contrário à especialidade, converte em HOLD.
+            specialist_direction = getattr(self, '_specialist_direction', None)  # 'long_only' | 'short_only' | None
+            if specialist_direction == 'long_only' and final_action == Action.SELL:
+                logger.info(f"🐂 [REGIME FILTER] BullSpecialist: SELL bloqueado → HOLD (long_only em produção)")
+                final_action = Action.HOLD
+                explanation['reason'] = 'BullSpecialist: sinal SELL bloqueado (long_only)'
+                confidence = 0.0
+            elif specialist_direction == 'short_only' and final_action == Action.BUY:
+                logger.info(f"🐻 [REGIME FILTER] BearSpecialist: BUY bloqueado → HOLD (short_only em produção)")
+                final_action = Action.HOLD
+                explanation['reason'] = 'BearSpecialist: sinal BUY bloqueado (short_only)'
+                confidence = 0.0
+
             return Signal(
                 symbol=self.trading_config.PRIMARY_PAIR, action=final_action, confidence=confidence, 
                 position_size_pct=position_size_pct, leverage=leverage, stop_loss=stop_loss, 
@@ -5668,8 +5700,10 @@ class TrendSpecialist:
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
-                    self.feature_columns = meta.get("base_feature_columns", [])
-                logger.info(f"✅ [META] Contrato de features carregado: {len(self.feature_columns)} colunas.")
+                    raw_cols = meta.get("base_feature_columns", [])
+                    # [SCIENTIFIC FIX] Filtra para as features core (geralmente 55) para bater com o scaler
+                    self.feature_columns = self._filter_to_core_features(raw_cols)
+                logger.info(f"✅ [META] Contrato de features filtrado: {len(self.feature_columns)} colunas.")
         except Exception as e:
             logger.warning(f"⚠️ [META] Falha ao carregar metadados: {e}")
         # [SCIENTIFIC FIX] Tenta carregar o scaler correspondente
@@ -5688,6 +5722,11 @@ class TrendSpecialist:
                 if os.path.exists(generic_path):
                     self.feature_scaler = joblib.load(generic_path)
                     logger.debug(f"⚠️ [SCALER] Scaler específico não encontrado. Usando fallback genérico.")
+            # Usa feature_names_in_ do scaler como contrato autoritativo de features
+            # (sobrescreve o resultado de _filter_to_core_features que pode divergir do treino)
+            if self.feature_scaler is not None and hasattr(self.feature_scaler, 'feature_names_in_'):
+                self.feature_columns = list(self.feature_scaler.feature_names_in_)
+                logger.info(f"✅ [SCALER] feature_columns alinhado com scaler: {len(self.feature_columns)} colunas.")
         except Exception as e:
             logger.error(f"❌ [SCALER] Falha ao carregar scaler: {e}")
 

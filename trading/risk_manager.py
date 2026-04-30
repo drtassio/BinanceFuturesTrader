@@ -17,7 +17,7 @@ from datetime import datetime
 
 from utils.logger import get_logger
 from config.settings import TradingConfig
-from models.trade_schema import Signal, Position, OrderSide 
+from models.trade_schema import Signal, Position, OrderSide, Action
 
 # Adiciona importação de NativeIndicators para o EPSILON
 from feature_engineering.native_indicators import NativeIndicators
@@ -187,7 +187,7 @@ class RiskManager:
             logger.error(reason)
             return False, reason
 
-        if signal.action == "HOLD":
+        if signal.action == Action.HOLD or signal.action == "HOLD":  # [BUG FIX] comparar enum corretamente
             return True, "✅ Sinal HOLD: Nenhuma alteração de risco, aprovação automática."
 
         # [SAFETY] Validador de Qualidade do Sinal (Filtro Anti-Alucinação)
@@ -196,14 +196,28 @@ class RiskManager:
             logger.warning(quality_reason)
             return False, quality_reason
 
-        # Checagem de Margem Disponível (o sinal usa signal.position_size_pct como % de margem)
+        # 1. Determinar se o trade é de fechamento (redução de nocional) ou abertura/aumento
+        is_closing_trade = False
+        current_pos = self.positions.get(signal.symbol)
+        
+        # Compara usando .value ou cast para string para evitar problemas de tipos de Enum diferentes
+        action_val = signal.action.value if hasattr(signal.action, 'value') else str(signal.action)
+        
+        if current_pos:
+            # Se a direção do trade for oposta à posição atual, é um fechamento parcial ou total
+            if (action_val == "BUY" and current_pos.quantity < 0) or \
+               (action_val == "SELL" and current_pos.quantity > 0) or \
+               (action_val == "CLOSE"): 
+                is_closing_trade = True
+                logger.info(f"🛡️ [RISCO] Ordem de FECHAMENTO detectada para {signal.symbol}. Ignorando limites de margem para redução de risco.")
+
+        # 2. Checagem de Margem Disponível (o sinal usa signal.position_size_pct como % de margem)
         initial_margin_needed_for_trade = self.portfolio_value * signal.position_size_pct
         
         # [CORREÇÃO] Calcular cash disponível considerando a margem já utilizada
-        # self.cash é o Wallet Balance (Total Equity - Unrealized PnL), então precisamos subtrair a margem usada
         available_cash = self.cash - self.margin_used
         
-        if available_cash < initial_margin_needed_for_trade:
+        if not is_closing_trade and available_cash < initial_margin_needed_for_trade:
             reason = (f"❌ [REJEITADO] Caixa disponível (${available_cash:,.2f}) insuficiente para "
                       f"cobrir a margem inicial necessária (${initial_margin_needed_for_trade:,.2f}) para o trade ({signal.symbol}).")
             logger.warning(reason)
@@ -223,16 +237,6 @@ class RiskManager:
         # Valor nocional do trade a ser aberto (em USD)
         trade_notional_value = self.portfolio_value * signal.position_size_pct * signal.leverage
         
-        # Determinar se o trade é de fechamento (redução de nocional) ou abertura/aumento
-        is_closing_trade = False
-        current_pos = self.positions.get(signal.symbol)
-        if current_pos:
-            # Se a direção do trade for oposta à posição atual, é um fechamento parcial ou total
-            if (signal.action == OrderSide.BUY and current_pos.quantity < 0) or \
-               (signal.action == OrderSide.SELL and current_pos.quantity > 0) or \
-               (signal.action == "CLOSE"): 
-                is_closing_trade = True
-
         projected_total_notional_value = self.total_notional_value
         if not is_closing_trade: 
             projected_total_notional_value += trade_notional_value
@@ -251,7 +255,9 @@ class RiskManager:
 
         projected_leverage_ratio = projected_total_notional_value / (self.portfolio_value + np.finfo(float).eps)
 
-        if projected_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT: 
+        # [FIX] Ordens de FECHAMENTO sempre passam nesta checagem, mesmo com alavancagem projetada alta.
+        # O objetivo é REDUZIR a exposição, não aumentá-la.
+        if not is_closing_trade and projected_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT: 
             reason = (f"❌ [REJEITADO] Alavancagem projetada do portfólio ({projected_leverage_ratio:.2f}x) "
                       f"excederia o limite de {self.config.MAX_TOTAL_EXPOSURE_PERCENT:.2f}x (Exposição total).")
             logger.warning(reason)
@@ -265,7 +271,12 @@ class RiskManager:
             projected_margin_used += initial_margin_needed_for_trade
         
         # Checa se a margem projetada excede o limite (MAX_POSITION_SIZE_PERCENT)
-        if projected_margin_used / (self.portfolio_value + np.finfo(float).eps) > self.config.MAX_POSITION_SIZE_PERCENT:
+        # [FIX] Se for uma ordem de fechamento, permitimos mesmo que o limite esteja excedido,
+        # pois o objetivo é reduzir a exposição e o risco.
+        margin_ratio = projected_margin_used / (self.portfolio_value + np.finfo(float).eps)
+        logger.debug(f"📊 [RISCO] Check Margem: {projected_margin_used:.2f} / {self.portfolio_value:.2f} = {margin_ratio:.2%} (Limite: {self.config.MAX_POSITION_SIZE_PERCENT:.2%}). Closing: {is_closing_trade}")
+        
+        if not is_closing_trade and margin_ratio > self.config.MAX_POSITION_SIZE_PERCENT:
              reason = (f"❌ [REJEITADO] Margem total utilizada projetada "
                        f"({projected_margin_used / (self.portfolio_value + np.finfo(float).eps):.2%}) "
                        f"excederia o limite de margem individual de {self.config.MAX_POSITION_SIZE_PERCENT:.2%}.")
@@ -305,7 +316,8 @@ class RiskManager:
                 reason = f"❌ [REJEITADO] Mesmo com redução dinâmica, caixa insuficiente para margem ajustada (${adjusted_margin_needed:,.2f})"
                 logger.warning(reason)
                 return False, reason
-            return False, reason
+            # [BUG FIX] Não retornar False aqui — posição foi reduzida e caixa é suficiente.
+            # O sinal continua aprovado com o tamanho reduzido pelo envelope dinâmico.
             
         logger.info(f"✅ [APROVADO] Sinal para {signal.symbol} ({signal.action.value}, Confiança: {signal.confidence:.2%}, P: {signal.profit_probability:.2%}, Alavancagem: {signal.leverage:.2f}x) aprovado pela gestão de risco.")
         return True, "✅ Aprovado"
@@ -520,7 +532,8 @@ class RiskManager:
             return self.config.MAX_VAR_1D_PERCENT
 
         weights_series = pd.Series(projected_notional_weights)
-        aligned_weights, _ = weights_series.align(returns_df.columns, axis=0, fill_value=0.0)
+        # Sincroniza pesos com as colunas do DataFrame de retornos usando reindex (mais robusto que align com Index)
+        aligned_weights = weights_series.reindex(returns_df.columns).fillna(0.0)
         
         portfolio_hist_returns = returns_df.dot(aligned_weights)
         
@@ -561,7 +574,10 @@ class RiskManager:
             "max_drawdown_limit_pct": self.config.MAX_DRAWDOWN_PERCENT,
             "portfolio_var_95_pct": portfolio_var,
             "max_var_limit_pct": self.config.MAX_VAR_1D_PERCENT,
-            "is_risk_off_mode": self.current_drawdown > self.config.MAX_DRAWDOWN_PERCENT, # Indica se o bot deve entrar em modo defensivo
+            "is_risk_off_mode": (
+                self.current_drawdown > self.config.MAX_DRAWDOWN_PERCENT or          # Drawdown crítico
+                self.current_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT  # Exposição total excedida
+            ),  # Indica se o bot deve entrar em modo defensivo (bloqueia TWAP intra-fatia)
             "open_positions_count": len(self.positions),
             "total_risk_per_trade_pct": self.config.MAX_PORTFOLIO_RISK_PERCENT
         }

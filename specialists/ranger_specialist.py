@@ -97,6 +97,10 @@ class RangerSpecialist(BaseRegimeSpecialist):
             "position_bias": "bidirectional",
             "take_profit_sensitivity": 1.2,
         })
+        
+        # [FIX PRODUÇÃO] Ranger opera em ambas as direções (Mean Reversion)
+        self._specialist_direction = 'both'
+        logger.info("🤠 Ranger Specialist configurado para operações bidirecionais")
 
         logger.info(
             "🤠 RangerSpecialist v2.0 — Mean Reversion com ADX/BBW/Z-score/OU half-life"

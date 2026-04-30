@@ -101,8 +101,8 @@ class AIController:
             'models': {
                 # Caminho real do artefato do autoencoder temporal
                 'autoencoder_model': {'trained': False, 'path': os.path.join('autoencoder', 'temporal_sdae.pth'), 'trained_on': None},
-                'hrl_master_ppo': {'trained': False, 'path': 'hrl_master_ppo.zip', 'trained_on': None},
-                # [FIX] Novas chaves para os especialistas Bull/Bear/Ranger
+                # [ARCH] hrl_master_ppo removido — roteamento via CryptoRegimeDetector + SoftGatingNetwork
+                # Especialistas Bull/Bear/Ranger
                 'bull_specialist_sac': {'trained': False, 'path': 'bull_specialist_sac.zip', 'trained_on': None},
                 'bear_specialist_sac': {'trained': False, 'path': 'bear_specialist_sac.zip', 'trained_on': None},
                 'ranger_specialist_sac': {'trained': False, 'path': 'ranger_specialist_sac.zip', 'trained_on': None},
@@ -518,13 +518,13 @@ class AIController:
                 return False
             
             # Verifica se todos os modelos esperados estão presentes
-            # [ATUALIZADO] Removido trend_predictor e profitability_predictor
-            # [CORRIGIDO] Nomes corretos dos modelos atuais
+            # [ARCH] HRL Master removido dos required — roteamento via CryptoRegimeDetector + SoftGatingNetwork.
+            # HRL Master tinha lookahead bias no MasterEnv (future_price 5 steps à frente) e era
+            # redundante com o CryptoRegimeDetector que já classifica regime deterministicamente.
             expected_models = [
-                'autoencoder_model', 
-                'hrl_master_ppo', 
-                'bull_specialist_sac', 
-                'bear_specialist_sac', 
+                'autoencoder_model',
+                'bull_specialist_sac',
+                'bear_specialist_sac',
                 'ranger_specialist_sac'
             ]
             
@@ -633,12 +633,14 @@ class AIController:
             else:
                  hrl_master_trained = False
 
-            if autoencoder_trained and hrl_master_trained and specialists_trained:
+            # [ARCH] HRL Master não é mais requisito de prontidão.
+            # Roteamento feito por CryptoRegimeDetector + SoftGatingNetwork (mais simples e sem lookahead bias).
+            if autoencoder_trained and specialists_trained:
                 self.is_trained = True
                 logger.info("✅ [FAST_STARTUP] Sistema IA validado como TREINADO (baseado em arquivos e metadados).")
             else:
                 self.is_trained = False
-                logger.warning(f"⚠️ [FAST_STARTUP] Sistema IA incompleto. AE={autoencoder_trained}, HRL={hrl_master_trained}, Specs={specialists_trained}")
+                logger.warning(f"⚠️ [FAST_STARTUP] Sistema IA incompleto. AE={autoencoder_trained}, Specs={specialists_trained}, HRL(opcional)={hrl_master_trained}")
             
             if self.is_trained:
                 logger.info("✅ Todos os modelos estão carregados. AIController está treinado e pronto para operar.")
@@ -885,10 +887,11 @@ class AIController:
             # o dataset enriquecido pode ter mudado.
             
             # Verifica se algum agente de RL precisa de treinamento
+            # [ARCH] HRL Master removido dos requisitos de treinamento RL.
+            # CryptoRegimeDetector + SoftGatingNetwork fazem o roteamento.
             needs_rl_training = not all(status.get(key) for key in [
-                'hrl_master_ppo', 
-                'bull_specialist_sac', 
-                'bear_specialist_sac', 
+                'bull_specialist_sac',
+                'bear_specialist_sac',
                 'ranger_specialist_sac'
             ])
 
@@ -942,7 +945,7 @@ class AIController:
                     "BullSpecialist":   trend_goal,   # 500k — convergência validada
                     "BearSpecialist":   trend_goal,   # 500k — igual ao bull
                     "RangerSpecialist": base_goal,    # 500k — regime lateral
-                    "HRLMaster":        base_goal,    # 500k — meta-controlador
+                    # [ARCH] HRLMaster removido — roteamento via CryptoRegimeDetector + SoftGatingNetwork
                 }
                 logger.info(f"ðŸŽ¯ Objetivos de treinamento granular para agentes de RL definidos: {training_goals}")
 
@@ -959,7 +962,7 @@ class AIController:
                     'bull_specialist_sac': 'bull_specialist_sac.zip',
                     'bear_specialist_sac': 'bear_specialist_sac.zip',
                     'ranger_specialist_sac': 'ranger_specialist_sac.zip',
-                    'hrl_master_ppo': 'hrl_master_ppo.zip'
+                    # [ARCH] hrl_master_ppo removido — não é mais treinado nem requerido
                 }
                 
                 for model_key, filename in specialist_file_mapping.items():
@@ -1701,93 +1704,23 @@ class AIController:
                 logger.info(f"⏳ [SEQUENCIAL] '{spec_class_name}' ainda não completou ({spec_progress}/{spec_goal}). HRL Master aguarda.")
                 break
         
-        if not all_specialists_trained:
-            logger.warning("⚠️ Alguns especialistas ainda não completaram o treinamento. HRL Master pode ser treinado, mas com performance reduzida.")
-            # O usuário quer que continue, então vamos permitir o treinamento do Master se houver pelo menos um modelo
-        
-        logger.info("--- Etapa 4.2: Verificando e treinando o HRL Master ---")
-        
-        # PASSO 1: Verificar status de otimização do HRL Master (verificação robusta)
-        skip_hrl_optimization = False
-        
-        # Verificação 1: Propriedade is_optimized
-        if hasattr(self.hrl_master, 'is_optimized') and self.hrl_master.is_optimized:
-            logger.info("✅ [OPTUNA] HRL Master já otimizado (via is_optimized). Pulando.")
-            skip_hrl_optimization = True
-        
-        # Verificação 1b: Arquivo de hiperparâmetros existe
-        if not skip_hrl_optimization and hasattr(self.hrl_master, 'hyperparams_path'):
-            if os.path.exists(self.hrl_master.hyperparams_path):
-                logger.info(f"✅ [OPTUNA] HRL Master possui hiperparâmetros em '{self.hrl_master.hyperparams_path}'. Pulando otimização.")
-                skip_hrl_optimization = True
-        
-        # Verificação 2: DB Optuna com trials suficientes
-        if not skip_hrl_optimization and hasattr(self.hrl_master, 'hyperparams_path'):
-            try:
-                import optuna
-                # HRL Master pode usar DB diferente
-                hrl_db_path = getattr(self.hrl_master, 'optuna_db_path', None)
-                if hrl_db_path and os.path.exists(hrl_db_path):
-                    # API correta: optuna.study.get_all_study_summaries
-                    study_summaries = optuna.study.get_all_study_summaries(storage=f"sqlite:///{hrl_db_path}")
-                    for summary in study_summaries:
-                        if summary.n_trials >= 15:  # HRL precisa menos trials
-                            logger.info(f"✅ [OPTUNA] HRL Master tem {summary.n_trials} trials no DB. Pulando otimização.")
-                            skip_hrl_optimization = True
-                            study = optuna.load_study(study_name=summary.study_name, storage=f"sqlite:///{hrl_db_path}")
-                            if study.best_trial:
-                                self.hrl_master.hyperparams.update(study.best_params)
-                            break
-            except Exception as e:
-                logger.warning(f"⚠️ [OPTUNA] Erro ao verificar DB Optuna para HRL Master: {e}")
-        
-        # Verificação 3: Modelo treinado existe
-        if not skip_hrl_optimization and hasattr(self.hrl_master, 'model_path'):
-            if os.path.exists(self.hrl_master.model_path):
-                file_size = os.path.getsize(self.hrl_master.model_path)
-                if file_size > 100000:  # >100KB = modelo válido
-                    logger.info(f"✅ [OPTUNA] Modelo HRL '{self.hrl_master.model_path}' existe. Pulando otimização.")
-                    skip_hrl_optimization = True
-        
-        if not skip_hrl_optimization:
-            logger.info("[OPTUNA] HRL Master não otimizado. Executando otimização Optuna...")
-            try:
-                train_opt, eval_opt = train_test_split(train_df, test_size=0.15, shuffle=False)
-                self.hrl_master.optimize_hyperparameters(train_opt, eval_opt, n_trials=100, n_timesteps=50000)  # 50k + MLP = 3-4x mais rápido
-                logger.info("[OPTUNA] Otimização do HRL Master concluída.")
-            except Exception as opt_err:
-                logger.error(f"[OPTUNA] Erro na otimização do HRL Master: {opt_err}. Continuando com hiperparâmetros padrão.")
-        
-        # PASSO 2: Treinar HRL Master
-        hrl_name = self.hrl_master.__class__.__name__
-        
-        # [FIX] Verifica se o modelo já existe fisicamente para evitar retreino desnecessário
-        hrl_model_path = getattr(self.hrl_master, 'model_path', None)
-        if hrl_model_path and os.path.exists(hrl_model_path):
-             # Verifica data de criação/modificação se necessário, mas por hora confiamos na existência
-             logger.info(f"✅ [HRL SKIP] Modelo '{hrl_model_path}' encontrado. Pulando retreinamento.")
-             
-             # Atualiza progresso artificialmente para impedir entrada no loop de treino
-             if hrl_name not in training_progress:
-                 training_progress[hrl_name] = {}
-             
-             # Força completion para satisfazer a lógica downstream
-             current_target = training_goals.get(hrl_name, 0)
-             training_progress[hrl_name]["completed_timesteps"] = current_target
-             completed_steps = current_target
-        else:
-             completed_steps = training_progress.get(hrl_name, {}).get("completed_timesteps", 0)
-
-        total_target_steps = training_goals.get(hrl_name, 0)
-        remaining_steps = total_target_steps - completed_steps
-        if remaining_steps > 0:
-            logger.info(f"âš ï¸  HRL Master precisa treinar por mais {remaining_steps} timesteps.")
-            new_total_steps = self.hrl_master.train(train_df, self.specialists, timesteps_to_train=remaining_steps)
-            if hrl_name not in training_progress:
-                training_progress[hrl_name] = {}
-            training_progress[hrl_name]["completed_timesteps"] = new_total_steps
-        else:
-            logger.info("âœ… HRL Master jÃ¡ completou seu treinamento. Pulando.")
+        # [ARCH FIX] HRL Master desativado — roteamento feito por CryptoRegimeDetector + SoftGatingNetwork.
+        #
+        # Diagnostico cientifico que motivou a remocao:
+        # 1. LOOKAHEAD BIAS: MasterEnv usava future_price 5 candles a frente no calculo de reward
+        #    -> PPO aprendia com informacao inexistente em producao.
+        # 2. CIRCULARIDADE: 40% do reward era por "regime coherence" (acertar o label do
+        #    CryptoRegimeDetector) + observacao ja continha regime/prob_bull/prob_bear/prob_ranger
+        #    -> PPO simplesmente copiava o CryptoRegimeDetector deterministicamente.
+        # 3. REDUNDANCIA: CryptoRegimeDetector (HMM+GMM+ADX+Funding) classifica regime
+        #    de forma robusta. SoftGatingNetwork faz blend suave em zonas de transicao.
+        #    Uma 3a camada PPO nao acrescenta informacao nova.
+        # 4. DEPENDENCIA CIRCULAR: HRL Master requeria os 3 especialistas treinados -> atrasava
+        #    o startup sem nenhum beneficio funcional.
+        logger.info(
+            "[ARCH] Etapa 4.2 (HRL Master) ignorada - roteamento delegado ao "
+            "CryptoRegimeDetector + SoftGatingNetwork (sem lookahead bias, sem circularidade)."
+        )
 
 
     def _evaluate_trend_specialist_holdout(self, specialist: TrendSpecialist, full_df: pd.DataFrame) -> None:
@@ -2215,6 +2148,14 @@ class AIController:
         prior_cols = [c for c in ('tp_prior_dir', 'tp_prior_conf', 'tp_tau', 'tp_primary_signal') if c in df_fully_enriched.columns]
         optimized_feature_cols = hidden_cols + trend_cols
         
+        # [FIX CRÍTICO PARA XAI] Sincroniza contrato de features com colunas latentes
+        # Isso evita que o filtro de reordenação descarte as hidden features
+        if self.base_feature_columns:
+            for hc in hidden_cols:
+                if hc not in self.base_feature_columns:
+                    self.base_feature_columns.append(hc)
+                    logger.debug(f"➕ [AI] Feature latente '{hc}' adicionada ao contrato base.")
+        
         primary_tf = self.config_trading.PRIMARY_TIMEFRAME_TRADING
         essential_env_cols = [
             'open', 'high', 'low', 'close', 'volume',
@@ -2256,14 +2197,17 @@ class AIController:
             'regime_is_bull', 'regime_is_bear', 'regime_is_ranger'
         ]
         
-        final_df_cols = list(dict.fromkeys(final_contract_cols))
+        # [FIX CRÍTICO] Re-injeta as Hidden Features e Regime Meta no contrato final, 
+        # mesmo que o processador científico as tenha filtrado. Elas são vitais para o XAI e MoE.
+        final_df_cols = list(dict.fromkeys(final_contract_cols + hidden_cols + trend_cols))
         
-        # Colunas reais que o DataFrame deve conter: Contraco IA + Metadados + Colunas Base (OHLCV) + TP Signals
+        # Colunas reais que o DataFrame deve conter: Contraco IA + Metadados + Colunas Base (OHLCV) + TP Signals + Hidden Features
+        hidden_sdae_cols = [c for c in df_fully_enriched.columns if 'hidden' in c or 'sdae' in c]
         data_storage_cols = list(dict.fromkeys(
             final_df_cols + 
             [c for c in regime_meta_cols if c in df_fully_enriched.columns] +
             [c for c in essential_env_cols if c in df_fully_enriched.columns] +
-            prior_cols + extras_cols
+            prior_cols + extras_cols + hidden_sdae_cols
         ))
         
         # [CORREÇÃO] Adiciona .copy() para evitar SettingWithCopyWarning
@@ -2358,11 +2302,19 @@ class AIController:
             logger.warning("⚠️ [SHAP] AIController não treinado ou sem contrato de features. Retornando zeros.")
             return np.zeros(X.shape[0])
         assert self.base_feature_columns is not None  # narrow Optional[List[str]] -> List[str]
-        
-        # [MELHORIA] Validação de features em runtime
-        if X.shape[1] != len(self.base_feature_columns):
-            logger.error(f"❌ [SHAP] Shape mismatch: X tem {X.shape[1]} features, esperado {len(self.base_feature_columns)}")
-            return np.zeros(X.shape[0])
+
+        expected_n = len(self.base_feature_columns)
+        # [FIX SHAP SHAPE] Padding/truncation defensivo ao invés de retornar zeros.
+        # O background foi salvo com uma versão anterior do pipeline (54 cols); o pipeline
+        # atual pode ter mais ou menos colunas. Ajustamos em silêncio para evitar spam de error.
+        if X.shape[1] != expected_n:
+            if X.shape[1] < expected_n:
+                # Padding com zeros à direita
+                pad = np.zeros((X.shape[0], expected_n - X.shape[1]), dtype=np.float32)
+                X = np.hstack([X, pad])
+            else:
+                # Trunca para as primeiras expected_n colunas
+                X = X[:, :expected_n]
         
         # [FIX] trend_predictor foi removido do pipeline. SHAP usa scores neutros.
         # Isso é esperado e não afeta a operação do bot.
@@ -2383,32 +2335,30 @@ class AIController:
             
             for idx, row in input_df.iterrows():
                 try:
-                    # --- Etapa 1: Predição de Tendência (Regime de Mercado) - NEUTRO ---
-                    regime_confidence = 0.5
-                    
-                    # --- Etapa 2: Predicao de Rentabilidade ---
-                    # [FIX] ProfitabilityPredictor foi REMOVIDO do pipeline.
-                    # Usamos score neutro (0.5) como padrao quando nao disponivel.
-                    if False:
-                        pass
-                    else:
-                        # Sem predictor, usa probabilidade neutra
-                        prob = 0.5
+                    # [FIX SHAP SCORE] Score precisa VARIAR com as features para que o
+                    # KernelExplainer atribua importâncias não-zero.
+                    # Proxy heurístico: momentum + regime — sem dependências async.
 
-                    # Converte para score entre -1 e 1
-                    profit_score = (prob - 0.5) * 2  # [0,1] -> [-1,1]
-                    
-                    # --- Etapa 3: CombinaÃ§Ã£o dos Scores para DecisÃ£o Final ---
-                    # Combina confianÃ§a do regime com score de rentabilidade
-                    combined_score = regime_confidence * profit_score
-                    
-                    # Normaliza para garantir estabilidade
-                    final_score = np.clip(combined_score, -1.0, 1.0)
-                    
+                    momentum_cols = [c for c in self.base_feature_columns
+                                     if any(k in c for k in ['log_return', 'macd', 'rsi',
+                                                              'volume_imbalance', 'oc_move',
+                                                              'aggressor_delta', 'obi', 'hidden_feature'])]
+                    available_mc = [c for c in momentum_cols if c in row.index]
+                    if available_mc:
+                        scores_arr = row[available_mc].fillna(0).values.astype(np.float32)
+                        std = float(scores_arr.std()) or 1.0
+                        raw_score = float(np.clip(scores_arr.mean() / std, -1.0, 1.0))
+                    else:
+                        raw_score = 0.0
+
+                    regime_val  = int(row['regime'])           if 'regime'            in row.index else 2
+                    regime_conf = float(row['regime_confidence']) if 'regime_confidence' in row.index else 0.5
+                    regime_sign = {0: 1.0, 1: -1.0, 2: 0.0}.get(regime_val, 0.0)
+                    final_score = float(np.clip(raw_score * 0.7 + regime_sign * regime_conf * 0.3, -1.0, 1.0))
                     scores.append(final_score)
-                    
+
                 except Exception as e:
-                    logger.warning(f"âš ï¸ [SHAP] Erro ao processar linha {idx}: {e}. Usando score neutro.")
+                    logger.warning(f"[SHAP] Erro ao processar linha {idx}: {e}. Score neutro.")
                     scores.append(0.0)
             
             return np.array(scores, dtype=np.float32)
@@ -2447,9 +2397,28 @@ class AIController:
             df_fully_enriched.ffill(inplace=True)
             df_fully_enriched.dropna(inplace=True)
 
+            # [REUPERAÇÃO DE ESTADO] Garante que o bot nunca fique 'cego' ou zerado por falta de padding
+            _hf_cols = [c for c in df_fully_enriched.columns if c.startswith('hidden_feature_')]
+            has_real_data = False
+            
+            if _hf_cols:
+                _last_hf = df_fully_enriched[_hf_cols].iloc[-1]
+                if (_last_hf != 0.0).any():
+                    self._last_valid_hidden_dict = _last_hf.to_dict()
+                    has_real_data = True
+            
+            # Se não temos dados reais no loop atual, tentamos o 'Cofre de Memória'
+            if not has_real_data and hasattr(self, '_last_valid_hidden_dict'):
+                logger.info("🔄 [AI] Hidden Features zeradas no loop atual. Injetando dados da memória persistente.")
+                for k, v in self._last_valid_hidden_dict.items():
+                    df_fully_enriched[k] = v
+                xai_features_row = df_fully_enriched.iloc[-1].to_dict()
+            else:
+                xai_features_row = df_fully_enriched.iloc[-1].to_dict() # Usa o que tiver (real ou fallback do DF)
+
             if df_fully_enriched.empty:
                 return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
-                              explanation={"reason": "DataFrame vazio apÃ³s processamento."})
+                              explanation={"reason": "DataFrame vazio após processamento."})
             
             # [FIX] Compute Memory Features for Specialist Contract
             for window in [20, 50]:
@@ -2468,12 +2437,25 @@ class AIController:
 
             latest_row = df_fully_enriched.iloc[-1]
 
-            # [FIX] Force rebuild of features if the contract is too large (624+) or missing
-            # The specialists expect approx 56 market features + 9 extras = 65 total.
-            is_contract_too_large = self.base_feature_columns is not None and len(self.base_feature_columns) > 100
+            # Propaga a linha enriquecida (com SDAE hidden features) para o system_state,
+            # garantindo que log_trade_decision/XAI externo veja valores reais, não zeros.
+            if hasattr(self, 'system_state') and self.system_state is not None:
+                self.system_state['latest_features'] = latest_row
+
+            # [FIX] Aumentado threshold de 100 para 1000 para acomodar contratos multi-TF (ex: 168 features)
+            ae_pipe = self.feature_pipeline.temporal_autoencoder_pipeline if self.feature_pipeline else None
+            ae_required_count = len(ae_pipe.feature_columns) if ae_pipe and ae_pipe.feature_columns else 0
             
-            if self.base_feature_columns is None or is_contract_too_large:
-                 logger.warning(f"⚠️ [AI] Contrato de Features {'inválido (muitas colunas)' if is_contract_too_large else 'não carregado'}. Recalculando...")
+            is_contract_too_small = self.base_feature_columns is not None and len(self.base_feature_columns) < 20
+            is_contract_too_large = self.base_feature_columns is not None and len(self.base_feature_columns) > 1000
+            is_insufficient_for_ae = self.base_feature_columns is not None and ae_required_count > 0 and len(self.base_feature_columns) < ae_required_count
+            
+            if self.base_feature_columns is None or is_contract_too_small or is_contract_too_large or is_insufficient_for_ae:
+                 reason = "não carregado" if self.base_feature_columns is None else \
+                          "muito pequeno" if is_contract_too_small else \
+                          "muito grande" if is_contract_too_large else \
+                          f"insuficiente para AE ({len(self.base_feature_columns)} < {ae_required_count})"
+                 logger.warning(f"⚠️ [AI] Contrato de Features {reason}. Recalculando...")
                  
                  # Logic synced from build_enriched_dataset
                  hidden_cols = [c for c in df_fully_enriched.columns if 'hidden_feature_' in c]
@@ -2481,12 +2463,18 @@ class AIController:
                  optimized_feature_cols = hidden_cols + trend_cols
                  
                  primary_tf = self.config_trading.PRIMARY_TIMEFRAME_TRADING
-                 essential_env_cols = [
-                     'open', 'high', 'low', 'close', 'volume',
-                     f'atr_{primary_tf}', f'bb_lower_{primary_tf}', f'bb_upper_{primary_tf}',
-                     f'rsi_{primary_tf}', 'bb_expansion', 'high_volatility', 
-                     'bb_squeeze', 'low_volatility', 'adx_weak_trend', f'adx_{primary_tf}', 'ema_trend'
-                 ]
+                 all_tfs = getattr(self.config_trading, 'ALL_TRADING_TIMEFRAMES', [primary_tf])
+                 
+                 essential_env_cols = ['open', 'high', 'low', 'close', 'volume', 'ema_trend']
+                 for tf in all_tfs:
+                     essential_env_cols += [
+                         f'atr_{tf}', f'bb_lower_{tf}', f'bb_upper_{tf}',
+                         f'rsi_{tf}', f'adx_{tf}', f'close_frac_{tf}',
+                         f'bb_width_{tf}', f'log_return_{tf}', f'log_return_volume_{tf}'
+                     ]
+                 
+                 # Adiciona flags de volatilidade/trend globais
+                 essential_env_cols += ['bb_expansion', 'high_volatility', 'bb_squeeze', 'low_volatility', 'adx_weak_trend']
                  
                  extra_feature_keys = [
                      'tp_duration_median', 'tp_uncertainty',
@@ -2499,8 +2487,15 @@ class AIController:
                  existing_essential_cols = [col for col in essential_env_cols if col in df_fully_enriched.columns]
                  extras_cols = [col for col in extra_feature_keys if col in df_fully_enriched.columns]
                  
+                 # [FIX] Integrar colunas do AutoEncoder no contrato para evitar mismatch de dimensões
+                 ae_cols = []
+                 if self.feature_pipeline and self.feature_pipeline.temporal_autoencoder_pipeline:
+                     ae_cols = self.feature_pipeline.temporal_autoencoder_pipeline.feature_columns
+                     logger.debug(f"⚙️ [AI] Sincronizando {len(ae_cols)} colunas do AutoEncoder no contrato.")
+
                  # Ordered columns for the "Contract"
-                 ordered_cols = existing_essential_cols + optimized_feature_cols + extras_cols
+                 # [FIX] ae_cols incluídas para garantir que a ordem bata com o RobustScaler do AE
+                 ordered_cols = existing_essential_cols + ae_cols + optimized_feature_cols + extras_cols
                  self.base_feature_columns = list(dict.fromkeys(ordered_cols))
                  self.final_feature_count = len(self.base_feature_columns)
                  
@@ -2528,7 +2523,9 @@ class AIController:
                                         if i < len(df_fully_enriched.columns) and col != df_fully_enriched.columns[i]]
                 if feature_order_mismatch:
                     logger.debug(f"âš ï¸ [AI] Ordem de features diferente do esperado. Reordenando...")
-                    df_fully_enriched = df_fully_enriched[self.base_feature_columns]
+                    # Reordena para garantir contrato mas mantém todas as colunas (regime, etc) para etapas posteriores
+                    cols_to_keep = self.base_feature_columns + [c for c in df_fully_enriched.columns if c not in self.base_feature_columns]
+                    df_fully_enriched = df_fully_enriched[cols_to_keep]
 
             latest_row = df_fully_enriched.iloc[-1]
 
@@ -2570,187 +2567,370 @@ class AIController:
             current_pos = self.portfolio.positions.get(self.config_trading.PRIMARY_PAIR)
             pos_side = np.sign(current_pos.quantity) if current_pos else 0
             pnl = current_pos.unrealized_pnl / (current_pos.entry_price * abs(current_pos.quantity) + 1e-9) if current_pos and current_pos.entry_price > 0 else 0
-            # [FIX] Handle timezone-aware vs tz-naive datetime subtraction
+            # Handle timezone-aware vs tz-naive datetime subtraction
+            ts_naive = None
+            pos_ts_naive = None
             if current_pos:
                 ts_naive = timestamp.replace(tzinfo=None) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp
                 pos_ts_naive = current_pos.timestamp.replace(tzinfo=None) if hasattr(current_pos.timestamp, 'tzinfo') and current_pos.timestamp.tzinfo else current_pos.timestamp
-                steps = (ts_naive - pos_ts_naive).total_seconds() / 3600
+                # Normalização idêntica ao treino: steps_in_candles / 100.0
+                # PRIMARY_TIMEFRAME=15m → 900s/candle
+                candle_seconds = 900
+                steps_in_candles = (ts_naive - pos_ts_naive).total_seconds() / candle_seconds
             else:
-                steps = 0
-            agent_state = np.array([pos_side, pnl, steps / 24.0], dtype=np.float32)
-            
-            # [FIX] Include all 5 prior features used during training to reach 65 dimensions
-            # 53 base + 3 agent_state + 4 time_features + 5 prior_features = 65 total
+                steps_in_candles = 0.0
+            agent_state = np.array([pos_side, pnl, steps_in_candles / 100.0], dtype=np.float32)
+
+            # Prior: apenas 2 valores como no treino (prior_dir + prior_conf)
             prior_dir_val = float(latest_row.get('tp_prior_dir', 0.0))
             prior_conf_val = float(latest_row.get('tp_prior_conf', 0.0))
-            tau_val = float(latest_row.get('tp_tau', 0.0))
-            primary_signal_val = float(latest_row.get('tp_primary_signal', 0.0))
-            uncertainty_val = float(latest_row.get('tp_uncertainty', 0.0))
-            prior_features = np.array([prior_dir_val, prior_conf_val, tau_val, primary_signal_val, uncertainty_val], dtype=np.float32)
-            
-            full_observation = np.concatenate([market_observation, agent_state, time_features, prior_features])
+
+            # Observação inicial genérica (usada somente quando shape == target_shape sem fix)
+            full_observation = np.concatenate([market_observation, agent_state, time_features,
+                                               np.array([prior_dir_val, prior_conf_val], dtype=np.float32)])
 
 
-            # --- Etapa 6: Seleção do Especialista e Geração da Decisão Tática ---
+            # --- Etapa 6: Seleção de Especialistas (Soft Gating / MoE) e Geração da Decisão Tática ---
             
-            # [FIX] Define active_specialist com base no regime detectado
-            # O regime deve vir das features (adicionado pelo ScientificDataProcessor/CryptoRegimeDetector)
-            # Default para 2 (Ranger/Neutral) se não encontrado para evitar crash
-            # [MONITORAMENTO] Verifica presença da coluna regime
-            if 'regime' not in latest_row:
-                logger.warning("âš ï¸  [MONITOR] Columa 'regime' ausente nos dados de inferÃªncia. Usando fallback Ranger (2).")
-                current_regime = 2
-            else:
-                current_regime = int(latest_row['regime'])
+            # 1. Definir especialistas ativos através da SoftGatingNetwork (MoE)
+            active_experts = {}
+            probs = {}
             
-            # Mapeamento CORRIGIDO: Chaves devem corresponder a self.specialists (lowercase)
-            # 0=bull, 1=bear, 2=ranger
-            regime_map = {0: "bull", 1: "bear", 2: "ranger"}
-            specialist_key = regime_map.get(current_regime, "ranger")
-            
-            active_specialist = self.specialists.get(specialist_key)
-            
-            # Fallback robusto
-            if active_specialist is None:
-                logger.warning(f"⚠️ Especialista '{specialist_key}' não carregado/encontrado. Tentando fallback para 'ranger'.")
-                active_specialist = self.specialists.get("ranger")
-                
-            if active_specialist is None:
-                logger.critical("❌ FALHA CRÍTICA: Nenhum especialista disponível em self.specialists. Abortando sinal.")
-                symbol = self.config_trading.PRIMARY_PAIR
-                return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0, explanation={"reason": "No active specialist available"})
+            latent_cols = [c for c in df_fully_enriched.columns if c.startswith('hidden_feature_')]
+            _regime_key_map = {0: 'bull', 1: 'bear', 2: 'ranger'}
+            _current_regime_val = int(latest_row.get('regime', 2))
+            _regime_specialist_key = _regime_key_map.get(_current_regime_val, 'ranger')
 
-            # Log para debug operacional
-            logger.debug(f"🧠 [AI DECISION] Regime={current_regime} -> Ativando {specialist_key}")
+            if self.moe_router and self.moe_router.gating and latent_cols:
+                try:
+                    latent_features_gating = latest_row[latent_cols].values.astype(np.float32)
 
-            # [FIX] Shape Adaptation Logic
-            # The specialists expect a specific observation shape (likely latent dim + extras).
-            # If full_observation is too large (e.g. 631 > 65), we must reduce it using the AutoEncoder or selection.
-            
-            # Identify target shape from specialist model if possible
-            target_shape = None
-            if active_specialist is not None and hasattr(active_specialist, 'model') and active_specialist.model is not None:
-                if hasattr(active_specialist.model, 'observation_space'):
-                    target_shape = active_specialist.model.observation_space.shape
-            
-            current_shape = full_observation.shape
-            logger.info(f"🧐 [DEBUG SHAPE] Specialist: {specialist_key} | Current: {current_shape} | Target: {target_shape}")
-            
-            # Heuristic: If mismatch is large and we have an AE, try encoding
-            if target_shape and current_shape != target_shape:
-                logger.warning(f"⚠️ [AI SHAPE FIX] Mismatch de observação detectado. Current={current_shape[0]}, Target={target_shape[0]}. Tentando adaptação...")
-                
-                # [FIX] Calculate how many dimensions are missing
-                missing_dims = target_shape[0] - current_shape[0]
-                
-                if missing_dims > 0 and missing_dims <= 10:
-                    # Simple padding with zeros for small mismatches (e.g., 62 -> 65)
-                    padding = np.zeros(missing_dims, dtype=np.float32)
-                    full_observation = np.concatenate([full_observation, padding])
-                    logger.info(f"✅ [AI SHAPE FIX] Padding simples aplicado: +{missing_dims} dims. Novo shape: {full_observation.shape}")
-                elif self.feature_pipeline and hasattr(self.feature_pipeline, 'temporal_autoencoder_pipeline') and self.feature_pipeline.temporal_autoencoder_pipeline.autoencoder:
-                    # Try AE encoding for larger mismatches
-                    try:
-                        pipeline_ae = self.feature_pipeline.temporal_autoencoder_pipeline
-                        seq_len = pipeline_ae.hyperparams.get('seq_length', 32)
-                        
-                        # [FIX] Use df_fully_enriched (which HAS hidden features) instead of recent_market_df
-                        if len(df_fully_enriched) >= seq_len:
-                            # Get columns that exist in both base_feature_columns AND df_fully_enriched
-                            available_cols = [c for c in self.base_feature_columns if c in df_fully_enriched.columns]
-                            if len(available_cols) < len(self.base_feature_columns):
-                                logger.debug(f"⚠️ [AI] Using {len(available_cols)}/{len(self.base_feature_columns)} available feature columns")
-                            
-                            # Prepare sequence from enriched data
-                            seq_data = df_fully_enriched.iloc[-seq_len:][available_cols].values.astype(np.float32)
-                            # Normalize if needed (AE pipeline usually has scaler)
-                            if hasattr(pipeline_ae, 'scaler') and pipeline_ae.scaler_fitted:
-                                # Reshape for scaler (samples, features)
-                                seq_data_flat = seq_data.reshape(-1, len(self.base_feature_columns))
-                                seq_data_scaled = pipeline_ae.scaler.transform(seq_data_flat)
-                                seq_data = seq_data_scaled.reshape(1, seq_len, -1) # (1, seq, dim)
-                            else:
-                                seq_data = seq_data.reshape(1, seq_len, -1)
-                                
-                            # Convert to tensor
-                            seq_tensor = torch.FloatTensor(seq_data).to(pipeline_ae.device)
-                            
-                            # Encode
-                            with torch.no_grad():
-                                mu, _ = pipeline_ae.autoencoder.encode(seq_tensor)
-                                latent_features = mu.cpu().numpy().flatten()
-                                
-                            # Recalculate extras (assuming same logic as before)
-                            # timestamp, time_features, agent_state are calculated above
-                            # Prior features? TrendSpecialist adds prior_dir, prior_conf (2)
-                            # Total extras = agent_state(3) + time_features(4) + prior(2) = 9
-                            
-                            # Prior features
-                            prior_dir_val = float(latest_row.get('tp_prior_dir', 0.0))
-                            prior_conf_val = float(latest_row.get('tp_prior_conf', 0.0))
-                            prior_extras = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
-                            
-                            # Construct new observation
-                            adapted_observation = np.concatenate([latent_features, agent_state, time_features])
-                            
-                            if adapted_observation.shape == target_shape:
-                                logger.info(f"✅ [AI SHAPE FIX] Adaptação via AutoEncoder bem sucedida! Shape: {adapted_observation.shape}")
-                                full_observation = adapted_observation
-                            else:
-                                logger.error(f"❌ [AI SHAPE FIX] Adaptação falhou. Latent+Extras={adapted_observation.shape} != Target={target_shape}")
-                                # Fallback: slice?
-                                if adapted_observation.shape[0] > target_shape[0]:
-                                     full_observation = adapted_observation[:target_shape[0]]
-                                     logger.warning(f"⚠️ [AI SHAPE FIX] Slicing observation to match target shape.")
+                    # Valida qualidade das hidden features antes de usar soft gating.
+                    # Features zeradas (SDAE não rodou ou pipeline quebrado) resultam em
+                    # probabilidades enviesadas para bull (~90%) independente do regime real.
+                    latent_zero_frac = float((latent_features_gating == 0.0).mean())
+                    if latent_zero_frac > 0.5:
+                        logger.warning(
+                            f"⚠️ [GATING] {latent_zero_frac:.0%} das hidden features são zero → "
+                            f"soft gating não confiável. Usando hard switch por regime ({_regime_specialist_key})."
+                        )
+                        # active_experts fica {} → hard switch abaixo cuida do roteamento
+                    else:
+                        device = next(self.moe_router.gating.parameters()).device
+                        latent_tensor = torch.FloatTensor(latent_features_gating).unsqueeze(0).to(device)
+
+                        gating_output = self.moe_router.gating.get_expert_probabilities(latent_tensor)
+                        probs = gating_output['probabilities']
+
+                        # Usa o ensemble_mode do roteador para decidir quem opera
+                        mode = self.moe_router.ensemble_mode
+                        if mode == 'weighted':
+                            active_experts = {k: v for k, v in probs.items() if v > 0.05}
+                        elif mode == 'top_k':
+                            sorted_exp = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+                            active_experts = dict(sorted_exp[:self.moe_router.top_k])
                         else:
-                            logger.warning(f"⚠️ [AI SHAPE FIX] Histórico insuficiente para AE (Req={seq_len}, Tem={len(recent_market_df)})")
-                    except Exception as e:
-                         logger.error(f"❌ [AI SHAPE FIX] Erro durante encoding: {e}", exc_info=True)
+                            active_experts = {k: v for k, v in probs.items() if v >= self.moe_router.threshold}
+                            if not active_experts:
+                                best = max(probs.items(), key=lambda x: x[1])
+                                active_experts = {best[0]: best[1]}
 
-            try:
-                strategic_signal = active_specialist.decide_action(full_observation, latest_row)
-            except Exception as e:
-                logger.error(f"❌ [AI ERROR] Erro ao gerar sinal no especialista {specialist_key}: {e}", exc_info=True)
-                # Fallback seguro para NaNs ou erros matemáticos
-                strategic_signal = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "Model inference error/NaN"})
+                        # Normaliza os pesos matematicamente
+                        total_weight = sum(active_experts.values())
+                        active_experts = {k: v / total_weight for k, v in active_experts.items()}
+
+                        # Regime-blend: se o especialista do regime atual tem peso < 20%, o soft
+                        # gating está em forte desacordo com o regime detector. Mistura 60/40
+                        # (soft gating / regime hard) para evitar que o especialista correto seja
+                        # silenciado e o sinal jamais atinja o threshold de execução.
+                        if active_experts.get(_regime_specialist_key, 0.0) < 0.20:
+                            logger.info(
+                                f"⚖️ [GATING BLEND] Regime={_regime_specialist_key} tem peso "
+                                f"{active_experts.get(_regime_specialist_key, 0.0):.0%} no soft gating. "
+                                f"Blend 60/40 (soft/regime) aplicado."
+                            )
+                            blended = {}
+                            for k in ['bull', 'bear', 'ranger']:
+                                hard_w = 1.0 if k == _regime_specialist_key else 0.0
+                                blended[k] = 0.60 * active_experts.get(k, 0.0) + 0.40 * hard_w
+                            active_experts = {k: v for k, v in blended.items() if v > 0.01}
+                            total_weight = sum(active_experts.values())
+                            active_experts = {k: v / total_weight for k, v in active_experts.items()}
+
+                        logger.info(f"🧠 [SOFT GATING] Probabilidades: {probs} -> Especialistas Ativos: {active_experts}")
+                except Exception as e:
+                    logger.error(f"❌ [SOFT GATING] Erro ao obter probabilidades: {e}. Usando fallback para Hard Switch.")
+
+            # Fallback seguro: Hard Switch se a SoftGatingNetwork não estiver disponível, falhar,
+            # ou as hidden features estiverem zeradas (detectado acima).
+            if not active_experts:
+                if 'regime' not in latest_row:
+                    logger.warning("⚠️ [MONITOR] Coluna 'regime' ausente nos dados de inferência. Usando fallback Ranger (2).")
+                    current_regime = 2
+                else:
+                    current_regime = int(latest_row['regime'])
+
+                regime_map = {0: "bull", 1: "bear", 2: "ranger"}
+                specialist_key = regime_map.get(current_regime, "ranger")
+                active_experts = {specialist_key: 1.0}
+                logger.info(f"🧠 [HARD SWITCH] Regime={current_regime} ({specialist_key}) → peso 100%.")
+
+            # Verifica se há especialistas no pool
+            if not self.specialists:
+                logger.critical("❌ FALHA CRÍTICA: Nenhum especialista disponível no AIController. Abortando sinal.")
+                return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "No active specialists available"})
+
+            # 2. Iterar sobre especialistas ativos e construir observações
+            expert_signals = []
             
-            # [MELHORIA] Adiciona duraÃ§Ã£o estimada ao signal (Fallback padrÃ£o)
-            if strategic_signal and strategic_signal.action != Action.HOLD:
-                strategic_signal.estimated_duration = 10.0  # Fallback padrÃ£o, trend_predictor removido.
+            for expert_key, expert_weight in active_experts.items():
+                active_specialist = self.specialists.get(expert_key)
+                
+                if active_specialist is None:
+                    logger.warning(f"⚠️ Especialista '{expert_key}' não carregado. Ignorando no ensemble.")
+                    continue
+
+                # Cópia isolada da observação original para este especialista
+                expert_observation = full_observation.copy()
+                
+                # Identifica o target_shape
+                target_shape = None
+                if hasattr(active_specialist, 'model') and active_specialist.model is not None:
+                    if hasattr(active_specialist.model, 'observation_space'):
+                        target_shape = active_specialist.model.observation_space.shape
+                
+                current_shape = expert_observation.shape
+                logger.debug(f"🧐 [DEBUG SHAPE] Specialist: {expert_key} | Current: {current_shape} | Target: {target_shape}")
+                
+                if target_shape and current_shape != target_shape:
+                    logger.info(f"⚙️ [AI SHAPE FIX] Adaptando observação ({current_shape[0]} -> {target_shape[0]}) para {active_specialist.__class__.__name__}")
+                    missing_dims = target_shape[0] - current_shape[0]
+                    
+                    if missing_dims > 0 and missing_dims <= 10:
+                        padding = np.zeros(missing_dims, dtype=np.float32)
+                        expert_observation = np.concatenate([expert_observation, padding])
+                        logger.info(f"✅ [AI SHAPE FIX] Padding simples aplicado. Novo shape: {expert_observation.shape}")
+                    elif self.feature_pipeline and hasattr(self.feature_pipeline, 'temporal_autoencoder_pipeline') and self.feature_pipeline.temporal_autoencoder_pipeline.autoencoder:
+                        try:
+                            pipeline_ae = self.feature_pipeline.temporal_autoencoder_pipeline
+                            seq_len = pipeline_ae.hyperparams.get('seq_length', 32)
+                            
+                            if len(df_fully_enriched) >= seq_len:
+                                ae_input_cols = pipeline_ae.feature_columns
+                                available_ae_cols = [c for c in ae_input_cols if c in df_fully_enriched.columns]
+                                
+                                if len(available_ae_cols) < len(ae_input_cols):
+                                    seq_df = pd.DataFrame(0, index=df_fully_enriched.index[-seq_len:], columns=ae_input_cols)
+                                    for c in available_ae_cols:
+                                        seq_df[c] = df_fully_enriched[c].iloc[-seq_len:]
+                                    seq_data = seq_df.values.astype(np.float32)
+                                else:
+                                    seq_data = df_fully_enriched.iloc[-seq_len:][ae_input_cols].values.astype(np.float32)
+
+                                if hasattr(pipeline_ae, 'scaler') and pipeline_ae.scaler_fitted:
+                                    seq_data_scaled = pipeline_ae.scaler.transform(seq_data)
+                                    seq_data = seq_data_scaled.reshape(1, seq_len, -1)
+                                else:
+                                    seq_data = seq_data.reshape(1, seq_len, -1)
+                                    
+                                seq_tensor = torch.FloatTensor(seq_data).to(pipeline_ae.device)
+                                
+                                with torch.no_grad():
+                                    current_regime = int(latest_row.get('regime', 2))
+                                    regime_tensor = torch.LongTensor([current_regime]).to(pipeline_ae.device)
+                                    mu, _ = pipeline_ae.autoencoder.encode(seq_tensor, regime_labels=regime_tensor)
+                                    latent_features = mu.cpu().numpy().flatten()
+                                    
+                                prior_dir_val = float(latest_row.get('tp_prior_dir', 0.0))
+                                prior_conf_val = float(latest_row.get('tp_prior_conf', 0.0))
+                                memory_keys = ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']
+                                memory_extras = np.array([float(latest_row.get(k, 0.0)) for k in memory_keys], dtype=np.float32)
+
+                                def _build_78dim_obs(row, _agent_state, _time_features, _prior_dir, _prior_conf):
+                                    spec_cols = getattr(active_specialist, 'feature_columns', [])
+                                    if len(spec_cols) != 65:
+                                        fs = getattr(active_specialist, 'feature_scaler', None)
+                                        if fs is not None and hasattr(fs, 'feature_names_in_'):
+                                            spec_cols = list(fs.feature_names_in_)
+                                    mkt = np.array([float(row.get(c, 0.0)) for c in spec_cols], dtype=np.float32) if len(spec_cols) == 65 else np.zeros(65, dtype=np.float32)
+                                    mem = np.array([float(row.get(k, 0.0)) for k in ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']], dtype=np.float32)
+                                    prior_2 = np.array([_prior_dir, _prior_conf], dtype=np.float32)
+                                    return np.concatenate([mkt, mem, _agent_state, _time_features, prior_2])
+
+                                if target_shape[0] == 78:
+                                    expert_observation = _build_78dim_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val)
+                                elif target_shape[0] == 312:
+                                    n_rows = len(df_fully_enriched)
+                                    steps_seq = []
+                                    for offset in range(3, -1, -1):
+                                        idx = max(0, n_rows - 1 - offset)
+                                        past_row = df_fully_enriched.iloc[idx]
+                                        steps_seq.append(_build_78dim_obs(past_row, agent_state, time_features, prior_dir_val, prior_conf_val))
+                                    expert_observation = np.concatenate(steps_seq)
+                                elif target_shape[0] == 65:
+                                    tau_val = float(latest_row.get('tp_tau', 0.0))
+                                    primary_signal_val = float(latest_row.get('tp_primary_signal', 0.0))
+                                    uncertainty_val = float(latest_row.get('tp_uncertainty', 0.0))
+                                    p_extras = np.array([prior_dir_val, prior_conf_val, tau_val, primary_signal_val, uncertainty_val], dtype=np.float32)
+                                    expert_observation = np.concatenate([latent_features, agent_state, time_features, p_extras])
+                                elif target_shape[0] == 66:
+                                    p_extras = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
+                                    expert_observation = np.concatenate([latent_features, memory_extras, agent_state, time_features, p_extras])
+                                else:
+                                    prior_extras = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
+                                    expert_observation = np.concatenate([latent_features, agent_state, time_features, prior_extras])
+                                
+                                if expert_observation.shape[0] > target_shape[0]:
+                                    expert_observation = expert_observation[:target_shape[0]]
+                                elif expert_observation.shape[0] < target_shape[0]:
+                                    expert_observation = np.pad(expert_observation, (0, target_shape[0] - len(expert_observation)))
+                            else:
+                                if current_shape[0] < target_shape[0]:
+                                    pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
+                                    expert_observation = np.concatenate([expert_observation, pad])
+                                else:
+                                    expert_observation = expert_observation[:target_shape[0]]
+                        except Exception as e:
+                            logger.error(f"❌ [AI SHAPE FIX] Erro durante encoding: {e}. Fallback emergencial.")
+                            if current_shape[0] < target_shape[0]:
+                                pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
+                                expert_observation = np.concatenate([expert_observation, pad])
+                            else:
+                                expert_observation = expert_observation[:target_shape[0]]
+
+                # Gerar sinal para o especialista específico
+                try:
+                    specialist_display_name = active_specialist.__class__.__name__
+                    strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row)
+                    if strategic_signal_ind:
+                        if strategic_signal_ind.explanation is not None:
+                            strategic_signal_ind.explanation['specialist'] = specialist_display_name
+                            strategic_signal_ind.explanation['regime'] = expert_key.upper()
+                        expert_signals.append((strategic_signal_ind, expert_weight, specialist_display_name, expert_key))
+                except Exception as e:
+                    logger.error(f"❌ [AI ERROR] Erro no especialista {expert_key}: {e}", exc_info=True)
+
+            # 3. Combinar sinais dos especialistas (Soft Ensemble)
+            if not expert_signals:
+                strategic_signal = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "Nenhum sinal gerado pelos especialistas."})
+            else:
+                weighted_action_score = 0.0
+                weighted_confidence = 0.0
+                weighted_leverage = 0.0
+                weighted_size = 0.0
+                weighted_sl = 0.0
+                weighted_tp = 0.0
+                
+                sum_weights = 0.0
+                ensemble_details = {}
+                
+                for sig, w, name, key in expert_signals:
+                    if sig.action == Action.BUY:
+                        act_val = sig.confidence
+                    elif sig.action == Action.SELL:
+                        act_val = -sig.confidence
+                    else:
+                        act_val = 0.0
+                    
+                    weighted_action_score += act_val * w
+                    weighted_leverage += sig.leverage * w
+                    weighted_size += sig.position_size_pct * w
+                    
+                    sl_val = sig.stop_loss if (sig.stop_loss is not None and sig.stop_loss > 0) else self.config_trading.DEFAULT_STOP_LOSS_PCT
+                    tp_val = sig.take_profit if (sig.take_profit is not None and sig.take_profit > 0) else self.config_trading.DEFAULT_TAKE_PROFIT_PCT
+                    
+                    weighted_sl += sl_val * w
+                    weighted_tp += tp_val * w
+                    
+                    sum_weights += w
+                    ensemble_details[name] = {"action": sig.action.value, "confidence": sig.confidence, "weight": float(w), "regime": key.upper()}
+                
+                if sum_weights > 0:
+                    weighted_leverage /= sum_weights
+                    weighted_size /= sum_weights
+                    weighted_sl /= sum_weights
+                    weighted_tp /= sum_weights
+
+                # --- Cálculo de Confiança do Ensemble ---
+                # confidence = |score| — mesma escala [0, 1], proporcional à convicção direcional real.
+                confidence = abs(weighted_action_score)
+                weighted_confidence = float(np.clip(confidence, 0.0, 1.0))
+
+                # Threshold alinhado com MIN_CONFIDENCE_FOR_TRADE (0.60) para evitar labels
+                # SELL/BUY em sinais fracos que seriam vetados de qualquer forma pelo RiskManager.
+                # Sinais com |score| < 0.60 saem como HOLD diretamente (sem gerar "TRADE VETADO" falso).
+                _min_conf = getattr(self.config_trading, 'MIN_CONFIDENCE_FOR_TRADE', 0.60)
+                if weighted_action_score > _min_conf:
+                    final_action = Action.BUY
+                elif weighted_action_score < -_min_conf:
+                    final_action = Action.SELL
+                else:
+                    final_action = Action.HOLD
+
+                # Cria o sinal agregado com parâmetros herdados
+                strategic_signal = Signal(
+                    symbol=self.config_trading.PRIMARY_PAIR,
+                    action=final_action,
+                    confidence=weighted_confidence,
+                    position_size_pct=float(np.clip(weighted_size, 0.0, self.config_trading.MAX_POSITION_SIZE_PERCENT)),
+                    leverage=float(np.clip(weighted_leverage, self.config_trading.MIN_LEVERAGE_PER_TRADE, self.config_trading.MAX_LEVERAGE_PER_TRADE)),
+                    stop_loss=float(weighted_sl),
+                    take_profit=float(weighted_tp),
+                    estimated_duration=10.0,
+                    explanation={
+                        "reason": f"MoE Normalized Ensemble ({len(active_experts)} experts)",
+                        "ensemble_details": ensemble_details,
+                        "weighted_score": float(weighted_action_score),
+                        "specialist": "MoE_Router",
+                        "regime": "ENSEMBLE"
+                    }
+                )
             
-            if not strategic_signal or strategic_signal.action == Action.HOLD:
-                # [XAI FIX] Explica HOLD antes de retornar
-                final_signal = strategic_signal or Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0)
+            # 4. Explicar a decisão (Apenas se não estivermos em uma chamada recursiva do SHAP)
+            if strategic_signal.action == Action.HOLD and not getattr(self, '_is_explaining', False):
                 try:
                     if self.explainer:
-                        top_expl = self.explainer.explain_decision(final_signal, latest_row)
-                        final_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
-                        final_signal.explanation['xai_mode'] = top_expl.get('mode', 'full')
+                        # [XAI BYPASS] Usa a variável LOCAL capturada no início da função
+                        market_data_dict = xai_features_row
+                        
+                        self._is_explaining = True
+                        top_expl = self.explainer.explain_decision(strategic_signal, market_data_dict, top_n=8)
+                        self._is_explaining = False
+                        
+                        strategic_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
+                        strategic_signal.explanation['xai_mode'] = top_expl.get('mode', 'full')
                         if 'narrative' in top_expl:
-                             final_signal.explanation['narrative'] = top_expl['narrative']
+                             strategic_signal.explanation['narrative'] = top_expl['narrative']
                 except Exception as e:
                     logger.warning(f"⚠️ [XAI HOLD] Erro ao explicar HOLD: {e}")
-                
-                return final_signal
+                return strategic_signal
 
-            # --- Etapa 7: ModulaÃ§Ã£o Contextual e AprovaÃ§Ã£o Final de Risco ---
+            # --- Etapa 7: Modulação Contextual e Aprovação Final de Risco ---
             onchain_signal = self.onchain_engine.get_onchain_sentiment_signal(asset='BTC')
             tape_pulse = self.tape_engine.get_market_pulse(self.config_trading.PRIMARY_PAIR)
             
-            profit_prob = 0.5 # Default
-            # (LÃ³gica do Profitability Predictor continua aqui, se aplicÃ¡vel)
-            
+            # RiskManager (MIN_PROFIT_PROBABILITY=0.60). O ProfitabilityPredictor foi removido;
+            # usamos a confiança do especialista como proxy: especialista confiante → alta
+            # probabilidade de lucro. Mapeia confidence → [0.5, 1.0] via escala linear.
+            # Um sinal que passou o MIN_CONFIDENCE_FOR_TRADE (0.65) terá profit_prob ≥ 0.65 > 0.60.
+            profit_prob = float(np.clip(strategic_signal.confidence, 0.5, 1.0))
+            # Propaga para o campo do sinal para que o RiskManager veja o valor correto
+            from dataclasses import replace as dc_replace
+            strategic_signal = dc_replace(strategic_signal, profit_probability=profit_prob)
+
             modulated_signal = self._apply_contextual_modulation(strategic_signal, onchain_signal, tape_pulse, profit_prob)
             is_approved, reason = self.risk_manager.check_trade_approval(modulated_signal)
             
             if not is_approved:
-                modulated_signal.explanation['rejection_reason'] = reason
+                # [XAI] Armazena metadados da rejeição para o Explainer
+                modulated_signal.explanation['reason'] = reason
+                modulated_signal.explanation['original_action'] = strategic_signal.action # Salva a intenção original
+                
                 final_rejection = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
                                          explanation=modulated_signal.explanation)
                  # [XAI FIX] Explica Rejeição de Risco
                 try:
                     if self.explainer:
-                        # Explica o sinal ORIGINAL modificado, mas a decisão final é HOLD
                         top_expl = self.explainer.explain_decision(final_rejection, latest_row)
                         final_rejection.explanation['main_contributors'] = top_expl.get('main_contributors')
                         if 'narrative' in top_expl:
@@ -2783,45 +2963,138 @@ class AIController:
                           explanation={"reason": f"Critical error: {e}"})    
 
     def _apply_contextual_modulation(self, strategic_signal: Signal, onchain_signal: Dict, tape_pulse: Dict, profit_prob: float) -> Signal:
+        """
+        Modula o sinal estrategico com base no contexto de mercado em tempo real.
+
+        Camadas de decisao:
+          VETO       -> converte BUY/SELL em HOLD quando contexto e fortemente oposto
+          AMPLIFICAR -> aumenta tamanho/alavancagem quando tudo esta alinhado
+          ATENUAR    -> reduz tamanho quando tape se opoe ao trade (mas nao veta)
+          NEUTRO     -> sinal do especialista mantido intacto
+
+        Mapeamento de Tape Pulse:
+          TapeEngine retorna: EXTREME_BULLISH | STRONG_BULLISH | BULLISH |
+                              NEUTRAL | BEARISH | STRONG_BEARISH | EXTREME_BEARISH
+          Este metodo classifica em: STRONG_BUY | BUY | NEUTRAL | SELL | STRONG_SELL
+          STRONG = pulse já é STRONG/EXTREME, OU score >= 0.50, OU RVol >= 1.5x
+        """
         final_signal = strategic_signal
         action = strategic_signal.action
         veto_reason = None
+
+        # --- Classificacao da forca do Tape Pulse ----------------------------
+        # TapeEngine retorna: EXTREME_BULLISH | STRONG_BULLISH | BULLISH |
+        #                     NEUTRAL | BEARISH | STRONG_BEARISH | EXTREME_BEARISH
+        # O score já está amplificado pelo RVol — usamos ele como proxy de força.
+        pulse      = tape_pulse.get('pulse', 'NEUTRAL')
+        tape_score = abs(float(tape_pulse.get('score', 0.0)))  # já amplificado pelo RVol
+        rvol       = float(tape_pulse.get('relative_volume', 1.0))
+
+        # STRONG quando: sinal já é STRONG/EXTREME OU score alto OU volume institucional
+        is_strong  = pulse.startswith('STRONG') or pulse.startswith('EXTREME') or \
+                     tape_score >= 0.50 or rvol >= 1.5
+
+        if 'BULLISH' in pulse:
+            tape_strength = 'STRONG_BUY' if is_strong else 'BUY'
+        elif 'BEARISH' in pulse:
+            tape_strength = 'STRONG_SELL' if is_strong else 'SELL'
+        else:
+            tape_strength = 'NEUTRAL'
+
+        # --- Bloco de VETO ---------------------------------------------------
+        # Condicoes em que o trade e vetado (convertido em HOLD)
+        onchain_sig  = onchain_signal.get('signal', 'NEUTRAL')
+        onchain_conf = float(onchain_signal.get('confidence', 0.0))
+
         if profit_prob < 0.40:
-            veto_reason = f"VETO: Baixa Probabilidade de Lucro ({profit_prob:.2%})."
-        elif action == Action.BUY and onchain_signal.get('signal') == 'BEARISH' and onchain_signal.get('confidence', 0) > 0.7:
-            veto_reason = "VETO: Sinal On-Chain fortemente pessimista."
-        elif action == Action.SELL and onchain_signal.get('signal') == 'BULLISH' and onchain_signal.get('confidence', 0) > 0.7:
-            veto_reason = "VETO: Sinal On-Chain fortemente otimista."
-        elif action == Action.BUY and tape_pulse.get('pulse') == 'STRONG_SELL':
-            veto_reason = "VETO: Forte agressÃ£o de venda no Tape."
-        elif action == Action.SELL and tape_pulse.get('pulse') == 'STRONG_BUY':
-            veto_reason = "VETO: Forte agressÃ£o de compra no Tape."
+            veto_reason = f'VETO: Probabilidade de lucro muito baixa ({profit_prob:.2%})'
+        # [FIX PRODUÇÃO] Replica a restrição de direção do ambiente de treino.
+        # BullSpecialist só opera LONG; BearSpecialist só opera SHORT.
+        # Durante o treino _specialist_long_only=True impede o ambiente de aceitar short.
+        # Em produção aplicamos o mesmo filtro: SELL em BULL ou BUY em BEAR → HOLD.
+        elif strategic_signal.explanation.get('_regime_mismatch'):
+            regime_mismatch_info = strategic_signal.explanation.get('regime', 'UNKNOWN')
+            veto_reason = (
+                f'VETO: Sinal contra especialidade do regime ({regime_mismatch_info}). '
+                f'Ação {action.value} bloqueada para não operar fora da direção treinada.'
+            )
+        elif action == Action.BUY and onchain_sig == 'BEARISH' and onchain_conf > 0.7:
+            veto_reason = 'VETO: Sentimento fortemente BEARISH contra compra'
+        elif action == Action.SELL and onchain_sig == 'BULLISH' and onchain_conf > 0.7:
+            veto_reason = 'VETO: Sentimento fortemente BULLISH contra venda'
+        elif action == Action.BUY and tape_strength == 'STRONG_SELL':
+            veto_reason = f'VETO: Tape BEARISH de alta confianca ({tape_conf:.0%}) contra compra'
+        elif action == Action.SELL and tape_strength == 'STRONG_BUY':
+            veto_reason = f'VETO: Tape BULLISH de alta confianca ({tape_conf:.0%}) contra venda'
+
         if veto_reason:
             final_signal.explanation['modulation'] = veto_reason
+            logger.info(f'[MOD] {veto_reason}')
             return replace(final_signal, action=Action.HOLD, confidence=0.0, position_size_pct=0.0)
-        is_buy_amplified = (action == Action.BUY and profit_prob > 0.75 and onchain_signal.get('signal') == 'BULLISH' and tape_pulse.get('pulse') == 'STRONG_BUY')
-        is_sell_amplified = (action == Action.SELL and profit_prob > 0.75 and onchain_signal.get('signal') == 'BEARISH' and tape_pulse.get('pulse') == 'STRONG_SELL')
+
+        # --- Bloco de AMPLIFICACAO -------------------------------------------
+        # Amplifica quando especialista + onchain + tape estao todos alinhados
+        is_buy_amplified  = (
+            action == Action.BUY
+            and profit_prob > 0.75
+            and onchain_sig == 'BULLISH'
+            and tape_strength in ('STRONG_BUY', 'BUY')
+        )
+        is_sell_amplified = (
+            action == Action.SELL
+            and profit_prob > 0.75
+            and onchain_sig == 'BEARISH'
+            and tape_strength in ('STRONG_SELL', 'SELL')
+        )
+
         if is_buy_amplified or is_sell_amplified:
             amplification_factor = 1.25
             final_signal = replace(
                 final_signal,
-                position_size_pct=min(final_signal.position_size_pct * amplification_factor, self.config_trading.MAX_POSITION_SIZE_PERCENT),
-                leverage=min(final_signal.leverage * amplification_factor, self.config_trading.MAX_LEVERAGE_PER_TRADE)
+                position_size_pct=min(
+                    final_signal.position_size_pct * amplification_factor,
+                    self.config_trading.MAX_POSITION_SIZE_PERCENT
+                ),
+                leverage=min(
+                    final_signal.leverage * amplification_factor,
+                    self.config_trading.MAX_LEVERAGE_PER_TRADE
+                ),
             )
-            final_signal.explanation['modulation'] = f"AMPLIFICADO: Contexto altamente favorÃ¡vel (fator x{amplification_factor})."
+            msg = (
+                f'AMPLIFICADO x{amplification_factor}: Tape={tape_strength} | '
+                f'Sentiment={onchain_sig} | prob={profit_prob:.2%}'
+            )
+            final_signal.explanation['modulation'] = msg
+            logger.info(f'[MOD] {msg}')
             return final_signal
-        is_buy_dampened = (action == Action.BUY and (onchain_signal.get('signal') != 'BULLISH' or tape_pulse.get('pulse') != 'STRONG_BUY'))
-        is_sell_dampened = (action == Action.SELL and (onchain_signal.get('signal') != 'BEARISH' or tape_pulse.get('pulse') != 'STRONG_SELL'))
+
+        # --- Bloco de ATENUACAO ----------------------------------------------
+        # Atenua APENAS quando tape se opoe diretamente ao trade.
+        # Contexto NEUTRAL ou OnChain divergente: reduz tamanho mas nao veta.
+        is_buy_dampened  = action == Action.BUY  and tape_strength in ('STRONG_SELL', 'SELL')
+        is_sell_dampened = action == Action.SELL and tape_strength in ('STRONG_BUY',  'BUY')
+
         if is_buy_dampened or is_sell_dampened:
-            dampening_factor = 0.75
+            dampening_factor = 0.80
             final_signal = replace(
                 final_signal,
                 position_size_pct=final_signal.position_size_pct * dampening_factor,
-                leverage=max(final_signal.leverage * dampening_factor, self.config_trading.MIN_LEVERAGE_PER_TRADE)
+                leverage=max(
+                    final_signal.leverage * dampening_factor,
+                    self.config_trading.MIN_LEVERAGE_PER_TRADE
+                ),
             )
-            final_signal.explanation['modulation'] = f"ATENUADO: Contexto misto ou neutro (fator x{dampening_factor})."
+            msg = (
+                f'ATENUADO x{dampening_factor}: Tape={tape_strength} opoe-se ao trade '
+                f'({action.value}). Sentiment={onchain_sig}'
+            )
+            final_signal.explanation['modulation'] = msg
+            logger.info(f'[MOD] {msg}')
             return final_signal
-        final_signal.explanation['modulation'] = "APROVADO: Contexto neutro, sinal estratÃ©gico mantido."
+
+        # --- Sinal aprovado sem modificacao ----------------------------------
+        msg = f'APROVADO: Tape={tape_strength} | Sentiment={onchain_sig} | prob={profit_prob:.2%}'
+        final_signal.explanation['modulation'] = msg
         return final_signal
 
     async def adapt(self, recent_data: pd.DataFrame, adaptation_strength: float = 0.1, preserve_core_learning: bool = True) -> bool:

@@ -17,7 +17,13 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('trading/callbacks/holdout_validation_callback.py', encoding='utf-8'\\).read\\(\\)\\); print\\('holdout_validation_callback.py OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('specialists/trend_specialist.py', encoding='utf-8'\\).read\\(\\)\\); print\\('trend_specialist.py OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('trading/callbacks/holdout_validation_callback.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('trading/callbacks/holdout_validation_callback.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('specialists/trend_specialist.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('trading/callbacks/holdout_validation_callback.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('specialists/trend_specialist.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('run_bot.py', encoding='utf-8'\\).read\\(\\)\\); print\\('run_bot.py OK'\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('feature_engineering/temporal_autoencoder.py', encoding='utf-8'\\).read\\(\\)\\); print\\('temporal_autoencoder.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('run_bot.py', encoding='utf-8'\\).read\\(\\)\\); print\\('run_bot.py OK'\\)\")",
+      "Bash(awk '{print $9, \"\\(\" $5 \"\\)\"}')",
+      "Bash(python -m py_compile trading/ai_controller.py)",
+      "Bash(python -m py_compile specialists/trend_specialist.py)"
     ]
   }
 }

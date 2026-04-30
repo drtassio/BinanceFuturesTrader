@@ -49,6 +49,8 @@ class BullSpecialist(BaseRegimeSpecialist):
             "position_bias": "long_only",      # Apenas Long
         })
         
+        # [FIX PRODUÇÃO] Marca direção exclusiva para filtro no decide_action
+        self._specialist_direction = 'long_only'
         logger.info("🐂 Bull Specialist configurado para operações Long only")
 
     def get_action(self, state: np.ndarray, context: Dict[str, Any] = None) -> Dict[str, Any]:

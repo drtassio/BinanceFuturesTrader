@@ -1806,9 +1806,25 @@ class TemporalAutoencoderPipeline:
             
             # Cria sequências
             seq_length = self.hyperparams['seq_length']
+            original_len = len(numeric_data)
+            pad_applied  = 0
+
+            if original_len < seq_length:
+                # [FIX] Janela de inferência curta (ex: live trading com 40 linhas).
+                # Solução: replica a primeira linha para preencher o início até seq_length.
+                # O latent gerado representa o último ponto disponível — válido para decisão.
+                pad_rows    = seq_length - original_len
+                padding     = np.tile(numeric_data[0:1, :], (pad_rows, 1))
+                numeric_data = np.vstack([padding, numeric_data])
+                pad_applied  = pad_rows
+                logger.warning(
+                    f"⚠️ [SDAE] Janela curta ({original_len} rows < seq_length={seq_length}). "
+                    f"Padding de {pad_rows} linhas aplicado para inferência."
+                )
+
             sequences = self._create_sequences(numeric_data, seq_length)
             if len(sequences) == 0:
-                raise ValueError("Sequências vazias")
+                raise ValueError("Sequências vazias após padding")
             
             # Gera features latentes
             latents: List[np.ndarray] = []
@@ -1851,9 +1867,12 @@ class TemporalAutoencoderPipeline:
             
             # Cria DataFrame
             latent_columns = [f'hidden_feature_{i}' for i in range(all_latents.shape[1])]
-            latent_start_idx = seq_length - 1
-            latent_end_idx = len(df)
-            
+            # [FIX PADDING] Com padding aplicado, o índice inicial desloca para trás:
+            # Sem padding: latent_start_idx = seq_length - 1
+            # Com padding: latent_start_idx = seq_length - 1 - pad_applied = original_len - 1
+            latent_start_idx = seq_length - 1 - pad_applied
+            latent_end_idx   = len(df)
+
             if latent_start_idx >= len(df):
                 raise ValueError(f"Sequência muito longa ({seq_length}) para DataFrame pequeno ({len(df)})")
             
@@ -1906,18 +1925,29 @@ class TemporalAutoencoderPipeline:
                 result_df['regime'] = result_df['regime_val']
 
             
-            # Forward fill
-            result_df[latent_columns] = result_df[latent_columns].ffill()
-            result_df['sdae_recon_error'] = result_df['sdae_recon_error'].ffill().fillna(0.0)
-            result_df['hidden_uncertainty'] = result_df['hidden_uncertainty'].ffill().fillna(0.0)
+            # [FIX AGRESSIVO] Forward fill para garantir que a última linha tenha dados
+            # Se o AE não conseguiu processar o candle atual (ex: delay de dados), 
+            # usamos o estado latente imediatamente anterior.
+            result_df[latent_columns] = result_df[latent_columns].ffill().bfill()
+            result_df['sdae_recon_error'] = result_df['sdae_recon_error'].ffill().bfill().fillna(0.0)
+            result_df['hidden_uncertainty'] = result_df['hidden_uncertainty'].ffill().bfill().fillna(0.0)
             
             # Fill regime cols if they were added
             if 'regime_confidence' in result_df.columns:
-                result_df['regime_confidence'] = result_df['regime_confidence'].fillna(0.5) 
-                result_df['regime_val'] = result_df['regime_val'].fillna(2)
-                # [FIX ROBUST] Ensure alias is sync with filled values
+                result_df['regime_confidence'] = result_df['regime_confidence'].ffill().fillna(0.5) 
+                result_df['regime_val'] = result_df['regime_val'].ffill().fillna(2)
                 if 'regime' in result_df.columns:
                      result_df['regime'] = result_df['regime_val']
+
+            # Log de Verificação Final para a última linha (Crítico para XAI)
+            last_latents = result_df[latent_columns].iloc[-1]
+            nan_count = last_latents.isna().sum()
+            zero_count = (last_latents == 0.0).sum()
+            if nan_count > 0 or zero_count == len(latent_columns):
+                logger.warning(f"⚠️ [SDAE] Atenção: Última linha contém {nan_count} NaNs e {zero_count} Zeros nas Hidden Features.")
+            else:
+                sample_val = last_latents.values[:3].tolist()
+                logger.info(f"✅ [SDAE] Latentes prontas para a decisão: {len(latent_columns)} cols | Amostra: {sample_val}")
 
             # DEBUG
             if 'regime' not in result_df.columns:

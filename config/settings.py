@@ -1,4 +1,4 @@
-﻿# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # ARQUIVO: config/settings.py
 # -----------------------------------------------------------------------------
 
@@ -67,24 +67,25 @@ class Config:
     if FAST_STARTUP:
         logger.info("⚡ [CONFIG] Modo FAST_STARTUP ativo. Inicialização otimizada para paper trading.")
 
+    # Telegram Bot — alertas instantâneos + relatório horário
+    # Obtenha o token via @BotFather e o chat_id via @userinfobot
+    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    TELEGRAM_CHAT_ID   = os.environ.get('TELEGRAM_CHAT_ID', '')
+
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
-        logger.critical("ðŸš¨ [CRÃTICO CONFIG] Chaves de API da Binance nÃ£o definidas. O bot NÃƒO poderÃ¡ operar em modo LIVE ou PAPER.")
+        logger.critical("ðŸš¨ [CRÃ TICO CONFIG] Chaves de API da Binance nÃ£o definidas. O bot NÃƒO poderÃ¡ operar em modo LIVE ou PAPER.")
 
-    SANTIMENT_API_KEY = os.environ.get('SANTIMENT_API_KEY')
-    if not SANTIMENT_API_KEY:
-        logger.warning("âš ï¸ [ALERTE CONFIG] SANTIMENT_API_KEY nÃ£o configurada. MÃ©tricas da Santiment nÃ£o serÃ£o coletadas.")
+    pass
 
-    COINGECKO_API_KEY = os.environ.get('COINGECKO_API_KEY')
-    NEWS_API_KEY = os.environ.get('NEWS_API_KEY')
 
 class TradingConfig(Config):
     """ConfiguraÃ§Ãµes especÃ­ficas para o sistema de trading e gerenciamento de risco."""
     INITIAL_CAPITAL = float(os.environ.get('INITIAL_CAPITAL', 100.0))
     if INITIAL_CAPITAL <= 0:
-        logger.error("âŒ [ERRO CONFIG] INITIAL_CAPITAL deve ser um valor positivo. Usando padrÃ£o 100000.0.")
+        logger.error("â Œ [ERRO CONFIG] INITIAL_CAPITAL deve ser um valor positivo. Usando padrÃ£o 100000.0.")
         INITIAL_CAPITAL = 200
 
-    TRADING_PAIRS = os.environ.get('TRADING_PAIRS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOTUSDT,LINKUSDT,MATICUSDT').split(',')
+    TRADING_PAIRS = os.environ.get('TRADING_PAIRS', 'BTCUSDT').split(',')
     PRIMARY_PAIR = os.environ.get('PRIMARY_PAIR', 'BTCUSDT')
     if PRIMARY_PAIR not in TRADING_PAIRS:
     
@@ -100,14 +101,14 @@ class TradingConfig(Config):
 
 
     MAX_PORTFOLIO_RISK_PERCENT = float(os.environ.get('MAX_PORTFOLIO_RISK_PERCENT', 0.02)) # Risco por trade como % do portfÃ³lio
-    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.10)) # Max % do capital para MARGEM
+    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.15)) # Max % do capital para MARGEM (Subiu de 10% para 15%)
     MAX_TOTAL_EXPOSURE_PERCENT = float(os.environ.get('MAX_TOTAL_EXPOSURE_PERCENT', 0.80)) # Max % do capital para EXPOSIÃ‡ÃƒO TOTAL (valor nocional)
 
     # --- ConfiguraÃ§Ãµes de Alavancagem DinÃ¢mica ---
     # MAX_LEVERAGE Ã© a alavancagem mÃ¡xima permitida pela exchange ou pelo seu sistema.
     # MAX_LEVERAGE_PER_TRADE Ã© o limite que o agente pode *predizer* ou que o RiskManager pode *permitir*.
     MAX_LEVERAGE = float(os.environ.get('MAX_LEVERAGE', 5.0)) # MÃ¡ximo de alavancagem permitida pela corretora
-    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 3.0)) # Limite que o agente pode usar
+    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 5.0)) # Limite que o agente pode usar (Subiu de 3x para 5x)
     MIN_LEVERAGE_PER_TRADE = float(os.environ.get('MIN_LEVERAGE_PER_TRADE', 1.0)) # MÃ­nimo de alavancagem
     LEVERAGE_PREDICTION_RANGE = (MIN_LEVERAGE_PER_TRADE, MAX_LEVERAGE_PER_TRADE) # Range para a aÃ§Ã£o de alavancagem do agente
     LEVERAGE_COST_PER_DAY_PCT = float(os.environ.get('LEVERAGE_COST_PER_DAY_PCT', 0.0003)) # Custo diÃ¡rio da alavancagem (para funding fee, se aplicÃ¡vel em simulaÃ§Ã£o)
@@ -136,7 +137,11 @@ class TradingConfig(Config):
     MAX_DRAWDOWN_PERCENT = float(os.environ.get('MAX_DRAWDOWN_PERCENT', 0.15))
     MIN_SHARPE_RATIO = float(os.environ.get('MIN_SHARPE_RATIO', 0.8))
     MIN_SORTINO_RATIO = float(os.environ.get('MIN_SORTINO_RATIO', 1.2))
-    KELLY_FRACTION = float(os.environ.get('KELLY_FRACTION', 0.5))
+    KELLY_FRACTION = float(os.environ.get('KELLY_FRACTION', 0.6)) # Fração de Kelly (Subiu de 0.5 para 0.6 para mais agressividade)
+    
+    # --- Parâmetros de Qualidade do Sinal ---
+    MIN_CONFIDENCE_FOR_TRADE = float(os.environ.get('MIN_CONFIDENCE_FOR_TRADE', 0.60))
+    MIN_PROFIT_PROBABILITY = float(os.environ.get('MIN_PROFIT_PROBABILITY', 0.55))
 
     # --- Taxas de Trading Reais da Binance Futures VIP0 (BTCUSDT Perp) ---
     # Documentação: https://www.binance.com/en/fee/trading
@@ -161,6 +166,9 @@ class TradingConfig(Config):
         SLIPPAGE_BPS = max(1, int(round((total_slip_pct / 2.0) * 10000.0)))
 
     EXECUTION_TIMEOUT_SECONDS = int(os.environ.get('EXECUTION_TIMEOUT_SECONDS', 45))
+    # [FIX 8] Tempo máximo que uma ordem LIMIT pode ficar pendente antes de ser cancelada
+    # e re-executada como MARKET. 300s = 5 minutos. Ajustável via .env LIMIT_ORDER_TIMEOUT_SECONDS.
+    LIMIT_ORDER_TIMEOUT_SECONDS = int(os.environ.get('LIMIT_ORDER_TIMEOUT_SECONDS', 300))
     TWAP_DURATION_MINUTES = int(os.environ.get('TWAP_DURATION_MINUTES', 15))
     VWAP_LOOKBACK_PERIODS = int(os.environ.get('VWAP_LOOKBACK_PERIODS', 30))
     TWAP_THRESHOLD_PCT = float(os.environ.get('TWAP_THRESHOLD_PCT', 0.05)) # Percentual do portfÃ³lio para acionar TWAP (0.05 = 5%)
@@ -261,10 +269,10 @@ class AIConfig(Config):
     TECHNICAL_INDICATORS = ['RSI', 'MACD', 'BollingerBands', 'ATR', 'EMA_Fast', 'EMA_Slow', 'Stochastic', 'WilliamsR', 'CCI', 'ROC', 'OBV', 'VWAP', 'ADX']
     REGIME_DETECTION_WINDOW = int(os.environ.get('REGIME_DETECTION_WINDOW', 100))
     REGIMES = ['trending_up', 'trending_down', 'sideways_volatile', 'sideways_calm', 'high_volatility_expansion']
-    MIN_CONFIDENCE_FOR_TRADE = float(os.environ.get('MIN_CONFIDENCE_FOR_TRADE', 0.65))
+    MIN_CONFIDENCE_FOR_TRADE = float(os.environ.get('MIN_CONFIDENCE_FOR_TRADE', 0.60))
     
     MIN_CONFIDENCE_FOR_LEVERAGE = float(os.environ.get('MIN_CONFIDENCE_FOR_LEVERAGE', 0.75)) # Nova config para alavancagem
-    MIN_PROFIT_PROBABILITY = float(os.environ.get('MIN_PROFIT_PROBABILITY', 0.60)) # Filtro de qualidade de sinal (P)
+    MIN_PROFIT_PROBABILITY = float(os.environ.get('MIN_PROFIT_PROBABILITY', 0.55)) # Filtro de qualidade de sinal (P)
 
     # --- ConfiguraÃ§Ãµes da FunÃ§Ã£o de Recompensa Refinada ---
     REWARD_PNL_WEIGHT = float(os.environ.get('REWARD_PNL_WEIGHT', 3.0))  # Aumentado para dar mais peso ao PnL

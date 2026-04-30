@@ -94,16 +94,25 @@ class PortfolioOptimizer:
             if abs(new_quantity) < 1e-9: # Posição completamente fechada
                 if symbol in self.positions:
                     del self.positions[symbol]
-                logger.info(f"✅ [PORTFOLIO] Posição em {symbol} completamente fechada.")
+                logger.info(f"✅ [PORTFOLIO] Posicao em {symbol} completamente fechada.")
             else:
-                # Se houver uma nova posição líquida (mesmo lado ou reversão total)
+                # [BUG FIX] Distinguir entre reversao total (nova direcao) e fechamento parcial:
+                # - Reversao total (sinal oposto, new_quantity muda de sinal): usar executed_price como novo entry
+                # - Fechamento parcial (mesma direcao, new_quantity reducao): manter entry_price original
+                is_reversal = (current_position is not None and
+                               abs(new_quantity) > 1e-9 and
+                               (new_quantity > 0) != (current_position.quantity > 0))
+                if current_position is None or is_reversal:
+                    new_entry = executed_price  # Nova posicao na direcao oposta
+                else:
+                    new_entry = current_position.entry_price  # Fechamento parcial: manter entry original
                 self.positions[symbol] = Position(
                     symbol=symbol,
                     quantity=new_quantity,
-                    entry_price=executed_price, # Novo preço de entrada para a nova posição líquida
+                    entry_price=new_entry,
                     timestamp=trade.timestamp
                 )
-                logger.debug(f"📈 [PORTFOLIO] Nova posição em {symbol}: {new_quantity:.4f} @ ${executed_price:.2f}.")
+                logger.debug(f"📈 [PORTFOLIO] Posicao em {symbol}: {new_quantity:.4f} @ ${new_entry:.2f} ({'reversao' if is_reversal else 'fechamento parcial'}).")
 
         # Cenário 2: Aumentando uma posição existente na mesma direção
         elif (current_position.quantity > 0 and trade_is_long) or (current_position.quantity < 0 and trade_is_short):
@@ -167,10 +176,24 @@ class PortfolioOptimizer:
                 # Usa o PnL não realizado anterior ou 0.0 se não tiver preço atual
 
         self.total_notional_value = current_notional_value
-        
+
+        # [FIX 9] Recalcula margin_used a partir das posições abertas.
+        # Necessário em paper trading onde a exchange não sincroniza esse valor.
+        # margin = notional / leverage. Se a posição não tem leverage definida, assume 1x.
+        computed_margin = 0.0
+        for symbol, position in self.positions.items():
+            price = self.last_prices.get(symbol, position.entry_price)
+            notional = abs(position.quantity) * price
+            lev = float(getattr(position, 'leverage', None) or 1.0)
+            lev = max(lev, 1.0)  # nunca divide por menos de 1
+            computed_margin += notional / lev
+        # Só sobrescreve se não houve sync recente da exchange (live mode sincroniza externamente)
+        if computed_margin > 0.0 or self.margin_used == 0.0:
+            self.margin_used = computed_margin
+
         # O valor total do portfólio é o cash + PnL não realizado
         # Assumindo que 'cash' já reflete as margens e PnLs realizados
-        total_value = self.cash + total_unrealized_pnl 
+        total_value = self.cash + total_unrealized_pnl
         
         # Sincronização de Timezone para evitar erro de Comparação
         ts = timestamp if timestamp else datetime.now(timezone.utc)
@@ -256,6 +279,41 @@ class PortfolioOptimizer:
             "total_leverage_ratio": total_leverage_ratio, # Alavancagem total do portfólio
             "positions": positions_details
         }
+
+    def reconcile_positions(self, exchange_positions: Dict[str, Dict]):
+        """
+        [PRIORIDADE 1] Reconciliação Total de Posições.
+        Sobrescreve as posições locais com os dados reais vindos da exchange.
+        Útil para corrigir desvios após quedas de conexão ou ordens externas.
+        """
+        if not isinstance(exchange_positions, dict):
+            return
+
+        logger.info(f"🔄 [PORTFOLIO] Iniciando reconciliação com {len(exchange_positions)} posições reais...")
+        
+        # Sincroniza posições
+        new_positions = {}
+        for symbol, data in exchange_positions.items():
+            new_positions[symbol] = Position(
+                symbol=symbol,
+                quantity=data['quantity'],
+                entry_price=data['entry_price'],
+                timestamp=datetime.now(timezone.utc),
+                unrealized_pnl=data.get('unrealized_pnl', 0.0),
+                leverage=data.get('leverage', 1)
+            )
+            # Atualiza o preço atual conhecido
+            if 'mark_price' in data:
+                self.last_prices[symbol] = data['mark_price']
+        
+        # Log de mudanças
+        added = set(new_positions.keys()) - set(self.positions.keys())
+        removed = set(self.positions.keys()) - set(new_positions.keys())
+        if added: logger.info(f"➕ [RECONCILIATION] Posições detectadas na exchange: {added}")
+        if removed: logger.info(f"➖ [RECONCILIATION] Posições fechadas externamente removidas: {removed}")
+
+        self.positions = new_positions
+        logger.info("✅ [PORTFOLIO] Reconciliação concluída com sucesso.")
         
     def load_state(self, state: Dict[str, Any]):
         """Carrega o estado do portfólio a partir de um dicionário."""

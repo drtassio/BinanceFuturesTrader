@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 from utils.logger import get_logger
 from config.settings import AIConfig, TradingConfig
+from models.trade_schema import Signal, Action
 
 # 🔬 Use new ensemble detector (HMM + GMM + ADX + Funding)
 from feature_engineering.crypto_regime_detector import (
@@ -478,6 +479,40 @@ class BaseRegimeSpecialist(TrendSpecialist):
             logger.error(f"❌ {self.name}: Erro durante treinamento: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
+    def decide_action(self, observation: np.ndarray, df_row: pd.Series) -> Optional[Signal]:
+        """
+        [FIX PRODUÇÃO] Sobrescreve decide_action para aplicar filtros de direção específicos de cada regime.
+        """
+        signal = super().decide_action(observation, df_row)
+        if signal is None:
+            return None
+
+        # Aplica restrições de direção baseadas no especialista
+        direction = getattr(self, '_specialist_direction', 'both')
+        
+        # Bull: long_only | Bear: short_only | Ranger: both
+        mismatch = False
+        if direction == 'long_only' and signal.action == Action.SELL:
+            mismatch = True
+        elif direction == 'short_only' and signal.action == Action.BUY:
+            mismatch = True
+
+        if mismatch:
+            # [HARD BLOCK] Em produção, não permitimos operações contra a especialidade do regime.
+            # Bull: apenas BUY | Bear: apenas SELL.
+            if signal.explanation is None:
+                signal.explanation = {}
+            
+            original_action = signal.action.value
+            signal.action = Action.HOLD
+            signal.confidence = 0.0
+            signal.explanation['_regime_mismatch'] = True
+            signal.explanation['reason'] = f"{self.name}: sinal {original_action} bloqueado (regime {self.regime_type} exige {direction})"
+            
+            logger.info(f"{'🐂' if direction == 'long_only' else '🐻'} [REGIME FILTER] {self.name}: {original_action} bloqueado → HOLD ({direction} em produção)")
+        
+        return signal
+
     def get_regime_confidence(self, df: pd.DataFrame) -> float:
         """
         Retorna a confiança de que os dados atuais pertencem ao regime deste especialista.

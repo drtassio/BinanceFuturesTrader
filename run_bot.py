@@ -32,6 +32,8 @@ from trading.tape_engine import TapeEngine
 from trading.ai_controller import AIController
 from trading.state_restore import StateRestore
 from trading.backtester import Backtester
+from trading.ollama_narrator import OllamaNarrator
+from trading.telegram_notifier import TelegramNotifier
 from data_provider import DataProvider
 from feature_engineering.main import FeatureEngineeringPipeline
 from governance.ai_monitor import AIMonitor
@@ -137,11 +139,17 @@ def log_portfolio_status(portfolio_name: str, portfolio_data: Dict):
     if max_lev > 1:
         lev_str += f" (Max: {max_lev}x)"
 
+    divider = "─" * 60
     log_message = (
-        f"📋 --- STATUS DO PORTFÓLIO: {portfolio_name.upper()} ---\n"
-        f"    - Equity: ${portfolio_data.get('total_value', 0):,.2f} | PnL Não Realizado: {pnl_char} ${portfolio_data.get('unrealized_pnl', 0):,.2f}\n"
-        f"    - Caixa Disp.: ${portfolio_data.get('cash', 0):,.2f} | Margem Usada: ${portfolio_data.get('margin_used', 0):,.2f}\n"
-        f"    - Alavancagem: {lev_char} {lev_str} | Posições: {portfolio_data.get('positions_count', 0)}"
+        f"\n💰 {divider}\n"
+        f"   🏦 PORTFÓLIO: {portfolio_name.upper()}\n"
+        f"   {divider}\n"
+        f"   💵 Equity:        ${portfolio_data.get('total_value', 0):>12,.2f}\n"
+        f"   📈 PnL Aberto:    {pnl_char} ${portfolio_data.get('unrealized_pnl', 0):>10,.2f}\n"
+        f"   💸 Caixa Disp:    ${portfolio_data.get('cash', 0):>12,.2f}\n"
+        f"   🛡️ Margem Usada:  ${portfolio_data.get('margin_used', 0):>12,.2f}\n"
+        f"   ⚡ Alavancagem:   {lev_char} {lev_str:<10} | Posições: {portfolio_data.get('positions_count', 0)}\n"
+        f"💰 {divider}\n"
     )
     logger.info(log_message)
 
@@ -149,25 +157,156 @@ def log_portfolio_status(portfolio_name: str, portfolio_data: Dict):
 def log_system_status():
     """Registra um resumo geral do status operacional do sistema."""
     mode = "LIVE TRADING (REAL)" if system_state['live_trading_enabled'] else "PAPER TRADING (SIMULADO)"
+
+    # --- Regime atual (via tape_pulse ou latest_features) ---
+    tape = system_state.get('tape_pulse', {})
+    tape_pulse_str = tape.get('pulse', 'NEUTRAL')
+    tape_conf_str  = f"{tape.get('confidence', 0.0):.0%}"
+
+    # Regime do modelo (a partir do último feature calculado)
+    latest_feat = system_state.get('latest_features')
+    regime_map  = {0: "BULL 🐂", 1: "BEAR 🐻", 2: "RANGER 🤠"}
+    if latest_feat is not None and hasattr(latest_feat, 'get'):
+        regime_code = int(latest_feat.get('regime', 2))
+        regime_conf = float(latest_feat.get('regime_confidence', 0.5))
+        regime_str  = f"{regime_map.get(regime_code, 'DESCONHECIDO')} ({regime_conf:.0%})"
+    else:
+        regime_str = "AGUARDANDO DADOS..."
+
+    # Adaptações realizadas
+    adapt_count = system_state.get('adaptation_count', 0)
+    last_adapt  = system_state.get('last_adaptation')
+    adapt_str   = f"{adapt_count}x | Último: {last_adapt[:10] if last_adapt else 'nunca'}"
+
+    divider = "─" * 60
+    tape_score = tape.get('score', 0.0)
     log_message = (
-        f"💡 --- STATUS GERAL ({datetime.now().strftime('%H:%M:%S')}) ---\n"
-        f"    - MODO: {mode} | Conexão: {system_state['binance_connection'].upper()} | Status IA: {system_state['ai_status'].upper()}\n"
-        f"    - Saúde: {system_state['system_health'].upper()} | Drift Dados: {system_state['drift_status'].upper()}\n"
-        f"    - Pulso On-Chain: {system_state['onchain_pulse']['signal']} | Pulso Tape: {system_state['tape_pulse']['pulse']}"
+        f"\n💡 {divider}\n"
+        f"   📊 STATUS GERAL ({datetime.now().strftime('%H:%M:%S')})\n"
+        f"   {divider}\n"
+        f"   🚀 MODO:        {mode}\n"
+        f"   🏥 SAÚDE:       {system_state['system_health'].upper()} | CONEXÃO: {system_state['binance_connection'].upper()}\n"
+        f"   🧠 IA STATUS:   {system_state['ai_status'].upper()} | REGIME: {regime_str}\n"
+        f"   📟 TAPE PULSE:  {tape_pulse_str:<10} (Score: {tape_score:+.2f})\n"
+        f"   🧠 SENTIMENT:    {system_state['onchain_pulse']['signal']} ({system_state['onchain_pulse'].get('score', 50)})\n"
+        f"   ⚙️ ADAPTAÇÕES:  {adapt_str}\n"
+        f"💡 {divider}\n"
     )
     logger.info(log_message)
 
 
-def log_trade_decision(signal, explainer):
-    """Registra a decisão de trading da IA e sua explicação."""
-    if not signal or signal.action == Action.HOLD:
-        reason = signal.explanation.get('reason', 'N/A') if signal else 'Sinal nulo'
-        logger.info(f"🧠 [IA] Decisão: HOLD. Motivo: {reason}")
+def log_trade_decision(signal, explainer, ai_monitor=None):
+    """
+    Registra a decisão de trading da IA, gera explicação SHAP e persiste no AIMonitor.
+
+    Cobre TODOS os tipos de decisão (BUY, SELL, HOLD) para que o bot nunca
+    seja uma caixa-preta — cada escolha fica rastreável via logs/ai_events/*.jsonl.
+    """
+    if not signal:
+        logger.info("🧠 [IA] Decisão: HOLD. Motivo: Sinal nulo recebido.")
         return
 
-    explanation = explainer.explain_decision(signal, system_state['latest_features'])
+    action_str = signal.action.value.upper() if hasattr(signal.action, 'value') else str(signal.action)
+    latest_features = system_state.get('latest_features')
+
+    # ── Gera explicação ──────────────────────────────────────────────────────
+    if explainer is not None and latest_features is not None:
+        try:
+            explanation = explainer.explain_decision(signal, latest_features)
+        except Exception as exc:
+            logger.warning(f"⚠️ [XAI] Falha ao gerar explicação: {exc}")
+            explanation = {
+                "decision": action_str,
+                "confidence": f"{signal.confidence:.2%}",
+                "narrative": f"Decisão {action_str} — explicação indisponível ({exc})",
+                "main_contributors": [],
+            }
+    else:
+        # Fallback mínimo sem explainer / sem features
+        reason = signal.explanation.get('reason', 'N/A') if signal.explanation else 'N/A'
+        explanation = {
+            "decision": action_str,
+            "confidence": f"{signal.confidence:.2%}",
+            "narrative": f"Decisão {action_str}. Motivo: {reason}",
+            "main_contributors": [],
+        }
+
     system_state['last_explanation'] = explanation
-    logger.info(f"🧠 [IA] Nova Decisão: {explanation.get('narrative', 'Explicação indisponível.')}")
+
+    # ── Log no terminal ──────────────────────────────────────────────────────
+    narrative = explanation.get('narrative', '')
+    divider = "─" * 60
+    
+    # Prepara valores para o dashboard
+    orig_conf = signal.explanation.get('original_confidence', signal.confidence)
+    final_conf = signal.confidence
+    reason = signal.explanation.get('reason', 'N/A') if signal.explanation else 'N/A'
+    
+    if signal.action == Action.HOLD:
+        status_icon = "⚖️"
+        conf_display = f"0.00% (Original: {orig_conf:.2%})" if orig_conf > 0 else "0.00%"
+    else:
+        status_icon = "🚀" if action_str == "BUY" else "🔻"
+        conf_display = f"{final_conf:.2%}"
+
+    log_message = (
+        f"\n🧠 {divider}\n"
+        f"   🧠 DECISÃO IA: {action_str}\n"
+        f"   {divider}\n"
+        f"   {status_icon} Ação:        {action_str:<10}\n"
+        f"   📌 Motivo:      {reason}\n"
+        f"   🎯 Confiança:   {conf_display}\n"
+        f"   \n"
+        f"   {narrative}\n"
+        f"🧠 {divider}\n"
+    )
+    logger.info(log_message)
+
+    # ── Persiste no AIMonitor (JSONL em logs/ai_events/) ────────────────────
+    if ai_monitor is not None:
+        # Monta contexto rico: top-5 features + métricas de mercado + regime
+        tape   = system_state.get('tape_pulse', {})
+        regime = int(latest_features.get('regime', 2)) if latest_features is not None else -1
+        regime_names = {0: "bull", 1: "bear", 2: "ranger"}
+
+        context = {
+            "symbol":       signal.symbol,
+            "action":       action_str,
+            "confidence":   signal.confidence,
+            "price":        float(latest_features.get('close', 0)) if latest_features is not None else 0,
+            "specialist":   signal.explanation.get('specialist', 'N/A') if signal.explanation else 'N/A',
+            "regime":       regime_names.get(regime, 'unknown'),
+            "tape_pulse":   tape.get('pulse', 'NEUTRAL'),
+            "tape_score":   round(tape.get('score', 0.0), 4),
+            "obi":          round(tape.get('obi', 0.0), 4),
+            "top_features": explanation.get('main_contributors', []),
+            "stop_loss":    signal.stop_loss,
+            "take_profit":  signal.take_profit,
+            "position_pct": signal.position_size_pct,
+        }
+
+        # Exibe Dados Técnicos Formatados no Terminal
+        technical_log = (
+            f"🛠️ DADOS TÉCNICOS:\n"
+            f"   🔹 Preço:       ${context['price']:,.2f}\n"
+            f"   🔹 Specialist:  {context['specialist']}\n"
+            f"   🔹 Regime:       {context['regime'].upper()}\n"
+            f"   🔹 OBI/Tape:     {context['obi']:.4f} / {context['tape_pulse']}\n"
+            f"   {divider}"
+        )
+        logger.info(technical_log)
+
+        # Persistência silenciosa do JSON no arquivo de log via log_event
+        try:
+            level = "INFO" if signal.action == Action.HOLD else "WARNING"
+            ai_monitor.log_event(
+                event_type = f"DECISION_{action_str}",
+                message    = explanation.get('narrative', narrative),
+                level      = level,
+                context    = context
+            )
+        except Exception as e:
+            logger.error(f"⚠️ [MONITOR] Falha ao registrar evento no AIMonitor: {e}")
 
 
 # --- Funções de Verificação Pré-voo ---
@@ -528,20 +667,39 @@ async def initialize_all_components():
         system_components["risk_manager"] = RiskManager(trading_config)
         system_components["ai_controller"] = AIController(ai_config, trading_config, system_state)
         system_components["onchain_engine"] = OnChainEngine(active_config)
+        system_components["onchain_engine"].start() # Inicia imediatamente para carregar o valor real (29)
+        
         # TapeEngine usa data_connector para dados reais de mercado
         system_components["tape_engine"] = TapeEngine(data_connector, [trading_config.PRIMARY_PAIR])
         system_components["ai_monitor"] = AIMonitor(log_dir="logs/ai_events")
-        system_components["drift_detector"] = DriftDetector()
+        system_components["drift_detector"] = None  # [ARCH] DriftDetector desativado
         system_components["curriculum_engine"] = CurriculumEngine(ai_config)
         system_components["backtester"] = Backtester(BacktestConfig(), db_session=None)
         system_components["state_restore"] = StateRestore(active_config, ai_config)
-        
+        # Narrador IA local via Ollama — análise em linguagem natural no terminal
+        # (telegram é passado depois, abaixo, após ser criado)
+        _narrator = OllamaNarrator(model="qwen3.5:4b")
+        system_components["narrator"] = _narrator
+
+        # Notificações Telegram — alertas instantâneos + relatório horário via LLM
+        _tg_token = getattr(active_config, 'TELEGRAM_BOT_TOKEN', '')
+        _tg_chat  = getattr(active_config, 'TELEGRAM_CHAT_ID', '')
+        _telegram = TelegramNotifier(
+            token       = _tg_token,
+            chat_id     = _tg_chat,
+            narrator    = _narrator,
+            ollama_model= "qwen3.5:4b",
+        )
+        system_components["telegram"] = _telegram
+        # Liga o narrator ao telegram para encaminhar análises automaticamente
+        _narrator.telegram = _telegram
+
         # --- Injeção de Dependências no AIController ---
         ai_controller = system_components["ai_controller"]
         ai_controller.set_portfolio(system_components["portfolio"])
         ai_controller.set_risk_manager(system_components["risk_manager"])
         ai_controller.set_ai_monitor(system_components["ai_monitor"])
-        ai_controller.set_drift_detector(system_components["drift_detector"])
+        # ai_controller.set_drift_detector(None)  # [ARCH] desativado
         ai_controller.set_curriculum_engine(system_components["curriculum_engine"])
         ai_controller.set_feature_pipeline(system_components["feature_pipeline"])
         ai_controller.set_tape_engine(system_components["tape_engine"])
@@ -590,6 +748,29 @@ async def initialize_all_components():
                         logger.warning(f"⚠️ [SHAP] Erro ao ler metadata: {e}")
             
             if base_cols:
+                # [FIX SHAP] Se o Autoencoder estiver ativo, precisamos adicionar as hidden_features ao background
+                if hasattr(ai_controller, 'feature_pipeline') and ai_controller.feature_pipeline.temporal_autoencoder_pipeline:
+                    try:
+                        logger.info("🧪 [SHAP] Enriquecendo background com Hidden Features do Autoencoder...")
+                        ae = ai_controller.feature_pipeline.temporal_autoencoder_pipeline
+                        if ae.is_trained:
+                            # Garante que temos as colunas base para o AE
+                            ae_input_cols = ae.feature_cols if hasattr(ae, 'feature_cols') else base_cols
+                            available_ae_cols = [c for c in ae_input_cols if c in background_df.columns]
+                            
+                            if len(available_ae_cols) >= len(ae_input_cols) * 0.8:
+                                # Aplica AE para gerar as 25-32 colunas latentes
+                                hidden_df = ae.apply_hidden(background_df)
+                                # Adiciona à lista de colunas que o SHAP deve monitorar
+                                latent_cols = [c for c in hidden_df.columns if 'hidden_feature' in c]
+                                base_cols = list(base_cols) + latent_cols
+                                background_df = hidden_df
+                                # [CRÍTICO] Atualiza o controlador para reconhecer as novas colunas no SHAP
+                                ai_controller.base_feature_columns = list(background_df.columns)
+                                logger.info(f"✅ [SHAP] Background enriquecido: {len(latent_cols)} Hidden Features adicionadas.")
+                    except Exception as ae_err:
+                        logger.warning(f"⚠️ [SHAP] Falha ao enriquecer background com AE: {ae_err}")
+
                 available_cols = [c for c in base_cols if c in background_df.columns]
                 if len(available_cols) > 0:
                     background_df = background_df[available_cols]
@@ -622,6 +803,10 @@ async def initialize_all_components():
             system_components["portfolio"], system_state,
             trade_log_callback=save_trade_to_log
         )
+        
+        # [RISK GATE] Injeta RiskManager no ExecutionEngine para gates de risco intra-TWAP
+        # Sem isso, ordens TWAP em andamento ignoram drawdown alto e modo risk-off.
+        system_components["execution_engine"].set_risk_manager(system_components["risk_manager"])
         
         system_state["status"] = "inicializado"
         logger.info("✅ [SETUP] Todos os componentes inicializados com sucesso.")
@@ -747,6 +932,9 @@ async def main_trading_loop():
         components["execution_engine"], components["tape_engine"],
         components["explainer"], components["feature_pipeline"]
     )
+    ai_monitor = components.get("ai_monitor")  # [XAI] Persiste explicações em JSONL
+    narrator   = components.get("narrator")    # [NARRATOR] Análise LLM local no terminal
+    telegram   = components.get("telegram")    # [TELEGRAM] Alertas instantâneos
     symbol = TradingConfig.PRIMARY_PAIR
 
     # [MELHORIA] Variáveis para controle do ciclo de adaptação do Meta-Learner
@@ -755,15 +943,26 @@ async def main_trading_loop():
     adaptation_data_buffer = []  # Buffer para acumular dados para adaptação
     max_buffer_size = 1000  # Máximo de pontos de dados no buffer
 
-    if not tape_engine.is_running: await tape_engine.start()
+    # [INFO] tape_engine já foi iniciado em main() antes do loop começar.
+    # A verificação abaixo é um fallback de segurança apenas.
+    if not tape_engine.is_running:
+        logger.warning("[LOOP] TapeEngine não estava rodando — iniciando como fallback.")
+        await tape_engine.start()
+    onchain_engine = components.get("onchain_engine")
+    if onchain_engine and not onchain_engine.is_running: onchain_engine.start()
 
     while not shutdown_event.is_set():
         if not system_state["trading_active"]:
             await asyncio.sleep(2)
             continue
         try:
-            # Etapa 1/2: Obter features multi-timeframe já processadas
-            featured_df = await data_provider.get_latest_features(symbol, tape_metrics=system_state.get('tape_pulse'), onchain_metrics=None)
+            # Etapa 1/2: Obter métricas on-chain e features multi-timeframe
+            # [SENTIMENT] Coleta o pulso do mercado via Fear & Greed da Binance
+            onchain_pulse = onchain_engine.get_onchain_sentiment_signal() if onchain_engine else None
+            system_state['onchain_pulse'] = onchain_pulse or {"signal": "NEUTRAL", "confidence": 0.1, "score": 50}
+            
+            # [FEATURES] Prepara dados para os especialistas
+            featured_df = await data_provider.get_latest_features(symbol, tape_metrics=system_state.get('tape_pulse'), sentiment_metrics=onchain_pulse)
             if featured_df is None or featured_df.empty:
                 logger.warning("⚠️ [LOOP] Falha ao gerar features para os dados recentes.")
                 await asyncio.sleep(10)
@@ -788,6 +987,11 @@ async def main_trading_loop():
                     r_prof = risk_manager.get_current_risk_profile()
                     if r_prof.get('is_risk_off_mode'):
                         system_state['system_health'] = "CRÍTICO (Risk Off)"
+                        # [TELEGRAM] Alerta risk-off (anti-spam 5 min interno)
+                        if telegram:
+                            _dd  = r_prof.get('current_drawdown_pct', 0)
+                            _lev = portfolio.get_detailed_status().get('total_leverage_ratio', 0)
+                            asyncio.create_task(telegram.alert_risk_off(_dd, _lev))
                     elif r_prof.get('current_drawdown_pct', 0) > r_prof.get('max_drawdown_limit_pct', 0.1) * 0.7:
                          system_state['system_health'] = "ATENÇÃO (Drawdown Elevado)"
                     else:
@@ -798,10 +1002,85 @@ async def main_trading_loop():
             # Etapa 3: Gerar e executar a decisão
             if ai_controller.is_trained:
                 signal = await ai_controller.generate_trading_decision(featured_df)
-                log_trade_decision(signal, explainer)
-                
+                log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
+
+                # [TELEGRAM] Registra decisão no buffer para o relatório horário
+                if telegram and signal:
+                    _regime_map3 = {0: "BULL", 1: "BEAR", 2: "RANGER"}
+                    telegram.log_decision(
+                        action     = signal.action.value,
+                        confidence = signal.confidence,
+                        regime     = _regime_map3.get(int(latest_features.get('regime', 2)), "UNKNOWN"),
+                    )
+
                 if signal and signal.action != Action.HOLD:
-                    await execution_engine.submit_order(signal)
+                    order = await execution_engine.submit_order(signal)
+                    # [XAI] Persiste evento de ordem enviada no AIMonitor
+                    if ai_monitor and order is not None:
+                        ai_monitor.log_event(
+                            event_type = "ORDER_SUBMITTED",
+                            message    = f"Ordem {signal.action.value} submetida para {signal.symbol}",
+                            level      = "INFO",
+                            context    = {
+                                "order_id":      str(getattr(order, 'id', 'N/A')),
+                                "symbol":        signal.symbol,
+                                "action":        signal.action.value,
+                                "quantity":      signal.quantity,
+                                "price":         signal.entry_price,
+                                "stop_loss":     signal.stop_loss,
+                                "take_profit":   signal.take_profit,
+                                "confidence":    signal.confidence,
+                                "explanation":   system_state.get('last_explanation', {}).get('narrative', ''),
+                            }
+                        )
+                elif signal and signal.action == Action.HOLD:
+                    # [VETO RISK] Se o trade foi vetado pela margem, notifica o ExecutionEngine
+                    # para não adicionar outras ordens (como stops) que possam gerar conflito.
+                    reason = signal.explanation.get('reason', '')
+                    if "REJEITADO" in reason and "Margem" in reason:
+                        execution_engine.register_margin_veto(signal.symbol)
+
+                # ── NARRATOR: análise LLM local no terminal ──────────────────
+                if narrator and signal:
+                    try:
+                        tape_state  = system_state.get('tape_pulse', {})
+                        regime_map  = {0: "bull", 1: "bear", 2: "ranger"}
+                        regime_code = int(latest_features.get('regime', 2))
+
+                        narrator_ctx = {
+                            "symbol":      signal.symbol,
+                            "action":      signal.action.value,
+                            "confidence":  signal.confidence,
+                            "price":       float(current_price or 0),
+                            "regime":      regime_map.get(regime_code, "desconhecido"),
+                            "tape_pulse":  tape_state.get('pulse', 'NEUTRAL'),
+                            "tape_score":  float(tape_state.get('score', 0.0)),
+                            "obi":         float(tape_state.get('obi', 0.0)),
+                            "top_features": signal.explanation.get('main_contributors', []),
+                        }
+
+                        # Posição aberta com PnL atualizado
+                        narrator_position = None
+                        if portfolio.positions:
+                            pos_sym = list(portfolio.positions.keys())[0]
+                            pos     = portfolio.positions[pos_sym]
+                            # PnL calculado com o preço atual do loop
+                            if current_price and pos.entry_price > 0:
+                                pnl = (float(current_price) - pos.entry_price) * pos.quantity
+                            else:
+                                pnl = pos.unrealized_pnl
+                            narrator_position = {
+                                "quantity":        pos.quantity,
+                                "entry_price":     pos.entry_price,
+                                "unrealized_pnl":  pnl,
+                                "leverage":        pos.leverage,
+                                "symbol":          pos_sym,
+                            }
+
+                        await narrator.maybe_narrate(narrator_ctx, narrator_position)
+                    except Exception as _ne:
+                        logger.debug(f"[NARRATOR] Erro ao preparar contexto: {_ne}")
+                # ─────────────────────────────────────────────────────────────
             else:
                 logger.warning("⚠️ [LOOP] IA não treinada. Pulando geração de decisão.")
 
@@ -823,7 +1102,7 @@ async def main_trading_loop():
                 time_since_last_adaptation >= adaptation_interval_hours and 
                 len(adaptation_data_buffer) >= 100 and  # Mínimo de dados para adaptação
                 ai_controller.is_trained and
-                system_state.get("drift_status") != "DRIFT_DETECTADO"  # Não adapta durante drift crítico
+                ai_controller.is_trained  # [ARCH] Drift gate removido - adaptacao nao bloqueia
             )
             
             if should_adapt:
@@ -858,17 +1137,22 @@ async def main_trading_loop():
         except Exception as e:
             logger.critical(f"🚨 [CRÍTICO LOOP] Erro fatal no loop de trading: {e}", exc_info=True)
             system_state["system_health"] = "critical"
-        
+            # [TELEGRAM] Alerta imediato para erro crítico no loop
+            if telegram:
+                asyncio.create_task(telegram.alert_error(str(e)[:200], level="CRITICAL"))
+
         await asyncio.sleep(DataConfig.MINUTE_INTERVAL_SECONDS)
 
 async def monitor_and_log_loop():
     """Loop para registrar o status do sistema e portfólios periodicamente."""
     logger.info("📊 [MONITOR] Iniciando loop de monitoramento e logging.")
-    
+
     # [MELHORIA] Variáveis para reconciliação de posições
     last_reconciliation_time = datetime.utcnow()
     reconciliation_interval_hours = 2  # Reconcilia a cada 2 horas
-    
+    # [TELEGRAM] Rastreia início de WARMUP prolongado do tape
+    _tape_warmup_since: Optional[datetime] = None
+
     while not shutdown_event.is_set():
         try:
             log_system_status()
@@ -893,6 +1177,7 @@ async def monitor_and_log_loop():
                     log_portfolio_status("Portfólio Real (Binance)", real_data)
                     
                     # [SAFETY] Checagem de Risco de Liquidação
+                    risk_manager = system_components.get("risk_manager")
                     if risk_manager:
                         risk_alerts = risk_manager.check_liquidation_risk()
                         for alert in risk_alerts:
@@ -907,7 +1192,28 @@ async def monitor_and_log_loop():
                     if time_since_last_reconciliation >= reconciliation_interval_hours:
                         await reconcile_positions(portfolio, connector, real_data)
                         last_reconciliation_time = current_time
-                        
+
+            # ── TELEGRAM: relatório horário + alerta de tape WARMUP ──────────
+            _telegram = system_components.get("telegram")
+            if _telegram:
+                _tape = system_state.get('tape_pulse', {})
+                await _telegram.maybe_hourly_report(
+                    system_state,
+                    system_components.get("portfolio"),
+                    _tape,
+                )
+                # Alerta se tape em WARMUP por mais de 5 min
+                if _tape.get('pulse') == 'WARMUP...':
+                    if _tape_warmup_since is None:
+                        _tape_warmup_since = datetime.utcnow()
+                    else:
+                        _elapsed = (datetime.utcnow() - _tape_warmup_since).total_seconds()
+                        if _elapsed > 300:   # > 5 min
+                            asyncio.create_task(_telegram.alert_tape_warmup(_elapsed))
+                else:
+                    _tape_warmup_since = None   # reset quando sai do WARMUP
+            # ─────────────────────────────────────────────────────────────────
+
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             break
@@ -949,6 +1255,9 @@ async def main():
         return
     
     await system_components["execution_engine"].start()
+    
+    if "tape_engine" in system_components and system_components["tape_engine"]:
+        await system_components["tape_engine"].start()
     
     # -------------------------------------------------------------------------
     # [CRITICAL UPDATE] Sincronização de Portfólio com Binance (Testnet/Prod)
@@ -1027,8 +1336,11 @@ async def main():
                 logger.critical("🚨 Falha no treinamento de fundação. Encerrando.")
                 return
             
-            drift_detector = system_components["drift_detector"]
-            drift_detector.set_reference_data(final_training_df, ai_controller.base_feature_columns)
+            # [ARCH] DriftDetector desativado — guard para evitar crash se ainda houver
+            # código de retreinamento que chame set_reference_data em um objeto None.
+            drift_detector = system_components.get("drift_detector")
+            if drift_detector is not None:
+                drift_detector.set_reference_data(final_training_df, ai_controller.base_feature_columns)
         else:
             logger.info(f"ℹ️ Modelos antigos detectados, mas há {valid_models_count}/{total_models} modelos válidos. Treinamento granular recomendado.")
             needs_training_this_session = True
@@ -1078,384 +1390,23 @@ async def main():
             return
     
     logger.info("✅ [IA PRONTA] Todas as fases de treinamento/carregamento foram concluídas.")
+    # [FIX] Atualiza o status da IA para refletir o estado real no painel de monitoramento.
+    # Antes ficava preso em "inicializando" para sempre pois nunca era atualizado pós-boot.
+    system_state["ai_status"] = "pronto" if ai_controller.is_trained else "bypass (não treinado)"
     
-    # --- FASE DE VALIDAÇÃO PRÉ-VOO ---
-    live_trading_approved = False
-    
-    if not needs_training_this_session:
-        if manage_validation_stamp('check', ai_controller):
-            live_trading_approved = True
-    
-
-async def check_profitability_condition(system_components):
-    """
-    Executa um backtest rápido para verificar se a estratégia é lucrativa nas condições atuais.
-    Retorna (boolean, result_object).
-    """
-    logger.info("🧪 [PRÉ-VOO] Iniciando verificação de lucratividade (Backtest)...")
-    
-    # ... (código existente para range de dados) ...
-    backtest_days = 180 # Últimos 6 meses
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=backtest_days)
-    
-    # Carrega dados históricos para backtest
-    # Carrega dados históricos para backtest (Gold Data)
-    base_df_path = os.path.join(AIConfig.MODEL_DIR, "base_featured_df.pkl")
-    
-    if not os.path.exists(base_df_path):
-        logger.error(f"❌ [PRÉ-VOO] Arquivo de dados 'base_featured_df.pkl' não encontrado. Falha no backtest.")
-        return False, None
-
-    try:
-        df_gold = pd.read_pickle(base_df_path)
-        if df_gold.empty:
-             logger.error("❌ [PRÉ-VOO] DataFrame de backtest vazio.")
-             return False, None
-    except Exception as e:
-        logger.error(f"❌ [PRÉ-VOO] Erro ao ler dados de backtest: {e}")
-        return False, None
-
-    # Configura backtester
-    backtester = system_components["backtester"]
-    ai_controller = system_components["ai_controller"]
-    portfolio = system_components["portfolio"]
-    risk_manager = system_components["risk_manager"]
-    explainer = system_components.get("explainer") # Pode ser None
-    
-    # Prepara dicionário de dados multi-timeframe (Backtester espera dict)
-    timeframe = TradingConfig.PRIMARY_TIMEFRAME_TRADING
-    symbol = TradingConfig.PRIMARY_PAIR
-    historical_data = {timeframe: df_gold}
-    
-    # Executa backtest
-    try:
-        results = await backtester.run(
-            historical_data_multi_tf=historical_data,
-            ai_controller=ai_controller,
-            portfolio=portfolio,
-            risk_manager=risk_manager,
-            symbol=symbol,
-            timeframe=timeframe,
-            model_version="run_bot_preflight",
-            explainer=explainer,
-            explain_decisions=False # Revertido para performance em produção
-        )
-        
-        if results is None:
-             logger.error("❌ [PRÉ-VOO] Backtester retornou None.")
-             return False, None
-             
-    except Exception as e:
-        logger.error(f"❌ [PRÉ-VOO] Erro crítico durante a execução do backtest: {e}", exc_info=True)
-        return False, None
-
-    # BacktestResult é um objeto SQLAlchemy, não um dict. Usar getattr.
-    profit_factor = getattr(results, 'profit_factor', None)
-    total_return = getattr(results, 'total_return_pct', None)
-    
-    # Tratamento seguro para None (caso não haja trades)
-    profit_factor = float(profit_factor) if profit_factor is not None else 0.0
-    total_return = float(total_return) if total_return is not None else 0.0
-    
-    sharpe_ratio = getattr(results, 'sharpe_ratio', 0.0) or 0.0
-    max_drawdown = getattr(results, 'max_drawdown_pct', 0.0) or 0.0
-    win_rate = getattr(results, 'win_rate_pct', 0.0) or 0.0
-    total_trades = getattr(results, 'total_trades', 0) or 0
-    
-    # Critérios mínimos para aprovação (configuráveis)
-    # Relaxado para permitir início se tiver lucro positivo, mesmo que pequeno, para testnet.
-    min_profit_factor = 0.05 # Era 1.05, relaxado para garantir start se não perder dinheiro
-    min_return = 0.0 # Pelo menos breakeven
-    
-    passed = (profit_factor >= min_profit_factor) and (total_return >= min_return)
-    
-    # Log detalhado das métricas "completas" como solicitado
-    log_msg = (
-        f"\n{'='*50}\n"
-        f"📊 RESULTADO DO BACKTEST DE VALIDAÇÃO\n"
-        f"{'='*50}\n"
-        f"✅ Aprovado: {'SIM' if passed else 'NÃO'}\n"
-        f"💰 Retorno Total: {total_return:.2%}\n"
-        f"📈 Profit Factor: {profit_factor:.2f}\n"
-        f"📉 Max Drawdown: {max_drawdown:.2%}\n"
-        f"⚡ Sharpe Ratio: {sharpe_ratio:.2f}\n"
-        f"🎯 Win Rate: {win_rate:.2%}\n"
-        f"🔢 Total Trades: {total_trades}\n"
-        f"{'='*50}\n"
-    )
-    
-    if passed:
-        logger.info(log_msg)
-    else:
-        logger.warning(log_msg)
-        logger.warning(f"⚠️ [PRÉ-VOO] Backtest falhou nos critérios mínimos: PF >= {min_profit_factor}, Retorno >= {min_return:.2%}.")
-
-    return passed, results
-
-async def main():
-    """Função principal de entrada do bot."""
-    global system_components
-    
-    # 1. Inicializa todos os componentes
-    # 1. Inicializa todos os componentes
-    try:
-        await initialize_all_components()
-    except Exception as e:
-        logger.critical(f"🚨 [CRÍTICO] Falha na inicialização dos componentes: {e}", exc_info=True)
-        return
-
-    # Registra handlers de sinal para shutdown gracioso
-    try:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_gracefully()))
-    except (NotImplementedError, AttributeError):
-        logger.debug("⚠️ [INIT] Signal handlers não suportados neste ambiente (Windows/EventLoop). Usando fallback.")
-    except Exception as e:
-        logger.warning(f"⚠️ [INIT] Falha ao registrar signal handlers: {e}")
-
-    # 2. Conecta aos serviços externos
-    logger.info("🔌 [CONEXÃO] Conectando aos serviços externos...")
-    try:
-        # Binance Data Stream (usado pelo DataProvider para buscar klines)
-        data_connector = system_components.get("data_connector")  # FIX: era "binance_connector"
-        if data_connector:
-            await data_connector.connect()
-            logger.info("✅ [CONEXÃO] Data Connector (PRODUÇÃO) conectado com sucesso.")
-        
-        # Trading Connector: Testnet ou Produção (baseado no .env)
-        trading_connector = system_components.get("trading_connector")
-        if trading_connector:
-            await trading_connector.connect()
-            mode = "TESTNET" if trading_connector.testnet else "PRODUÇÃO"
-            logger.info(f"✅ [CONEXÃO] Trading Connector ({mode}) conectado com sucesso.")
-        
-        system_state["binance_connection"] = "conectado"
-        
-        # [CRITICAL UPDATE] Sincronização de Portfólio com Binance (Testnet/Prod)
-        try:
-             trading_cnt = system_components.get("trading_connector")
-             portfolio_obj = system_components.get("portfolio")
-             if trading_cnt and portfolio_obj:
-                 logger.info("🔄 [INIT] Buscando saldo real na Binance...")
-                 account_info = await trading_cnt.get_account_summary()
-                 
-                 total_equity = account_info.get("total_value", 0.0)
-                 
-                 if total_equity > 0:
-                     # [FIX] Define Cash como Wallet Balance (Equity - Unrealized PnL)
-                     # Isso garante que margem usada seja incluída no valor total
-                     unrealized_pnl = account_info.get("unrealized_pnl", 0.0)
-                     wallet_balance = total_equity - unrealized_pnl
-                     
-                     portfolio_obj.initial_capital = total_equity
-                     portfolio_obj.cash = wallet_balance
-                     
-                     # Import positions via reconcile
-                     await reconcile_positions(portfolio_obj, trading_cnt, account_info)
-                     # [TRAILING STOP] Garante que posições existentes têm trailing stop
-                     positions_to_check = account_info.get('positions', {})
-                     if positions_to_check:
-                         # [FIX] Usa config do AIController se TradingConfig não estiver disponível direto
-                         # [FIX] Use TradingConfig directly specifically for trading params
-                         trading_config = TradingConfig
-                         await ensure_trailing_stops_for_existing_positions(
-                             trading_cnt, positions_to_check, trading_config
-                         )
-                     # Update Risk Manager
-                     if system_components.get("risk_manager"):
-                        system_components["risk_manager"].update_portfolio_state(
-                            portfolio_obj.get_total_value(), portfolio_obj.cash, portfolio_obj.positions,
-                            portfolio_obj.total_notional_value, portfolio_obj.margin_used
-                        )
-                     logger.info(f"✅ [INIT] Portfólio Sincronizado! Capital: ${portfolio_obj.initial_capital:,.2f}")
-        except Exception as e:
-             logger.error(f"❌ [INIT] Falha no Portfolio Sync: {e}", exc_info=True)
-
-        # Inicia Execution Engine e Tape Engine
-        if system_components.get("execution_engine"):
-            await system_components["execution_engine"].start()
-        if system_components.get("tape_engine"):
-            await system_components["tape_engine"].start()
-
-    except Exception as e:
-        logger.critical(f"🚨 [CRÍTICO] Falha ao conectar serviços: {e}. Encerrando.", exc_info=True)
-        return
-    
-    ai_controller = system_components["ai_controller"]
-    state_restore = system_components["state_restore"]
-    portfolio = system_components["portfolio"]
-    risk_manager = system_components["risk_manager"]
-    
-    # 3. State Restoration (Otimização de Startup)
-    # Tenta restaurar estado anterior antes de qualquer validação longa
-    logger.info("💾 [RESTORE] Buscando checkpoint de estado anterior...")
-    restored_state = state_restore.restore_latest_checkpoint()
-    
-    if restored_state:
-        try:
-            # Restaura Portfólio
-            if "portfolio" in restored_state:
-                portfolio.load_state(restored_state["portfolio"])
-                
-            # Sincroniza Risk Manager com o Portfólio restaurado
-            # O RiskManager não persiste estado próprio complexo, ele deriva do portfólio.
-            # Precisamos apenas reinjetar os valores do portfólio nele.
-            risk_manager.update_portfolio_state(
-                portfolio_value=portfolio.get_total_value(),
-                cash=portfolio.cash,
-                positions=portfolio.positions,
-                total_notional_value=portfolio.total_notional_value,
-                margin_used=portfolio.margin_used
-            )
-            
-            # Se houver histórico de IA (ex: memória LSTM), restaurar aqui também (futuro)
-            logger.info("✅ [RESTORE] Estado operacional restaurado com sucesso.")
-            
-        except Exception as e:
-            logger.error(f"❌ [RESTORE] Erro ao aplicar estado restaurado: {e}. Iniciando com estado limpo.", exc_info=True)
-    
-    # 3b. Re-sincronização Final com Exchange (Source of Truth)
-    # Garante que, mesmo após restaurar estado, o saldo e posições batam com a Binance
-    try:
-         if system_state.get("binance_connection") == "conectado":
-             logger.info("🔄 [RESTORE] Re-validando estado com dados da Binance (Final)...")
-             trading_cnt = system_components.get("trading_connector")
-             portfolio_obj = system_components.get("portfolio")
-             if trading_cnt and portfolio_obj:
-                 account_info = await trading_cnt.get_account_summary()
-                 # Reconcilia novamente para sobrepor o estado salvo com a realidade atual
-                 if account_info:
-                     await reconcile_positions(portfolio_obj, trading_cnt, account_info)
-                     
-                     # [FIX] Força a atualização do caixa para o Wallet Balance (Equity - PnL Não Realizado)
-                     # Portfolio.cash representa o Wallet Balance no nosso modelo (Collateral + PnL Realizado)
-                     # account_info["cash"] é o Available Balance (Wallet Balance - Margin Used), o que causaria under-reporting do Equity.
-                     total_equity = account_info.get("total_value", 0.0)
-                     unrealized_pnl = account_info.get("unrealized_pnl", 0.0)
-                     wallet_balance = total_equity - unrealized_pnl
-                     
-                     if wallet_balance > 0:
-                         portfolio_obj.cash = wallet_balance
-                         portfolio_obj.initial_capital = total_equity # Atualiza capital base
-                     
-                     # Atualiza Risk Manager de novo
-                     if system_components.get("risk_manager"):
-                            system_components["risk_manager"].update_portfolio_state(
-                                portfolio_obj.get_total_value(), portfolio_obj.cash, portfolio_obj.positions,
-                                portfolio_obj.total_notional_value, portfolio_obj.margin_used
-                            )
-                     logger.info(f"✅ [RESTORE] Estado sincronizado com Exchange! Wallet Balance: ${portfolio_obj.cash:,.2f}")
-    except Exception as e:
-         logger.error(f"❌ [RESTORE] Falha no Re-Sync Final: {e}")
-
-    # --- LÓGICA DE TREINAMENTO GRANULAR E INTELIGENTE ---
-    # Com FAST_STARTUP=True, carrega modelos diretamente se já estão treinados
-    
-    fast_startup = getattr(active_config, 'FAST_STARTUP', False)
-    ai_controller.load_metadata()
-    status = ai_controller.get_training_status()
-    needs_training_this_session = False
-    
-    # FAST_STARTUP: Se todos os modelos já estão treinados, pula verificações
-    if fast_startup and status.get('all_trained') and not ai_controller.is_retraining_due(AIConfig.MODEL_RETRAIN_DAYS):
-        logger.info("⚡ [FAST_STARTUP] Modelos já treinados. Carregando diretamente...")
-        ai_controller.load_all_models()
-    elif ai_controller.is_retraining_due(AIConfig.MODEL_RETRAIN_DAYS) or not status.get('all_trained'):
-        needs_training_this_session = True
-        
-        if ai_controller.is_retraining_due(AIConfig.MODEL_RETRAIN_DAYS):
-            logger.info("🗓️ Retreinamento periódico necessário.")
-            valid_models_count = sum(1 for v in status.values() if v and v != 'all_trained')
-            if valid_models_count == 0:
-                try: 
-                    if os.path.exists(ai_controller.config_ai.CHECKPOINT_DIR): shutil.rmtree(ai_controller.config_ai.CHECKPOINT_DIR)
-                    os.makedirs(ai_controller.config_ai.CHECKPOINT_DIR, exist_ok=True)
-                except: pass
-                await ai_controller.train_foundation_models()
-            else:
-                 await ai_controller.train_missing_components(status)
-        else:
-             logger.info("⚠️ Componentes faltando. Completando treinamento.")
-             await ai_controller.train_missing_components(status)
-
-    else:
-        logger.info("✅ [IA] Modelos parecem atuais. Carregando pesos...")
-        ai_controller.load_all_models()
-
-    if not ai_controller.is_trained:
-        logger.critical("🚨 IA não está pronta. Encerrando.")
-        return
-
-    # --- Inicialização do Drift Detector ---
-    drift_detector = system_components.get("drift_detector")
-    if drift_detector and not drift_detector.reference_data:
-        logger.info("📉 [DRIFT] Inicializando dados de referência do Drift Detector...")
-        try:
-             # Usa o dataset base (Gold) já carregado ou salvo pelo Training Pipeline
-             base_df_path = os.path.join(AIConfig.MODEL_DIR, "base_featured_df.pkl")
-             
-             if os.path.exists(base_df_path):
-                 df_gold = pd.read_pickle(base_df_path)
-                 if not df_gold.empty:
-                     # Identifica colunas de features (exclui timestamps e metadados básicos se necessário)
-                     # O DriftDetector usa 'feature_columns' definidos na config ou inferidos.
-                     # Vamos passar as colunas numéricas do DF, excluindo colunas de 'ignore' ou targets futuros.
-                     feature_cols = [c for c in df_gold.columns if c not in ['timestamp', 'open_time', 'close_time', 'ignore']]
-                     
-                     # Usa as últimas 2000 barras como referência
-                     drift_detector.set_reference_data(df_gold.tail(2000), feature_cols)
-                     logger.info(f"✅ [DRIFT] Referência definida com sucesso usando {len(df_gold)} registros.")
-                 else:
-                     logger.warning("⚠️ [DRIFT] Arquivo de dados 'base_featured_df.pkl' vazio.")
-             else:
-                 logger.warning(f"⚠️ [DRIFT] Arquivo '{base_df_path}' não encontrado. Drift Detector sem referência.")
-        except Exception as e:
-            logger.error(f"❌ [DRIFT] Falha ao inicializar referência: {e}")
-    
-    # --- FASE DE VALIDAÇÃO PRÉ-VOO ---
-    
+    # [ARCH] Pre-flight backtest REMOVIDO.
+    # HoldoutValidationCallback (gen_ratio avg=0.905) ja validou os modelos out-of-sample.
+    # Backtest de pre-voo e redundante e atrasa o boot em ~2 minutos desnecessariamente.
+    # Para backtest manual: python run_bot.py --force-backtest
     import sys
-    force_backtest = '--backtest' in sys.argv or '--force-backtest' in sys.argv
-    skip_backtest_arg = '--skip-backtest' in sys.argv
-    
-    should_run_backtest = False
-    
-    # Lógica de Decisão para Executar Backtest
-    if force_backtest:
-        should_run_backtest = True
-        logger.info("ℹ️ [PRÉ-VOO] Backtest forçado via linha de comando.")
-    elif skip_backtest_arg:
-        should_run_backtest = False
-        logger.info("ℹ️ [PRÉ-VOO] Backtest suprimido via linha de comando.")
-    elif needs_training_this_session:
-        # Se treinou agora, TEM que validar (mas não impede o boot se falhar, conforme solicitação)
-        should_run_backtest = True
-        logger.info("ℹ️ [PRÉ-VOO] Novos modelos treinados. Validando performance...")
-    else:
-        # Verifica se já foi validado anteriormente
-        if manage_validation_stamp('check', ai_controller):
-            logger.info("🎫 [PRÉ-VOO] Selo de validação VÁLIDO. Pulando backtest.")
-            should_run_backtest = False
-        else:
-            logger.info("ℹ️ [PRÉ-VOO] Selo inválido/ausente. Executando backtest de verificação...")
-            should_run_backtest = True
-
-    if should_run_backtest:
-        # Executa backtest
+    if "--force-backtest" in sys.argv or "--backtest" in sys.argv:
+        logger.info("[PRE-VOO] Backtest manual solicitado via --force-backtest...")
         backtest_passed, backtest_result_obj = await check_profitability_condition(system_components)
-        
         if backtest_passed:
-            logger.info("✅ [PRÉ-VOO] Estratégia APROVADA.")
-            manage_validation_stamp('create', ai_controller, backtest_result_obj)
+            manage_validation_stamp("create", ai_controller, backtest_result_obj)
+            logger.info("✅ [PRE-VOO] Estrategia aprovada no backtest manual.")
         else:
-            logger.warning("⚠️ [PRÉ-VOO] Estratégia REPROVADA no backtest.")
-            logger.warning("🚀 [OVERRIDE] Continuando para operação (Filtro de bloqueio removido).")
-            # AQUI: Não setamos 'observation' mode, vamos direto para 'trading'
-    
-    # Habilita trading
-    system_state["bot_mode"] = "trading"
+            logger.warning("⚠️ [PRE-VOO] Backtest reprovado - continuando mesmo assim.")
     logger.info("✅ [PRÉ-VOO] Bot pronto para operar.")
 
     # Verificação de fundos (informativa - não bloqueia)
@@ -1466,11 +1417,18 @@ async def main():
 
     # [MODIFICAÇÃO] Habilita execução de ordens (Testnet ou Prod)
     # Sempre ativa o modo de operação após o pré-voo, independente do backtest (request do usuário)
-    system_state["live_trading_enabled"] = True 
+    system_state["live_trading_enabled"] = True
     system_state["trading_active"] = True
-    
+
     mode_label = "LIVE (REAL)" if not TradingConfig.BINANCE_TESTNET else "TESTNET (REAL API)"
     logger.info(f"🚀🚀🚀 [BOT ATIVADO] Iniciando operação em modo {mode_label}. 🚀🚀🚀")
+
+    # [TELEGRAM] Verifica bot + envia alerta de início
+    _telegram = system_components.get("telegram")
+    if _telegram:
+        await _telegram.check_availability()
+        _bal = system_components["portfolio"].get_total_value() if system_components.get("portfolio") else 0.0
+        await _telegram.alert_bot_started(mode_label, _bal)
     
     # Salvar estado inicial (checkpoint de partida)
     try:
@@ -1493,6 +1451,14 @@ async def shutdown_gracefully():
     if not shutdown_event.is_set():
         logger.info("🛑 [BOT] Iniciando processo de desligamento...")
         shutdown_event.set()
+
+        # [TELEGRAM] Alerta de encerramento (síncrono antes do cleanup)
+        _telegram = system_components.get("telegram")
+        if _telegram and _telegram._available:
+            try:
+                await _telegram.alert_bot_stopped("Desligamento normal")
+            except Exception:
+                pass
         
         # Salvar estado final antes de sair!
         try:

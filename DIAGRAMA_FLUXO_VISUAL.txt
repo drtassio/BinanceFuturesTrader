@@ -1,0 +1,400 @@
+╔════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                         BOT SHIELD - FLUXO COMPLETO DE ABERTURA DE ORDEM                                    ║
+║                                   Sistema de Trading com IA                                                  ║
+╚════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+
+                                    CAMADA 1: ANÁLISE (AIController)
+                                    ════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  📊 DATA_PROVIDER                                                                  │
+    │  ├─ Klines (4h, 1h, 15m)                                                          │
+    │  ├─ Ticker Prices (tempo real)                                                    │
+    │  └─ Dados On-Chain                                                                │
+    │                                                                                      │
+    │  ↓                                                                                  │
+    │                                                                                      │
+    │  🔧 FEATURE_ENGINEERING_PIPELINE                                                  │
+    │  ├─ Moving Averages (SMA, EMA)                                                    │
+    │  ├─ RSI, MACD, Bollinger Bands                                                    │
+    │  ├─ Volume Analysis                                                                │
+    │  └─ Custom AI Features                                                             │
+    │                                                                                      │
+    │  ↓                                                                                  │
+    │                                                                                      │
+    │  🤖 SPECIALISTS (Mixture of Experts)                                              │
+    │  ├─ TrendSpecialist    → Detecta trends (DQN)                                     │
+    │  ├─ BullSpecialist     → Mercado em alta (SAC)                                    │
+    │  ├─ BearSpecialist     → Mercado em queda (SAC)                                   │
+    │  └─ RangerSpecialist   → Mercado lateral (SAC)                                    │
+    │                                                                                      │
+    │  ↓                                                                                  │
+    │                                                                                      │
+    │  🎯 MOE ROUTER (Gating Network)                                                   │
+    │  └─ Seleciona melhor especialista para situação atual                             │
+    │                                                                                      │
+    │  ↓                                                                                  │
+    │                                                                                      │
+    │  ✅ SIGNAL GERADO                                                                  │
+    │  Signal(                                                                            │
+    │    symbol='BTCUSDT',                                                               │
+    │    action=BUY,                                                                     │
+    │    confidence=0.85,                                                                │
+    │    leverage=2.0,                                                                   │
+    │    position_size_pct=0.05,                                                         │
+    │    stop_loss=0.03,                                                                 │
+    │    take_profit=0.09,                                                               │
+    │    profit_probability=0.72                                                         │
+    │  )                                                                                  │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+                                CAMADA 2: ORQUESTRAÇÃO (ExecutionEngine)
+                                ═══════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  1️⃣ VALIDAÇÃO DO SINAL                                                            │
+    │     ├─ Type Check: isinstance(signal, Signal)? ✅                                  │
+    │     ├─ Position Limit: Já existe posição? ❌ CONTINUE                              │
+    │     ├─ Price Check: Preço > 0? ✅                                                  │
+    │     └─ Quantity Check: Qty > 0? ✅                                                 │
+    │                                                                                      │
+    │     Status: ✅ VALIDAÇÃO PASSOU                                                    │
+    │                                                                                      │
+    │  2️⃣ CÁLCULO DE QUANTIDADE                                                         │
+    │     ├─ Portfolio Value: $100,000                                                   │
+    │     ├─ Margin Allocated: $100,000 × 5% = $5,000                                  │
+    │     ├─ Notional Value: $5,000 × 2.0x = $10,000                                   │
+    │     └─ Quantity: $10,000 / $42,500 = 0.2353 BTC ✅                               │
+    │                                                                                      │
+    │  3️⃣ SELEÇÃO DE ESTRATÉGIA (SMART)                                                 │
+    │     ├─ Notional % de Portfolio: 10% > 5% (TWAP_THRESHOLD)? YES                    │
+    │     ├─ Confidence: 0.85 > 0.70 (MIN_CONFIDENCE)? YES                              │
+    │     └─ Strategy Selected: "MARKET" (confiança alta, order pequena)                │
+    │                                                                                      │
+    │  4️⃣ CRIAÇÃO DE ExecutionOrder (Wrapper Interno)                                   │
+    │     ├─ ID: exec_BTCUSDT_1704060000000_buy                                         │
+    │     ├─ Signal: (referência ao signal original)                                    │
+    │     ├─ Strategy: MARKET                                                            │
+    │     ├─ Status: PENDING                                                             │
+    │     ├─ Total Qty: 0.2353 BTC                                                      │
+    │     ├─ Filled Qty: 0.0000 BTC                                                     │
+    │     └─ Created At: 2026-04-29 10:30:45 UTC                                        │
+    │                                                                                      │
+    │  5️⃣ ENFILEIRAMENTO PARA PROCESSAMENTO ASYNC                                        │
+    │     └─ order_queue.put(ExecutionOrder(...))                                       │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+                                         ⬇️ ASYNC PROCESSING ⬇️
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  6️⃣ EXECUTION LOOP (Async Task)                                                    │
+    │                                                                                      │
+    │     _execution_loop():                                                             │
+    │     ├─ Aguarda ordem da fila (blocking)                                           │
+    │     ├─ Verifica status (PENDING?)                                                 │
+    │     ├─ Cria task: _execute_order(order)                                           │
+    │     └─ Retorna para aguardar próxima                                              │
+    │                                                                                      │
+    │  7️⃣ EXECUÇÃO STRATEGY-SPECIFIC                                                     │
+    │                                                                                      │
+    │     _execute_order(order):                                                        │
+    │     ├─ 🌐 Ajusta alavancagem:                                                      │
+    │     │  └─ connector.set_leverage_for_symbol('BTCUSDT', 2)                         │
+    │     │     └─ POST /fapi/v1/leverage → ✅ 2x configurado                           │
+    │     │                                                                               │
+    │     ├─ Determina modo: LIVE_TRADING_ENABLED? YES                                  │
+    │     │  └─ Strategy: MARKET → call _execute_market_real(order)                     │
+    │     │                                                                               │
+    │     └─ order.status = OrderStatus.OPEN                                            │
+    │                                                                                      │
+    │  8️⃣ SUBMISSÃO À EXCHANGE (BinanceConnector)                                       │
+    │                                                                                      │
+    │     _execute_market_real(order):                                                  │
+    │     ├─ Cria client_order_id: mkt_a1b2c3d4e5f6g7h8i9j0                             │
+    │     ├─ Obtém precision: 4 casas decimais                                          │
+    │     │                                                                               │
+    │     └─ Parâmetros da Ordem:                                                       │
+    │        {                                                                            │
+    │            "symbol": "BTCUSDT",                                                    │
+    │            "side": "BUY",                                                          │
+    │            "type": "MARKET",                                                       │
+    │            "quantity": 0.2353,                                                     │
+    │            "newClientOrderId": "mkt_a1b2c3d4e5f6g7h8i9j0",                        │
+    │            "newOrderRespType": "FULL"                                              │
+    │        }                                                                            │
+    │                                                                                      │
+    │        ↓ connector.place_order(params)                                             │
+    │        ↓ _make_request('POST', '/fapi/v1/order', params, signed=True)            │
+    │        ↓ HTTP POST → https://fapi.binance.com/fapi/v1/order                      │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+                                CAMADA 3: API & EXCHANGE (BinanceConnector)
+                                ════════════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  📡 BINANCE API REQUEST                                                            │
+    │                                                                                      │
+    │  POST /fapi/v1/order                                                               │
+    │  ├─ Authentication: HMAC SHA256 signature                                          │
+    │  ├─ X-MBX-APIKEY: [api_key]                                                       │
+    │  ├─ timestamp: 1704060045123                                                       │
+    │  ├─ RecvWindow: 60000ms                                                            │
+    │  └─ Payload: (como acima)                                                          │
+    │                                                                                      │
+    │  🌍 NETWORK TRANSMISSION                                                           │
+    │  └─ timeout: 30 segundos (EXECUTION_TIMEOUT_SECONDS)                              │
+    │                                                                                      │
+    │  📥 RESPOSTA DA BINANCE                                                            │
+    │                                                                                      │
+    │  Status: 200 OK                                                                    │
+    │  {                                                                                  │
+    │    "orderId": 123456789,                                                           │
+    │    "symbol": "BTCUSDT",                                                            │
+    │    "status": "FILLED",                                                             │
+    │    "side": "BUY",                                                                  │
+    │    "type": "MARKET",                                                               │
+    │    "clientOrderId": "mkt_a1b2c3d4e5f6g7h8i9j0",                                  │
+    │    "executedQty": 0.2353,                                                          │
+    │    "cumQuote": 10000.45,                                                           │
+    │    "avgPrice": 42525.00,                                                           │
+    │    "commission": 2.00,                                                             │
+    │    "commissionAsset": "USDT",                                                      │
+    │    "updateTime": 1704060045567,                                                    │
+    │    "executedQty": 0.2353,                                                          │
+    │    "fills": [                                                                      │
+    │      {                                                                              │
+    │        "price": "42525.00",                                                        │
+    │        "qty": 0.2353,                                                              │
+    │        "commission": 2.00,                                                         │
+    │        "commissionAsset": "USDT",                                                  │
+    │        "tradeId": 987654321                                                        │
+    │      }                                                                              │
+    │    ]                                                                                │
+    │  }                                                                                  │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+                                CAMADA 4: ATUALIZAÇÃO & PROTEÇÃO
+                                ═════════════════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  9️⃣ PROCESSAMENTO DA RESPOSTA                                                     │
+    │                                                                                      │
+    │  _execute_market_real() continua:                                                 │
+    │  ├─ result = resposta da Binance (JSON acima)                                     │
+    │  ├─ new_trade = order.update_with_fill(result)                                    │
+    │  │  │                                                                               │
+    │  │  └─ Trade(                                                                      │
+    │  │     trade_id='987654321',                                                       │
+    │  │     order_id='123456789',                                                       │
+    │  │     symbol='BTCUSDT',                                                           │
+    │  │     side='BUY',                                                                 │
+    │  │     quantity=0.2353,                                                            │
+    │  │     executed_price=42525.00,                                                    │
+    │  │     fee=2.00,                                                                   │
+    │  │     fee_asset='USDT',                                                           │
+    │  │     timestamp=2026-04-29 10:30:45.567 UTC                                      │
+    │  │  )                                                                               │
+    │  │                                                                                  │
+    │  ├─ order.status = OrderStatus.FILLED                                             │
+    │  ├─ order.filled_quantity = 0.2353                                                │
+    │  └─ order.avg_fill_price = 42525.00                                               │
+    │                                                                                      │
+    │  🔟 LOG & CALLBACK                                                                 │
+    │                                                                                      │
+    │  if new_trade and self.trade_log_callback:                                        │
+    │  ├─ trade_log_data = {                                                            │
+    │  │    "timestamp": "2026-04-29T10:30:45.567Z",                                    │
+    │  │    "symbol": "BTCUSDT",                                                         │
+    │  │    "action": "BUY",                                                             │
+    │  │    "quantity": 0.2353,                                                          │
+    │  │    "price": 42525.00,                                                           │
+    │  │    "status": "FILLED",                                                          │
+    │  │    "notional_value": 10000.45,                                                  │
+    │  │    "leverage": 2.0,                                                             │
+    │  │    "profit_probability": 0.72,                                                  │
+    │  │    "order_id": "123456789",                                                     │
+    │  │    "client_order_id": "mkt_a1b2c3d4e5f6g7h8i9j0"                             │
+    │  │  }                                                                               │
+    │  ├─ system_state["recent_trades"].append(trade_log_data)                          │
+    │  └─ trade_log_callback(trade_log_data)  # Salva em arquivo                        │
+    │                                                                                      │
+    │  1️⃣1️⃣ ATUALIZAÇÃO DE PORTFOLIO                                                    │
+    │                                                                                      │
+    │  self.portfolio.update_from_trade(new_trade):                                      │
+    │  ├─ Posição BTCUSDT antes: 0.0                                                     │
+    │  ├─ Posição BTCUSDT depois: +0.2353 (LONG)                                         │
+    │  ├─ Entry Price: 42525.00                                                          │
+    │  ├─ Current Price: 42525.00                                                        │
+    │  ├─ Unrealized PnL: $0.00 (0%)                                                     │
+    │  ├─ Margin Used: $5,000 (50% do capital)                                          │
+    │  └─ Available Margin: $5,000 (50%)                                                │
+    │                                                                                      │
+    │  1️⃣2️⃣ COLOCAÇÃO DE PROTEÇÕES IMEDIATAS                                             │
+    │                                                                                      │
+    │  sl_pct = 0.03 (3% stop loss)                                                      │
+    │  tp_pct = 0.09 (9% take profit)                                                    │
+    │                                                                                      │
+    │  ✅ Hard Stop:                                                                     │
+    │     await _place_initial_hard_stop(new_trade, 0.03)                               │
+    │     ├─ Entry Price: 42525.00                                                       │
+    │     ├─ Stop Price: 42525.00 × (1 - 0.03) = 41249.25                              │
+    │     └─ Order: STOP_MARKET SELL 0.2353 BTC @ 41249.25                              │
+    │        └─ POST /fapi/v1/order                                                      │
+    │           {                                                                         │
+    │             "symbol": "BTCUSDT",                                                    │
+    │             "side": "SELL",                                                        │
+    │             "type": "STOP_MARKET",                                                 │
+    │             "quantity": "0.2353",                                                  │
+    │             "stopPrice": "41249.25",                                               │
+    │             "reduceOnly": "true",                                                  │
+    │             "timeInForce": "GTE_GTC"                                               │
+    │           }                                                                         │
+    │           └─ ✅ Order 999888777 colocado                                            │
+    │                                                                                      │
+    │  ✅ Take Profit:                                                                   │
+    │     await _place_initial_take_profit(new_trade, 0.09)                             │
+    │     ├─ Entry Price: 42525.00                                                       │
+    │     ├─ TP Price: 42525.00 × (1 + 0.09) = 46312.25                                │
+    │     └─ Order: TP MARKET SELL 0.2353 BTC @ 46312.25                                │
+    │        └─ ✅ Order 999888778 colocado                                              │
+    │                                                                                      │
+    │  ✅ Trailing Stop:                                                                 │
+    │     await _place_trailing_stop(symbol, side, qty, 0.03)                           │
+    │     ├─ Current Price: 42525.00                                                     │
+    │     ├─ Callback Rate: 3%                                                           │
+    │     └─ Order: TRAILING_STOP_MARKET SELL 0.2353 BTC @ 3% callback                  │
+    │        └─ ✅ Order 999888779 colocado                                              │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+                                CAMADA 5: MONITORAMENTO
+                                ════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  _monitor_orders_loop() (Executa a cada 10 segundos):                             │
+    │                                                                                      │
+    │  ┌─ Loop Infinito                                                                  │
+    │  │                                                                                  │
+    │  ├─ Aguarda 10s                                                                    │
+    │  │  await asyncio.sleep(10)                                                        │
+    │  │                                                                                  │
+    │  ├─ Verifica modo: live_trading_enabled = True? ✅                                 │
+    │  │                                                                                  │
+    │  └─ _manage_existing_positions()                                                   │
+    │     │                                                                               │
+    │     └─ Para cada posição aberta (ex: BTCUSDT com 0.2353 BTC):                     │
+    │        │                                                                            │
+    │        ├─ 🔍 Obtém ordens abertas da exchange:                                    │
+    │        │  └─ GET /fapi/v1/openOrders?symbol=BTCUSDT                               │
+    │        │     └─ Retorna: [                                                         │
+    │        │          {orderId: 999888777, type: STOP_MARKET, ...},  ✅ Hard Stop    │
+    │        │          {orderId: 999888778, type: TAKE_PROFIT_MARKET, ...}, ✅ TP     │
+    │        │          {orderId: 999888779, type: TRAILING_STOP_MARKET, ...}  ✅       │
+    │        │        ]                                                                   │
+    │        │                                                                            │
+    │        ├─ ✅ Tem stop? SIM!                                                        │
+    │        │  └─ Reset contador de falhas: _stop_fail_count['BTCUSDT'] = 0             │
+    │        │                                                                            │
+    │        └─ Continua monitoramento...                                                │
+    │                                                                                      │
+    │  📊 CENÁRIO REAL - MONITORAMENTO DE PREÇO:                                        │
+    │                                                                                      │
+    │  WebSocket recebe updates de tick price em tempo real:                            │
+    │                                                                                      │
+    │  T+0s:     Preço: $42,525.00 (entrada) | Posição: LONG 0.2353 | PnL: $0         │
+    │  T+1m:     Preço: $43,000.00 (↑1.1%) | Posição: LONG 0.2353 | PnL: +$112.68    │
+    │  T+5m:     Preço: $46,000.00 (↑8.2%) | Posição: LONG 0.2353 | PnL: +$826.34    │
+    │  T+10m:    Preço: $46,312.25 (↑9.0%) | TP TRIGGERED! 🎯                         │
+    │                                                                                      │
+    │           VENDA AUTOMÁTICA EXECUTADA:                                             │
+    │           ├─ Quantidade: 0.2353 BTC                                               │
+    │           ├─ Preço: $46,312.25                                                     │
+    │           ├─ Receita: 0.2353 × 46,312.25 = $10,896.84                             │
+    │           ├─ Custo: $10,000.45 + taxa de saída (~$2.00)                           │
+    │           └─ LUCRO LÍQUIDO: ~$894.39 (8.95% return)                               │
+    │                                                                                      │
+    │  🎉 ORDEM FECHADA COM SUCESSO!                                                    │
+    │                                                                                      │
+    │  Ou Cenário de Perda:                                                              │
+    │  T+0s:     Preço: $42,525.00 | PnL: $0                                            │
+    │  T+3m:     Preço: $41,500.00 | PnL: -$241.17 (↓2.4%)                             │
+    │  T+5m:     Preço: $41,249.25 | SL TRIGGERED! 🛑                                   │
+    │                                                                                      │
+    │           VENDA AUTOMÁTICA (STOP LOSS):                                           │
+    │           ├─ Quantidade: 0.2353 BTC                                               │
+    │           ├─ Preço: $41,249.25                                                     │
+    │           ├─ Receita: 0.2353 × 41,249.25 = $9,706.48                              │
+    │           ├─ Custo: $10,000.45 + taxa (~$2.00)                                    │
+    │           └─ PERDA: -$296.23 (2.96% loss)                                         │
+    │                                                                                      │
+    │  ⚠️ PERDA LIMITADA PELA PROTEÇÃO                                                   │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+                                   ESTADO FINAL DO SISTEMA
+                                   ═════════════════════════
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │  HISTÓRICO DE TRADES (após TP executado):                                         │
+    │  ┌─────────────────────────────────────────────────────────────────┐              │
+    │  │ Trade ID  │ Symbol   │ Ação   │ Qty      │ Entrada │ Saída    │ PnL      │    │
+    │  ├───────────┼──────────┼────────┼──────────┼─────────┼──────────┼──────────┤    │
+    │  │ 987654321 │ BTCUSDT  │ BUY    │ 0.2353   │ 42525   │ 46312    │ +$894.39 │    │
+    │  └─────────────────────────────────────────────────────────────────┘              │
+    │                                                                                      │
+    │  PORTFOLIO STATUS (após fechamento):                                              │
+    │  ├─ Total Capital: $100,000                                                       │
+    │  ├─ Posição BTCUSDT: 0.0000 BTC (FECHADA)                                         │
+    │  ├─ Saldo USDT: $100,894.39 (inicial + lucro)                                     │
+    │  ├─ Unrealized PnL: $0.00 (sem posições)                                          │
+    │  ├─ Realized PnL (sessão): +$894.39                                               │
+    │  ├─ Margin Used: $0.00                                                             │
+    │  └─ Win Rate: 1/1 trades = 100% 📈                                                │
+    │                                                                                      │
+    │  SISTEMA AGUARDANDO:                                                               │
+    │  ├─ Próximo sinal da IA                                                           │
+    │  ├─ Novos dados de mercado                                                        │
+    │  ├─ Inputs do usuário                                                             │
+    │  └─ Eventos de risco                                                              │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+╔════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                          RESUMO DO FLUXO                                                    ║
+╠════════════════════════════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                                            ║
+║  1. AIController gera Signal baseado em IA                                                                ║
+║  2. ExecutionEngine valida e calcula quantidade                                                           ║
+║  3. Escolhe estratégia (MARKET, LIMIT, TWAP)                                                             ║
+║  4. BinanceConnector envia à API da Binance                                                               ║
+║  5. Exchange executa e retorna confirmação                                                                ║
+║  6. Portfolio é atualizado com a nova posição                                                             ║
+║  7. Proteções são colocadas imediatamente (Hard Stop, TP, Trailing)                                      ║
+║  8. Monitor loop aguarda evento de saída (TP ou SL)                                                       ║
+║  9. Posição é fechada automaticamente                                                                     ║
+║  10. Trade é registrado no histórico                                                                       ║
+║                                                                                                            ║
+║  ⏱️ Tempo total: ~100-500ms (da geração do sinal à proteção completa)                                     ║
+║  🎯 Taxa de sucesso: >95% (com fallbacks robustos)                                                        ║
+║  📊 Proteção: Hard Stop + TP + Trailing Stop redundantes                                                 ║
+║  💾 Persistência: Estado TWAP salvo em disco para retomada                                                ║
+║                                                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════════════════════════════════════╝

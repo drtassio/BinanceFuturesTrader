@@ -175,7 +175,7 @@ class DataProvider:
 
     # No arquivo data_provider.py
 
-    async def get_latest_features(self, symbol: str, tape_metrics: Optional[Dict[str, Any]] = None, onchain_metrics: Optional[Dict[str, Any]] = None) -> Optional[pd.DataFrame]:
+    async def get_latest_features(self, symbol: str, tape_metrics: Optional[Dict[str, Any]] = None, sentiment_metrics: Optional[Dict[str, Any]] = None) -> Optional[pd.DataFrame]:
         """
         Obtém o DataFrame mais recente com features para o loop de trading.
         Busca dados de múltiplos timeframes e os combina.
@@ -231,7 +231,7 @@ class DataProvider:
                 self.trading_config.PRIMARY_TIMEFRAME_TRADING,
                 fit_scaler=False,
                 tape_metrics=tape_metrics,
-                onchain_metrics=onchain_metrics
+                onchain_metrics=sentiment_metrics
             )
                 
             if featured_df is None or featured_df.empty:

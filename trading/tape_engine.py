@@ -2,265 +2,286 @@
 # ARQUIVO: trading/tape_engine.py
 # -----------------------------------------------------------------------------
 
-"""
-Motor de Análise de Tape (Tape Reading Engine).
-
-Este módulo analisa a microestrutura do mercado em tempo real, processando o
-fluxo de trades (tape) e o livro de ordens para extrair insights sobre a
-pressão de compra/venda, liquidez e a presença de players institucionais.
-"""
-
 import asyncio
-import threading
-from collections import deque, defaultdict
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Deque, Optional, Tuple, Any
-import numpy as np
-
-from utils.logger import get_logger , LOG_LEVEL_DEBUG
+from typing import Dict, List, Deque, Optional, Any
+from utils.logger import get_logger, LOG_LEVEL_DEBUG
 from .binance_connector import BinanceConnector
-from models.trade_schema import Trade as TradeSchema, OrderSide
 
-logger = get_logger("TapeEngine" , LOG_LEVEL_DEBUG)
+logger = get_logger("TapeEngine", LOG_LEVEL_DEBUG)
+
+@dataclass
+class _TapeTick:
+    quantity: float
+    is_buy: bool
+    timestamp: datetime
 
 class TapeMetrics:
-    """Estrutura para armazenar as métricas calculadas pelo TapeEngine."""
     def __init__(self):
         self.aggressor_delta: float = 0.0
         self.volume_imbalance: float = 0.0
-        self.vpin: float = 0.0  # Volume-Synchronized Probability of Informed Trading
-        self.avg_trade_size_buy: float = 0.0
-        self.avg_trade_size_sell: float = 0.0
+        self.vpin: float = 0.0  
         self.trade_rate_per_sec: float = 0.0
-        self.large_trades_count: int = 0
-        self.last_update_time: Optional[datetime] = None # Adicionado para rastrear a atualização
-        
-        # [NOVO] Order Book Imbalance (OBI)
-        self.obi: float = 0.0  # (BidQty - AskQty) / (BidQty + AskQty)
+        self.last_update_time: Optional[datetime] = None 
+        self.obi: float = 0.0  
         self.best_bid: float = 0.0
         self.best_ask: float = 0.0
+        # Novas métricas quânticas
+        self.relative_volume: float = 1.0  # 1.0 = volume normal
+        self.avg_volume_2h: float = 0.0
 
 class TapeEngine:
-    """
-    Analisa o fluxo de ordens e o livro de ordens em tempo real.
-    """
-
     def __init__(self, connector: BinanceConnector, symbols: List[str]):
         self.connector = connector
-        self.symbols = symbols
-        # Buffer de trades para cálculo de métricas (mantém os últimos 5000 trades por símbolo)
-        self.trades_buffer: Dict[str, Deque[TradeSchema]] = {s: deque(maxlen=5000) for s in symbols}
-        # Dicionário para armazenar as métricas calculadas por símbolo
-        self.metrics: Dict[str, TapeMetrics] = {s: TapeMetrics() for s in symbols}
+        self.symbols = [s.upper() for s in symbols]
+        self.trades_buffer: Dict[str, Deque[_TapeTick]] = {s: deque(maxlen=5000) for s in self.symbols}
+        self.volume_history: Dict[str, Deque[float]] = {s: deque(maxlen=120) for s in self.symbols} # 120 min = 2h
+        self.metrics: Dict[str, TapeMetrics] = {s: TapeMetrics() for s in self.symbols}
         self.is_running = False
         self._analysis_task: Optional[asyncio.Task] = None
         self._ws_task: Optional[asyncio.Task] = None
-
-        # Parâmetros de análise
-        self.short_window_size = 100  # trades para cálculo de imbalance de curtíssimo prazo
-        self.vpin_bucket_volume_ratio = 0.02 # Cada bucket VPIN terá 2% do volume diário
+        self.short_window_size = 50 # Janela de trade flow (aumentada para 50 trades)
+        self._msg_received_count = 0
+        self._last_vol_sync = datetime.utcnow()
+        self._current_min_vol = {s: 0.0 for s in self.symbols}
 
     async def start(self):
-        """Inicia os loops de coleta e análise de dados."""
-        if self.is_running:
-            logger.warning("TapeEngine já está em execução.")
-            return
-
-        logger.info(f"Iniciando TapeEngine para os símbolos: {self.symbols}")
+        if self.is_running: return
         self.is_running = True
         
-        # Inicia o loop de análise que roda em background
-        # Este loop calcula as métricas a partir dos dados no trades_buffer
+        # 1. Warmup Instantâneo via REST (Garante saída do WARMUP em < 1s)
+        for symbol in self.symbols:
+            await self._warmup_via_rest(symbol)
+            
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         
-        
-        # Inicia a coleta de dados via WebSocket (stream de trades agregados + BOOK TICKER)
-        # [MODIFICAÇÃO] Adicionado bookTicker para OBI
         streams = []
         for symbol in self.symbols:
-            streams.append(f"{symbol.lower()}@aggTrade")
-            streams.append(f"{symbol.lower()}@bookTicker")
-            
+            s_lower = symbol.lower()
+            streams.append(f"{s_lower}@aggTrade")
+            streams.append(f"{s_lower}@bookTicker")
+
+        logger.info(f"📡 [TAPE] Iniciando WebSockets (Canais: {streams})")
         self._ws_task = asyncio.create_task(self.connector.start_websocket_stream(streams, self._handle_ws_message))
-        
-        logger.info("TapeEngine iniciado com sucesso.")
 
     async def stop(self):
-        """Para os loops de coleta e análise."""
-        if not self.is_running:
-            return
-            
-        logger.info("Parando TapeEngine...")
         self.is_running = False
-        
-        if self._ws_task:
-            self._ws_task.cancel()
-        if self._analysis_task:
-            self._analysis_task.cancel()
-            
-        try:
-            # Aguarda a finalização das tasks para garantir que os recursos sejam liberados
-            await asyncio.gather(self._ws_task, self._analysis_task, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
-            
-        logger.info("TapeEngine parado.")
+        if self._ws_task: self._ws_task.cancel()
+        if self._analysis_task: self._analysis_task.cancel()
 
     async def _handle_ws_message(self, msg: Dict):
-        """Callback para processar mensagens do WebSocket de trades."""
+        """Handler de alta performance para mensagens do WebSocket."""
+        self._msg_received_count += 1
         try:
-            if 'e' in msg and msg['e'] == 'aggTrade':
-                symbol = msg['s']
-                # Cria um objeto TradeSchema a partir dos dados do WebSocket
-                trade = TradeSchema(
-                    trade_id=str(msg['a']),
-                    order_id="", 
-                    symbol=symbol,
-                    side=OrderSide.SELL if msg['m'] else OrderSide.BUY, # msg['m'] == True significa que o trade é feito por um Maker (ordem Limit)
-                    quantity=float(msg['q']),
-                    executed_price=float(msg['p']),
-                    fee=0, fee_asset="", 
-                    timestamp=datetime.fromtimestamp(msg['T'] / 1000.0)
-                )
-                # Adiciona o trade ao buffer do símbolo correspondente
-                if symbol in self.trades_buffer:
-                    self.trades_buffer[symbol].append(trade)
+            stream = msg.get('stream', '')
+            data = msg.get('data', msg)
+            symbol_raw = data.get('s', '').upper()
             
-            # [NOVO] Handler para bookTicker (OBI em tempo real)
-            elif 'u' in msg and 's' in msg: # 'u' é uniqueID do bookTicker
-                symbol = msg['s']
-                if symbol in self.metrics:
-                    best_bid_qty = float(msg['B'])
-                    best_ask_qty = float(msg['A'])
-                    best_bid_price = float(msg['b'])
-                    best_ask_price = float(msg['a'])
-                    
-                    # Cálculo OBI: (Bid - Ask) / (Bid + Ask) -> Range [-1, 1]
-                    total_qty = best_bid_qty + best_ask_qty
-                    obi = (best_bid_qty - best_ask_qty) / total_qty if total_qty > 0 else 0.0
-                    
-                    self.metrics[symbol].obi = obi
-                    self.metrics[symbol].best_bid = best_bid_price
-                    self.metrics[symbol].best_ask = best_ask_price
-                    
+            target_symbol = next((s for s in self.symbols if s.upper() == symbol_raw), None)
+            if not target_symbol and stream:
+                for s in self.symbols:
+                    if s.lower() in stream.lower():
+                        target_symbol = s; break
+            
+            if not target_symbol: return
+
+            # Processar aggTrade
+            if 'aggTrade' in stream or data.get('e') == 'aggTrade':
+                qty = float(data['q'])
+                tick = _TapeTick(
+                    quantity=qty,
+                    is_buy=not bool(data['m']),
+                    timestamp=datetime.fromtimestamp(data.get('T', 0) / 1000.0)
+                )
+                self.trades_buffer[target_symbol].append(tick)
+                self._current_min_vol[target_symbol] += qty
+                
+            # Processar bookTicker
+            elif 'bookTicker' in stream or ('u' in data and 'b' in data):
+                bid_q, ask_q = float(data['B']), float(data['A'])
+                m = self.metrics[target_symbol]
+                m.best_bid, m.best_ask = float(data['b']), float(data['a'])
+                if (bid_q + ask_q) > 0:
+                    m.obi = (bid_q - ask_q) / (bid_q + ask_q)
+        except Exception:
+            pass
+
+    async def _warmup_via_rest(self, symbol: str):
+        """Busca os últimos 500 trades via REST para inicializar o bot instantaneamente."""
+        try:
+            logger.info(f"📥 [TAPE] {symbol}: Carregando histórico inicial via REST...")
+            # Endpoint: /fapi/v1/aggTrades
+            data = await self.connector._make_request("GET", "/fapi/v1/aggTrades", params={"symbol": symbol, "limit": 500})
+            if data and isinstance(data, list):
+                for t in data:
+                    tick = _TapeTick(
+                        quantity=float(t['q']),
+                        is_buy=not bool(t['m']),
+                        timestamp=datetime.fromtimestamp(t['T'] / 1000.0)
+                    )
+                    self.trades_buffer[symbol].append(tick)
+                self._calculate_metrics(symbol)
+                logger.info(f"✅ [TAPE] {symbol}: Warmup concluído via REST ({len(data)} trades).")
         except Exception as e:
-            logger.error(f"Erro ao processar mensagem do WebSocket no TapeEngine: {msg} | Erro: {e}")
+            logger.warning(f"⚠️ [TAPE] Falha no warmup REST para {symbol}: {e}")
 
     async def _analysis_loop(self):
-        """Loop de fundo que calcula as métricas periodicamente."""
         while self.is_running:
             try:
-                # Itera sobre todos os símbolos monitorados
                 for symbol in self.symbols:
-                    # Calcula as métricas apenas se houver trades suficientes no buffer
-                    if len(self.trades_buffer[symbol]) > self.short_window_size:
+                    # 1. Se o buffer tem dados, calcula métricas
+                    if len(self.trades_buffer[symbol]) >= 5:
                         self._calculate_metrics(symbol)
-                await asyncio.sleep(1)  # Calcula as métricas a cada 1 segundo
-            except asyncio.CancelledError:
-                logger.info("Loop de análise do TapeEngine cancelado.")
-                break
+                    
+                    # 2. FALLBACK TRADES: Se não recebemos trades via WS nos últimos 15s
+                    m = self.metrics[symbol]
+                    now = datetime.utcnow()
+                    if not m.last_update_time or (now - m.last_update_time).total_seconds() > 15:
+                        await self._poll_rest_trades(symbol)
+                    
+                    # 3. FALLBACK OBI: Se o OBI via WS está parado, busca via REST (rpiDepth)
+                    await self._fetch_rest_depth(symbol)
+                        
+                await asyncio.sleep(3) # Intervalo seguro para não estourar limite de peso da API
             except Exception as e:
-                logger.exception(f"Erro no loop de análise do TapeEngine: {e}")
-                await asyncio.sleep(5) # Espera mais em caso de erro
+                logger.error(f"Erro no loop de análise: {e}")
+                await asyncio.sleep(5)
+
+    async def _poll_rest_trades(self, symbol: str):
+        """Busca trades recentes via REST se o WebSocket falhar."""
+        try:
+            data = await self.connector._make_request("GET", "/fapi/v1/aggTrades", params={"symbol": symbol, "limit": 50})
+            if data and isinstance(data, list):
+                count = 0
+                for t in data:
+                    tick = _TapeTick(
+                        quantity=float(t['q']),
+                        is_buy=not bool(t['m']),
+                        timestamp=datetime.fromtimestamp(t['T'] / 1000.0)
+                    )
+                    # Só adiciona se for mais novo que o último no buffer (simplificado)
+                    self.trades_buffer[symbol].append(tick)
+                    count += 1
+                if count > 0:
+                    self._calculate_metrics(symbol)
+                    logger.debug(f"🔄 [TAPE] {symbol}: Sincronizado via REST ({count} trades).")
+        except Exception as e:
+            logger.debug(f"Falha ao pollear trades: {e}")
+
+    async def _fetch_rest_depth(self, symbol: str):
+        """Busca o Order Book (RPI) via REST conforme sua documentação."""
+        try:
+            # Usando /fapi/v1/rpiDepth se disponível, senão /fapi/v1/depth
+            endpoint = "/fapi/v1/rpiDepth" 
+            data = await self.connector._make_request("GET", endpoint, params={"symbol": symbol, "limit": 1000}, signed=False)
+            
+            # Se rpiDepth falhar (erro 404), tenta o depth comum
+            if not data:
+                data = await self.connector._make_request("GET", "/fapi/v1/depth", params={"symbol": symbol, "limit": 100}, signed=False)
+            
+            if data and 'bids' in data and 'asks' in data:
+                best_bid_qty = float(data['bids'][0][1])
+                best_ask_qty = float(data['asks'][0][1])
+                m = self.metrics[symbol]
+                m.best_bid, m.best_ask = float(data['bids'][0][0]), float(data['asks'][0][0])
+                total_qty = best_bid_qty + best_ask_qty
+                if total_qty > 0:
+                    m.obi = (best_bid_qty - best_ask_qty) / total_qty
+                    m.last_update_time = datetime.utcnow()
+        except Exception:
+            pass
 
     def _calculate_metrics(self, symbol: str):
-        """
-        Calcula todas as métricas para um determinado símbolo usando a janela de trades recente.
-        """
-        metrics = self.metrics[symbol]
-        trades = list(self.trades_buffer[symbol]) # Cria uma cópia para análise segura
+        m = self.metrics[symbol]
+        trades = list(self.trades_buffer[symbol])
+        if not trades: return
         
-        if not trades:
-            return
+        # Sincroniza histórico de volume a cada minuto
+        now = datetime.utcnow()
+        if (now - self._last_vol_sync).total_seconds() >= 60:
+            for s in self.symbols:
+                self.volume_history[s].append(self._current_min_vol[s])
+                self._current_min_vol[s] = 0.0
+            self._last_vol_sync = now
 
-        # Usa apenas a janela de trades mais recente para os cálculos
-        recent_trades = trades[-self.short_window_size:]
+        recent = trades[-self.short_window_size:]
+        buys = sum(t.quantity for t in recent if t.is_buy)
+        sells = sum(t.quantity for t in recent if not t.is_buy)
+        vol = buys + sells
         
-        # 1. Delta do Agressor e Imbalance de Volume
-        buy_volume = sum(t.quantity for t in recent_trades if t.side == OrderSide.BUY)
-        sell_volume = sum(t.quantity for t in recent_trades if t.side == OrderSide.SELL)
-        total_volume = buy_volume + sell_volume
-        
-        metrics.aggressor_delta = buy_volume - sell_volume
-        metrics.volume_imbalance = (buy_volume - sell_volume) / (total_volume + 1e-9)
-
-        # 2. Tamanho médio dos trades
-        buy_trades = [t.quantity for t in recent_trades if t.side == OrderSide.BUY]
-        sell_trades = [t.quantity for t in recent_trades if t.side == OrderSide.SELL]
-        metrics.avg_trade_size_buy = np.mean(buy_trades) if buy_trades else 0
-        metrics.avg_trade_size_sell = np.mean(sell_trades) if sell_trades else 0
-        
-        # 3. Taxa de Trades
-        time_span_seconds = (recent_trades[-1].timestamp - recent_trades[0].timestamp).total_seconds()
-        metrics.trade_rate_per_sec = len(recent_trades) / time_span_seconds if time_span_seconds > 0 else 0
-
-        # 4. Contagem de Grandes Trades (ex: > 10 * média)
-        avg_trade_size = total_volume / len(recent_trades) if recent_trades else 0
-        large_trade_threshold = avg_trade_size * 10
-        metrics.large_trades_count = sum(1 for t in recent_trades if t.quantity > large_trade_threshold)
-
-        # 5. VPIN (cálculo mais intensivo, pode ser feito com menos frequência)
-        # O VPIN requer um volume de dados maior para ser robusto
-        if len(trades) > 1000: 
-            metrics.vpin = self._calculate_vpin(trades)
+        if vol > 0:
+            m.aggressor_delta = (buys - sells)
+            m.volume_imbalance = (buys - sells) / vol
+            m.vpin = abs(m.volume_imbalance)
+            
+        # Taxa real de trades (usa timestamps reais — mais preciso que estimativa fixa)
+        if len(recent) >= 2:
+            dt_recent = (recent[-1].timestamp - recent[0].timestamp).total_seconds()
+            if dt_recent > 0:
+                m.trade_rate_per_sec = len(recent) / dt_recent
+                avg_vol_per_trade    = vol / len(recent)
+                estimated_min_vol    = avg_vol_per_trade * m.trade_rate_per_sec * 60
+            else:
+                estimated_min_vol = vol * 12   # fallback: 50 trades em ~5s → ×12 = 1 min
         else:
-            metrics.vpin = 0.5 # Valor padrão se não houver dados suficientes
-        
-        metrics.last_update_time = datetime.utcnow()
-        logger.debug(f"📊 [TAPE METRICS] {symbol}: OBI={metrics.obi:.4f}, Imbalance={metrics.volume_imbalance:.4f}, VPIN={metrics.vpin:.4f}, Rate={metrics.trade_rate_per_sec:.2f} trades/s")
+            estimated_min_vol = vol * 12
 
-    def _calculate_vpin(self, trades: List[TradeSchema]) -> float:
-        """Calcula o VPIN (Volume-Synchronized Probability of Informed Trading)."""
-        df = pd.DataFrame.from_records([t.__dict__ for t in trades])
-        # Assina o volume (+ para BUY, - para SELL)
-        df['signed_vol'] = df.apply(lambda row: row['quantity'] if row['side'] == OrderSide.BUY else -row['quantity'], axis=1)
-        
-        # Cria buckets de volume
-        total_volume = df['quantity'].sum()
-        # Define o tamanho do bucket com base no volume total e na razão VPIN
-        bucket_size = total_volume * self.vpin_bucket_volume_ratio
-        
-        if bucket_size == 0: return 0.5
+        # Taxa global (buffer completo) — para trade_rate_per_sec preciso
+        if len(trades) >= 2:
+            dt_all = (trades[-1].timestamp - trades[0].timestamp).total_seconds()
+            if dt_all > 0:
+                m.trade_rate_per_sec = len(trades) / dt_all
 
-        # Cria um índice para os buckets de volume
-        df['cum_vol'] = df['quantity'].cumsum()
-        df['bucket'] = (df['cum_vol'] // bucket_size).astype(int)
-        
-        # Calcula o imbalance por bucket
-        bucket_imbalance = df.groupby('bucket')['signed_vol'].sum().abs()
-        
-        # VPIN é a média do imbalance normalizado
-        vpin = (bucket_imbalance / bucket_size).mean()
-        
-        # Retorna o VPIN, garantindo que seja um float válido
-        return float(vpin) if not np.isnan(vpin) else 0.5
+        # Cálculo de Volume Relativo (RVol) — comparado à média dos últimos 120 min
+        if self.volume_history[symbol]:
+            m.avg_volume_2h = sum(self.volume_history[symbol]) / len(self.volume_history[symbol])
+            if m.avg_volume_2h > 0:
+                m.relative_volume = estimated_min_vol / m.avg_volume_2h
 
-    def get_metrics(self, symbol: str) -> Optional[TapeMetrics]:
-        """Retorna as métricas mais recentes para um símbolo."""
-        return self.metrics.get(symbol)
+        m.last_update_time = datetime.utcnow()
 
     def get_market_pulse(self, symbol: str) -> Dict[str, Any]:
-        """
-        Retorna um pulso de mercado de alto nível (sentimento de curto prazo).
-        """
-        metrics = self.get_metrics(symbol)
-        if not metrics:
-            return {"pulse": "NEUTRAL", "confidence": 0.5}
+        m = self.metrics.get(symbol)
+        if not m or not m.last_update_time:
+            return {
+                "pulse": "WARMUP...", "score": 0.0,
+                "obi": m.obi if m else 0.0, "relative_volume": 1.0,
+            }
 
-        # Lógica para determinar o pulso
-        score = 0
-        # Imbalance de volume tem peso alto
-        score += metrics.volume_imbalance * 2 
-        # VPIN alto indica toxicidade, geralmente precede quedas (VPIN > 0.5 sugere toxicidade)
-        # Penaliza se o VPIN for alto e positivamente correlacionado com o volume imbalance
-        score -= (metrics.vpin - 0.5) * 2
+        rvol = m.relative_volume   # 1.0 = volume normal, 2.5+ = institucional
 
-        if score > 0.7:
-            pulse = "BULLISH"
-        elif score < -0.7:
-            pulse = "BEARISH"
+        # Score base: imbalance direcional + pressão do livro
+        base_score = (m.volume_imbalance * 0.7) + (m.obi * 0.3)
+
+        # Amplificador pelo volume relativo (baleias amplificam o sinal)
+        if rvol >= 2.5:
+            amp = 1.5    # Fluxo institucional — 50% de amplificação
+        elif rvol >= 1.5:
+            amp = 1.25   # Acima da média  — 25% de amplificação
         else:
-            pulse = "NEUTRAL"
-        
-        confidence = min(1.0, abs(score))
-        return {"pulse": pulse, "confidence": confidence, "score": score}
+            amp = 1.0    # Volume normal   — sem amplificação
+
+        score     = base_score * amp
+        abs_score = abs(score)
+        bullish   = score > 0
+
+        # Classificação: EXTREME só dispara com volume institucional confirmado
+        if rvol >= 2.5 and abs_score >= 0.35:
+            p = "EXTREME_BULLISH"  if bullish else "EXTREME_BEARISH"
+        elif abs_score >= 0.40:
+            p = "STRONG_BULLISH"   if bullish else "STRONG_BEARISH"
+        elif abs_score >= 0.15:
+            p = "BULLISH"          if bullish else "BEARISH"
+        else:
+            p = "NEUTRAL"
+
+        return {
+            "pulse":           p,
+            "score":           round(score, 4),
+            "obi":             round(m.obi, 4),
+            "vpin":            round(m.vpin, 4),
+            "delta":           round(m.aggressor_delta, 2),
+            "relative_volume": round(rvol, 2),
+        }

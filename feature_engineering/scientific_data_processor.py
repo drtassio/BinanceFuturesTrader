@@ -341,12 +341,17 @@ class ScientificDataProcessor:
         # Select numeric columns that exist
         numeric_cols = [c for c in feature_columns if c in df.columns and df[c].dtype in [np.float32, np.float64, np.int64]]
         
-        # [SCIENTIFIC DIMENSION CACHE] Check for feature count mismatch (e.g. 266 vs 252)
+        # [FIX] Jamais normalizar Hidden Features ou Latents (elas já vêm prontas do Autoencoder)
+        # Se normalizarmos 2x, perdemos a escala original e geramos ruído.
+        cols_to_normalize = [c for c in numeric_cols if not (c.startswith('hidden_') or c.startswith('sdae_latent'))]
+        logger.debug(f"🧪 [SCIENTIFIC] Normalizando {len(cols_to_normalize)} colunas técnicas. Preservando {len(numeric_cols) - len(cols_to_normalize)} colunas latentes.")
+        
+        # [SCIENTIFIC DIMENSION CACHE] Check for feature count mismatch
         if hasattr(scaler, 'n_features_in_'):
-            if scaler.n_features_in_ != len(numeric_cols):
+            if scaler.n_features_in_ != len(cols_to_normalize):
                 if fit:
                     logger.info(
-                        f"🔄 [SDAE] Adaptando scaler de {scaler.n_features_in_} para {len(numeric_cols)} features "
+                        f"🔄 [SDAE] Adaptando scaler de {scaler.n_features_in_} para {len(cols_to_normalize)} features "
                         f"(Regime: {self.REGIME_NAMES[regime_code]})"
                     )
                 else:
@@ -369,22 +374,21 @@ class ScientificDataProcessor:
             if regime_data is not None and len(regime_data) > 0:
                 # 1. Escala Global (Contexto de 101k samples)
                 temp_global = RobustScaler()
-                temp_global.fit(global_data)
+                temp_global.fit(df[cols_to_normalize].fillna(0).values)
                 
                 # 2. Centro de Regime (Contexto de 27k samples)
-                scaler.fit(regime_data)
+                scaler.fit(df.loc[regime_mask, cols_to_normalize].fillna(0).values)
                 
                 # 3. Injeção: Mantém a mediana do regime, mas usa a escala global
                 scaler.scale_ = temp_global.scale_
                 logger.info(f"✅ Scaler Regime-{regime_code} hibridizado (Estabilidade: Global IQR)")
             else:
                 logger.warning(f"⚠️ Dados insuficientes para fit do regime {regime_code}. Usando fit global.")
-                scaler.fit(global_data)
+                scaler.fit(df[cols_to_normalize].fillna(0).values)
         
-        # 🔬 [TRANSFORM] Aplicar a normalização híbrida (ou global) ao dataset
-        # Agora o df retornado terá escala Z (Robust) adequada ao regime.
+        # 🔬 [TRANSFORM] Aplicar a normalização híbrida (ou global) APENAS às colunas técnicas
         try:
-            df[numeric_cols] = scaler.transform(df[numeric_cols].fillna(0).values)
+            df[cols_to_normalize] = scaler.transform(df[cols_to_normalize].fillna(0).values)
         except Exception as e:
             logger.warning(f"⚠️ [SCIENTIFIC] Transform falhou: {e}. Usando fallback global para evitar crash.")
             fallback = RobustScaler()
@@ -427,18 +431,9 @@ class ScientificDataProcessor:
             logger.error("❌ DataFrame must have 'regime' column. Run add_regime_labels() first.")
             return None
         
-        # [BUG 11 FIX] Detectar se as features latentes do autoencoder ja normalizaram os dados.
-        # O temporal_autoencoder usa RobustScaler nas features latentes (sdae_latent_*).
-        # Se elas estiverem presentes, os dados ja passaram por uma normalizacao robusta
-        # e normalizar de novo criaria double-normalization (Z de Z = ruido puro).
-        latent_cols_present = any(col.startswith('sdae_latent') or col.startswith('hidden_') 
-                                   for col in df.columns)
-        if normalize and latent_cols_present:
-            logger.info("[BUG 11 FIX] Autoencoder latents detectados. Pulando 2a normalizacao para evitar double-scaling.")
-            normalize = False
-
-        # [BUG 12 FIX] fit_scaler=True deve ser usado APENAS no train_df.
-        # Para eval_df, sempre False para evitar data leakage das estat. do eval no scaler.
+        # [REMOVIDO BUG 11 FIX] Não desativamos mais a normalização global.
+        # Agora o normalize_for_specialist é inteligente o suficiente para pular APENAS as latents.
+        
         if normalize:
             df = self.normalize_for_specialist(
                 df, 

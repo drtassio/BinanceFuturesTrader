@@ -13,7 +13,11 @@ from datetime import datetime
 from models.trade_schema import Signal, Action
 from utils.logger import get_logger
 
+import logging
 logger = get_logger("Explainer")
+
+# Silencia logs internos matemáticos da biblioteca SHAP para limpar o terminal
+logging.getLogger('shap').setLevel(logging.WARNING)
 
 class Explainer:
     """
@@ -70,18 +74,45 @@ class Explainer:
             self.shap_explainer = None
             logger.info("✅ [EXPLAINER] Modo rápido inicializado para produção (explicações amostrais).")
 
-    def _get_feature_importance_from_shap(self, market_features_row: pd.Series, top_n: int = 5) -> List[Dict[str, Any]]:
+    def _get_feature_importance_from_shap(self, market_features_row: pd.Series, top_n: int = 5, source: str = "Unknown") -> List[Dict[str, Any]]:
         """Usa o SHAP para calcular a contribuição de cada feature."""
         try:
+            # [FIX] Garante que market_features_row seja uma Series para processamento uniforme
+            if isinstance(market_features_row, dict):
+                market_features_row = pd.Series(market_features_row)
+
             # [FIX] Filtra a linha para conter APENAS as features esperadas pelo SHAP
-            # Evita IndexError se market_features_row tiver mais colunas que background_data
             if hasattr(self, 'expected_features') and self.expected_features:
-                 # Robust intersection using pandas index method to match valid columns
-                 valid_features = market_features_row.index.intersection(self.expected_features)
-                 
-                 # Select valid columns and then reindex to fill missing expected columns with 0
-                 # This guarantees the output series has exactly self.expected_features in correct order
-                 market_features_row = market_features_row[valid_features].reindex(self.expected_features, fill_value=0)
+                # --- Alinhamento Robusto de Features ---
+                # Garante que os valores sejam numéricos e limpa o índice
+                market_features_row.index = [str(i).strip().lower().replace(' ', '_') for i in market_features_row.index]
+                market_features_row = pd.to_numeric(market_features_row, errors='coerce').fillna(0.0)
+                
+                expected_map = {str(f).strip().lower().replace(' ', '_'): f for f in self.expected_features}
+                current_series = market_features_row
+                
+                aligned_values = []
+                for expected_norm in expected_map.keys():
+                    found_val = None
+                    
+                    # 1. Busca Direta
+                    if expected_norm in current_series.index:
+                        found_val = current_series[expected_norm]
+                    
+                    # 2. Busca por Prefixo/Sufixo se falhou ou veio ZERO (pode ser zero real, mas checamos)
+                    if found_val is None or (found_val == 0.0 and 'hidden' in expected_norm):
+                        for idx_name in current_series.index:
+                            if expected_norm in idx_name or idx_name in expected_norm:
+                                found_val = current_series[idx_name]
+                                if found_val != 0.0: break # Achamos um valor real
+                    
+                    aligned_values.append(found_val if found_val is not None else 0.0)
+                
+                market_features_row = pd.Series(aligned_values, index=self.expected_features)
+                
+                # --- VALIDAÇÃO PÓS-ALINHAMENTO ---
+                final_non_zero = (market_features_row != 0.0).sum()
+                logger.debug(f"🔍 [XAI ALIGN] Alinhamento concluído. {final_non_zero} features com valor real (incl. hidden).")
             
             # Calcula os SHAP values para a observação atual
             shap_values = self.shap_explainer.shap_values(market_features_row.values, nsamples=100)
@@ -104,9 +135,14 @@ class Explainer:
             for _, row in top_contributors.iterrows():
                 effect = "positiva (apoiando COMPRA ou contra VENDA)" if row['shap_value'] > 0 else "negativa (apoiando VENDA ou contra COMPRA)"
                 reason = f"Contribuiu com {row['shap_value']:.4f} para o score final, indicando uma influência {effect}."
+                
+                # [PRECISION FIX] Aumenta precisão para Hidden Features (valores latentes do Autoencoder)
+                precision = 10 if "hidden" in str(row['feature']).lower() else 6
+                val_str = f"{row['value']:.{precision}f}"
+                
                 contributors_list.append({
                     "feature": row['feature'],
-                    "value": f"{row['value']:.4f}",
+                    "value": val_str,
                     "impact_score": f"{row['shap_value']:.4f}", # O SHAP value é o nosso novo 'impact_score'
                     "reason": reason
                 })
@@ -154,12 +190,16 @@ class Explainer:
             
             contributors_list = []
             for item in top_features:
-                effect = "positiva" if item['value'] > 0 else "negativa"
+                # [PRECISION FIX]
+                precision = 10 if "hidden" in str(item['feature']).lower() else 6
+                val_raw = item['value']
+                val_str = f"{val_raw:.{precision}f}"
+                
                 contributors_list.append({
                     "feature": item['feature'],
-                    "value": f"{item['value']:.4f}",
+                    "value": val_str,
                     "impact_score": f"{item['score']:.4f}",
-                    "reason": f"Feature com valor {effect} ({item['value']:.4f}) e score de impacto {item['score']:.4f}."
+                    "reason": f"Feature com valor {val_str} e score de impacto {item['score']:.4f}."
                 })
             
             return contributors_list
@@ -168,7 +208,7 @@ class Explainer:
             logger.error(f"❌ [EXPLAINER] Erro no método rápido: {e}")
             return [{"feature": "Erro na análise rápida", "value": "N/A", "reason": str(e)}]
 
-    def explain_decision(self, signal: Signal, market_features_row: pd.Series) -> Dict[str, Any]:
+    def explain_decision(self, signal: Signal, market_features_row: pd.Series, top_n: int = 5) -> Dict[str, Any]:
         """
         Gera uma explicação detalhada para uma decisão de trading usando SHAP.
         """
@@ -182,19 +222,22 @@ class Explainer:
                 # Retorna explicação simplificada para a maioria das decisões
                 return {
                     "narrative": f"Decisão {signal.action.value} com confiança {signal.confidence:.2%}. "
-                                f"Explicação detalhada disponível a cada {self.explanation_interval} decisões.",
+                                 f"Explicação detalhada disponível a cada {self.explanation_interval} decisões.",
                     "mode": "production_fast",
                     "explanation_counter": self.explanation_counter
                 }
         
         logger.info(f"🗣️ [EXPLAINER] Gerando explicação SHAP para a decisão: {signal.action.value}...")
         
+        # [FIX] Extrai a origem para o diagnóstico de Raio-X
+        source = signal.explanation.get('specialist', 'Ensemble')
+        
         # A obtenção da importância das features agora usa SHAP
         if self.shap_explainer:
-            contributors = self._get_feature_importance_from_shap(market_features_row)
+            contributors = self._get_feature_importance_from_shap(market_features_row, top_n=top_n, source=source)
         else:
             # Fallback para modo rápido
-            contributors = self._get_feature_importance_fast(market_features_row)
+            contributors = self._get_feature_importance_fast(market_features_row, top_n=top_n)
         
         narrative = self._generate_narrative(signal, contributors)
         
@@ -209,20 +252,68 @@ class Explainer:
         return explanation
 
     def _generate_narrative(self, signal: Signal, contributors: List[Dict]) -> str:
-        """Gera uma narrativa textual explicativa da decisão."""
+        """Gera uma narrativa textual explicativa e organizada da decisão."""
         action_desc = signal.action.value.upper()
         specialist = signal.explanation.get("specialist", "Motor de IA")
-        reason = signal.explanation.get("reason", "N/A")
+        # Se houve veto de risco, o motivo está no 'reason'
+        reason = signal.explanation.get("reason", "")
+        original_action = signal.explanation.get("original_action", None)
         
+        # --- 1. Cabeçalho da Decisão ---
         if signal.action == Action.HOLD:
-            narrative = f"O sistema decidiu aguardar ({action_desc}). Motivo principal: {reason if reason else 'Incerteza do mercado ou falta de sinal claro'}."
-            narrative += f"\nConfiança atual: {signal.confidence:.2%}."
+            if original_action:
+                # Caso de Veto de Risco
+                narrative = f"🛑 TRADE VETADO PELO RISCO ({original_action.value.upper()} -> HOLD)\n"
+                narrative += f"📌 Motivo: {reason if reason else 'Filtro de segurança ativado.'}"
+            else:
+                # Caso de HOLD natural do modelo
+                narrative = f"⚖️ DECISÃO: MANTER AGUARDANDO (HOLD)\n"
+                narrative += f"📌 Motivo: {reason if reason else 'Incerteza do mercado ou falta de sinal claro.'}"
+            
+            narrative += f"\n🎯 Confiança do Sinal: {signal.confidence:.2%}"
         else:
-            narrative = f"O especialista '{specialist}' recomendou uma ação de {action_desc} com confiança de {signal.confidence:.2%}."
+            # Caso de Execução
+            narrative = f"🚀 DECISÃO: EXECUTAR {action_desc}\n"
+            narrative += f"👤 Especialista: {specialist}\n"
+            narrative += f"🎯 Confiança: {signal.confidence:.2%}"
+            if reason:
+                narrative += f"\n📌 Contexto: {reason}"
 
+        # --- 2. Painel de Votação do Ensemble (MoE) ---
+        ensemble_details = signal.explanation.get("ensemble_details")
+        if ensemble_details:
+            narrative += "\n\n🗳️ VOTAÇÃO DO ENSEMBLE (MoE):"
+            narrative += "\n" + "─" * 60
+            narrative += f"\n{'AGENTE':<12} | {'PESO':<6} | {'VOTO':<6} | {'CONF.':<6}"
+            narrative += "\n" + "─" * 60
+            
+            for name, details in ensemble_details.items():
+                icon = "🐂" if "bull" in name.lower() else "🐻" if "bear" in name.lower() else "🤠"
+                weight_pct = f"{details.get('weight', 0)*100:>5.1f}%"
+                action = details.get('action', 'HOLD').upper()
+                conf = f"{details.get('confidence', 0)*100:>5.1f}%"
+                
+                # Formatação visual do voto
+                action_color = "🟢" if action == "BUY" else "🔴" if action == "SELL" else "⚪"
+                narrative += f"\n{icon} {name.capitalize():<9} | {weight_pct} | {action_color} {action:<4} | {conf}"
+            
+            # Adiciona o Score Ponderado Final
+            weighted_score = signal.explanation.get("weighted_score", 0.0)
+            score_bar = "┠" + ("█" * int(abs(weighted_score)*10)) + ("░" * (10 - int(abs(weighted_score)*10))) + "┨"
+            narrative += "\n" + "─" * 60
+            narrative += f"\n📊 Score Final Ponderado: {weighted_score:+.4f} {score_bar}"
+            narrative += "\n" + "─" * 60
+
+        # --- 2. Análise de Fatores (SHAP) ---
         if contributors:
-            narrative += "\n\nA análise SHAP revela que a decisão foi influenciada principalmente por:"
+            narrative += "\n\n📊 FATORES QUE MAIS INFLUENCIARAM A IA:"
+            narrative += "\n" + "─" * 60
             for c in contributors:
-                narrative += f"\n• {c['feature']} (valor: {c['value']}): {c['reason']}"
+                impact_val = float(c['impact_score'])
+                icon = "📈" if impact_val > 0 else "📉"
+                feat_name = c['feature'].replace('_', ' ').title()
+                # Formatação tipo tabela com largura ajustada para precisão (14 chars para Val)
+                narrative += f"\n{icon} {feat_name:<25} | Val: {str(c['value']):>14} | Imp: {impact_val:+.4f}"
+            narrative += "\n" + "─" * 60
         
         return narrative

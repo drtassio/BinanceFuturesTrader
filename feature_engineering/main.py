@@ -176,9 +176,27 @@ class FeatureEngineeringPipeline:
         for col in featured_df_combined.select_dtypes(include='bool').columns:
             featured_df_combined[col] = featured_df_combined[col].astype(int)
 
-        featured_df_combined.dropna(inplace=True)
+        # [FIX DROPNA] O dropna() irrestrito eliminava ~93% das linhas após o merge_asof
+        # multitimeframe porque colunas de TFs lentos (4h, 1h) chegam com NaN nas primeiras
+        # linhas da janela curta — comportamento esperado do merge_asof com direction='backward'.
+        #
+        # Estratégia correta:
+        #   1. ffill() → propaga o último valor conhecido de cada TF (ex: valor 4h é válido
+        #                até o próximo bar 4h; merge_asof já faz isso, mas pode falhar na borda)
+        #   2. bfill() → preenche o início absoluto (primeiras linhas sem barra anterior)
+        #   3. dropna(subset=OHLCV) → só remove linhas sem dados de preço (impossível operar)
+        #   4. fillna(0) → NaN residuais em indicadores viram 0 (neutro)
+        #
+        # Resultado esperado: ~600 linhas ao invés de ~40 → AE e especialistas funcionam.
+        required_ohlcv = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in featured_df_combined.columns]
+        featured_df_combined = featured_df_combined.ffill().bfill()
+        featured_df_combined.dropna(subset=required_ohlcv, inplace=True)
+        featured_df_combined = featured_df_combined.fillna(0.0)
+
+        rows_before = len(featured_df_combined)
         if featured_df_combined.empty:
             return None
+        logger.info(f"[MERGE] Multi-TF combinado: {rows_before} linhas preservadas após ffill/bfill.")
 
         # ETAPA 7: ADICIONAR REGIME LABELS (Hamilton 1989)
         try:
