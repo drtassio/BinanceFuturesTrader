@@ -242,12 +242,8 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
     final_conf = signal.confidence
     reason = signal.explanation.get('reason', 'N/A') if signal.explanation else 'N/A'
     
-    if signal.action == Action.HOLD:
-        status_icon = "⚖️"
-        conf_display = f"0.00% (Original: {orig_conf:.2%})" if orig_conf > 0 else "0.00%"
-    else:
-        status_icon = "🚀" if action_str == "BUY" else "🔻"
-        conf_display = f"{final_conf:.2%}"
+    status_icon = "⚖️" if signal.action == Action.HOLD else ("🚀" if action_str == "BUY" else "🔻")
+    conf_display = f"{orig_conf:.2%}"
 
     log_message = (
         f"\n🧠 {divider}\n"

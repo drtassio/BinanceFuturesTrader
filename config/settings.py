@@ -253,11 +253,48 @@ class AIConfig(Config):
 
 
     CURRICULUM_STAGES = [
-        {'name': 'Calm Markets', 'volatility_max': 0.01, 'trend_clarity_max': 0.2, 'episodes': 50000, 'success_criteria': {'sharpe_ratio': 1.5, 'max_drawdown_pct': 0.05}},
-        {'name': 'Moderate Volatility', 'volatility_max': 0.03, 'trend_clarity_min': 0.25, 'episodes': 100000, 'success_criteria': {'sharpe_ratio': 1.0, 'max_drawdown_pct': 0.10}},
-        {'name': 'Sideways & Choppy', 'volatility_max': 0.04, 'trend_clarity_min': 0.0, 'trend_clarity_max': 0.25, 'episodes': 150000, 'success_criteria': {'sharpe_ratio': 0.5, 'max_drawdown_pct': 0.08}},
-        {'name': 'High Volatility', 'volatility_max': 0.1, 'trend_clarity_min': 0.0, 'episodes': 200000, 'success_criteria': {'sharpe_ratio': 0.7, 'max_drawdown_pct': 0.12}},
-        {'name': 'Extreme Conditions (Crisis)', 'volatility_max': 1.0, 'trend_clarity_min': 0.0, 'episodes': 250000, 'success_criteria': {'sharpe_ratio': 0.3, 'max_drawdown_pct': 0.20}},
+        # min_training_runs: mínimo de ciclos de treino antes de avaliar (1 ciclo ≈ N especialistas treinados)
+        # max_training_runs: força avanço de estágio mesmo sem atingir critérios (válvula de segurança)
+        {
+            'name': 'Calm Markets',
+            'volatility_max': 0.01, 'trend_clarity_max': 0.2,
+            'episodes': 50000,
+            'min_training_runs': 5,   # avalia a partir do 5º ciclo de treino
+            'max_training_runs': 20,  # avança forçado após 20 ciclos (~5-7 sessões de treino)
+            'success_criteria': {'sharpe_ratio': 1.5, 'max_drawdown_pct': 0.05},
+        },
+        {
+            'name': 'Moderate Volatility',
+            'volatility_max': 0.03, 'trend_clarity_min': 0.25,
+            'episodes': 100000,
+            'min_training_runs': 5,
+            'max_training_runs': 20,
+            'success_criteria': {'sharpe_ratio': 1.0, 'max_drawdown_pct': 0.10},
+        },
+        {
+            'name': 'Sideways & Choppy',
+            'volatility_max': 0.04, 'trend_clarity_min': 0.0, 'trend_clarity_max': 0.25,
+            'episodes': 150000,
+            'min_training_runs': 5,
+            'max_training_runs': 25,
+            'success_criteria': {'sharpe_ratio': 0.5, 'max_drawdown_pct': 0.08},
+        },
+        {
+            'name': 'High Volatility',
+            'volatility_max': 0.1, 'trend_clarity_min': 0.0,
+            'episodes': 200000,
+            'min_training_runs': 5,
+            'max_training_runs': 25,
+            'success_criteria': {'sharpe_ratio': 0.7, 'max_drawdown_pct': 0.12},
+        },
+        {
+            'name': 'Extreme Conditions (Crisis)',
+            'volatility_max': 1.0, 'trend_clarity_min': 0.0,
+            'episodes': 250000,
+            'min_training_runs': 5,
+            'max_training_runs': 30,  # estágio final — dá mais tempo para consolidar
+            'success_criteria': {'sharpe_ratio': 0.3, 'max_drawdown_pct': 0.20},
+        },
     ]
     # [CONVERGÊNCIA] 500k validado empiricamente: Sharpe 8+, WR 78%, PF 9.6, ent_coef ~0.04.
     # Aumentar via TOTAL_TRAINING_TIMESTEPS no .env se necessário.

@@ -1383,10 +1383,21 @@ class AIController:
             self._initialize_decision_agents(actual_dim)
 
         logger.info(f"🚀 Iniciando Pipeline de Treinamento RL (Features: {actual_dim})")
-        
+
+        # ── Curriculum Learning: filtra dados pelo estágio atual de dificuldade ──
+        if self.curriculum_engine:
+            stage_name = self.curriculum_engine.get_current_stage_name()
+            logger.info(f"📚 [CURRÍCULO] Estágio ativo: '{stage_name}' "
+                        f"({self.curriculum_engine.current_stage_index + 1}/"
+                        f"{len(self.curriculum_engine.stages)})")
+            featured_df = self.curriculum_engine.prepare_training_data(featured_df)
+            logger.info(f"📚 [CURRÍCULO] Dataset filtrado: {len(featured_df)} amostras "
+                        f"(estágio '{stage_name}')")
+        # ─────────────────────────────────────────────────────────────────────────
+
         training_progress = training_progress or {}
         training_goals = training_goals or {}
-        
+
         # Variável para rastrear se novos conhecimentos foram gerados (para bootstrap da gating)
         any_specialist_trained = False
         train_df, eval_df = train_test_split(featured_df, test_size=0.2, shuffle=False)
@@ -1581,7 +1592,60 @@ class AIController:
                     training_progress[spec_class_name] = {}
                 training_progress[spec_class_name]["completed_timesteps"] = completed_steps + new_total_steps
                 any_specialist_trained = True
-                
+
+                # ── Curriculum Learning: atualiza progresso após cada especialista ──
+                if self.curriculum_engine:
+                    try:
+                        curriculum_metrics = {'sharpe_ratio': 0.0, 'max_drawdown_pct': 0.0}
+
+                        if hasattr(specialist, 'evaluate'):
+                            # Caminho ideal: especialista implementa evaluate()
+                            _em = specialist.evaluate(eval_df)
+                            curriculum_metrics = {
+                                'sharpe_ratio':     float(_em.get('sharpe_ratio', 0.0)),
+                                'max_drawdown_pct': float(_em.get('max_drawdown', 0.0)),
+                            }
+                        else:
+                            # Proxy: Sharpe de buy-and-hold no eval set filtrado pelo estágio.
+                            # Mede a "qualidade de sinal" do mercado nesse regime de dificuldade.
+                            # Em mercados calmos → Sharpe tende a ser > 1.5 (critério Stage 1).
+                            # Em mercados voláteis → Sharpe cai, refletindo maior dificuldade.
+                            _close_col = next(
+                                (c for c in ('close_15m', 'close_1h', 'close_4h', 'close')
+                                 if c in eval_df.columns),
+                                None
+                            )
+                            if _close_col and len(eval_df) > 20:
+                                _prices = eval_df[_close_col].dropna()
+                                _rets   = _prices.pct_change().dropna()
+                                if len(_rets) > 10:
+                                    # Sharpe anualizado para barras de 15 min (252 dias × 96 barras/dia)
+                                    _ann    = np.sqrt(252 * 96)
+                                    _sr     = float((_rets.mean() / (_rets.std() + 1e-8)) * _ann)
+                                    # Max drawdown da curva de retorno acumulado
+                                    _cumr   = (1.0 + _rets).cumprod()
+                                    _mdd    = float(abs(((_cumr - _cumr.cummax()) / _cumr.cummax()).min()))
+                                    curriculum_metrics = {
+                                        'sharpe_ratio':     float(np.clip(_sr, -5.0, 15.0)),
+                                        'max_drawdown_pct': _mdd,
+                                    }
+                                    logger.debug(
+                                        f"📚 [CURRÍCULO] Proxy buy-and-hold ({_close_col}): "
+                                        f"Sharpe={curriculum_metrics['sharpe_ratio']:.2f} | "
+                                        f"MDD={curriculum_metrics['max_drawdown_pct']:.2%} "
+                                        f"({len(_rets)} barras de eval)"
+                                    )
+
+                        self.curriculum_engine.update_progress(curriculum_metrics)
+                        logger.info(
+                            f"📚 [CURRÍCULO] Progresso atualizado após '{spec_class_name}': "
+                            f"Sharpe={curriculum_metrics['sharpe_ratio']:.2f} | "
+                            f"DD={curriculum_metrics['max_drawdown_pct']:.2%}"
+                        )
+                    except Exception as _ce:
+                        logger.debug(f"📚 [CURRÍCULO] Métricas não disponíveis para update_progress: {_ce}")
+                # ─────────────────────────────────────────────────────────────────────
+
                 logger.info(f"🎯 [PROGRESSO] '{spec_class_name}' treinado com sucesso. Prosseguindo para o próximo componente...")
             else:
                 logger.info(f"✅ Especialista '{spec_class_name}' já completou seu treinamento ({completed_steps:,} >= {total_target_steps:,}). Pulando.")
@@ -2657,6 +2721,28 @@ class AIController:
                             total_weight = sum(active_experts.values())
                             active_experts = {k: v / total_weight for k, v in active_experts.items()}
 
+                        # ── BMA Camada 1: Regime Confidence Scaling ──────────────────────
+                        # Blend entre pesos do soft gating e pesos iguais proporcional à
+                        # convicção do regime. BULL a 60% → distribui mais; BULL a 90% →
+                        # confia mais no gating. Aplica floor=15% e cap=70% por especialista.
+                        # Base científica: Hoeting et al. (1999) BMA + Hamilton (1989) regimes.
+                        _rc = (float(latest_row['regime_confidence'])
+                               if 'regime_confidence' in latest_row.index else 0.5)
+                        _n_exp = len(active_experts)
+                        if _n_exp > 0:
+                            _eq_w = 1.0 / _n_exp
+                            active_experts = {
+                                k: float(np.clip(
+                                    _rc * v + (1.0 - _rc) * _eq_w,  # blend gating↔igual
+                                    0.15, 0.70                       # floor=15%, cap=70%
+                                ))
+                                for k, v in active_experts.items()
+                            }
+                            _bma1_tot = sum(active_experts.values())
+                            if _bma1_tot > 0:
+                                active_experts = {k: v / _bma1_tot
+                                                  for k, v in active_experts.items()}
+                        # ─────────────────────────────────────────────────────────────────
                         logger.info(f"🧠 [SOFT GATING] Probabilidades: {probs} -> Especialistas Ativos: {active_experts}")
                 except Exception as e:
                     logger.error(f"❌ [SOFT GATING] Erro ao obter probabilidades: {e}. Usando fallback para Hard Switch.")
@@ -2690,18 +2776,44 @@ class AIController:
                     logger.warning(f"⚠️ Especialista '{expert_key}' não carregado. Ignorando no ensemble.")
                     continue
 
-                # Cópia isolada da observação original para este especialista
-                expert_observation = full_observation.copy()
-                
+                # ── FAST PATH: monta observação direto do contrato do especialista ──────
+                # Evita o re-encode do autoencoder — shape correto na primeira tentativa.
+                _spec_cols = getattr(active_specialist, 'feature_columns', [])
+                if not _spec_cols:
+                    _fs = getattr(active_specialist, 'feature_scaler', None)
+                    if _fs is not None and hasattr(_fs, 'feature_names_in_'):
+                        _spec_cols = list(_fs.feature_names_in_)
+
+                _mem_keys = ['dist_to_max_20', 'dist_to_min_20',
+                             'dist_to_max_50', 'dist_to_min_50']
+
+                if _spec_cols and all(c in latest_row.index for c in _spec_cols):
+                    _mkt = np.array([float(latest_row.get(c, 0.0)) for c in _spec_cols],
+                                    dtype=np.float32)
+                    _mem = np.array([float(latest_row.get(k, 0.0)) for k in _mem_keys],
+                                    dtype=np.float32)
+                    _prior = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
+                    expert_observation = np.concatenate(
+                        [_mkt, _mem, agent_state, time_features, _prior]
+                    )
+                    logger.debug(
+                        f"⚡ [FAST PATH] {active_specialist.__class__.__name__}: "
+                        f"shape {expert_observation.shape[0]} ✓ (sem re-encode)"
+                    )
+                else:
+                    # Fallback: usa observação genérica (caminho lento anterior)
+                    expert_observation = full_observation.copy()
+                # ─────────────────────────────────────────────────────────────────────
+
                 # Identifica o target_shape
                 target_shape = None
                 if hasattr(active_specialist, 'model') and active_specialist.model is not None:
                     if hasattr(active_specialist.model, 'observation_space'):
                         target_shape = active_specialist.model.observation_space.shape
-                
+
                 current_shape = expert_observation.shape
                 logger.debug(f"🧐 [DEBUG SHAPE] Specialist: {expert_key} | Current: {current_shape} | Target: {target_shape}")
-                
+
                 if target_shape and current_shape != target_shape:
                     logger.info(f"⚙️ [AI SHAPE FIX] Adaptando observação ({current_shape[0]} -> {target_shape[0]}) para {active_specialist.__class__.__name__}")
                     missing_dims = target_shape[0] - current_shape[0]
@@ -2810,6 +2922,81 @@ class AIController:
                 except Exception as e:
                     logger.error(f"❌ [AI ERROR] Erro no especialista {expert_key}: {e}", exc_info=True)
 
+            # ── BMA Camadas 2 & 3: Uncertainty Penalty + Rolling Performance ─────────
+            # Camada 2: especialista com baixa convicção própria perde peso.
+            # Camada 3: especialista que acertou nas últimas N barras ganha peso.
+            # Ambas aplicadas sobre os pesos já ajustados pela Camada 1.
+            # Base: EWA (Vovk 1990) + Gal & Ghahramani (2016) uncertainty + BMA.
+            if len(expert_signals) > 1:
+                # Preço atual para scoring da decisão anterior (1 barra de atraso)
+                _cur_price = float(
+                    latest_row['close_15m'] if 'close_15m' in latest_row.index
+                    else (latest_row['close'] if 'close' in latest_row.index else 0.0)
+                )
+
+                # Inicializa rastreadores na primeira chamada
+                if not hasattr(self, '_bma_perf_history'):
+                    self._bma_perf_history: Dict = {}   # {key: deque(maxlen=20)}
+                    self._bma_perf_mult:    Dict = {}   # {key: float}  — inicia em 1.0
+
+                # Score a decisão anterior com o preço desta barra
+                for _bk, _bhist in self._bma_perf_history.items():
+                    if _bhist and _bhist[-1].get('price') and _bhist[-1].get('outcome') is None:
+                        _bprev = _bhist[-1]
+                        if   _bprev['action'] == Action.BUY:
+                            _bhist[-1]['outcome'] = _cur_price > _bprev['price']
+                        elif _bprev['action'] == Action.SELL:
+                            _bhist[-1]['outcome'] = _cur_price < _bprev['price']
+                        else:
+                            _bhist[-1]['outcome'] = True   # HOLD = neutro (não penaliza)
+
+                        # Recalcula EWA accuracy — mínimo 3 observações para ser confiável
+                        _bouts = [h['outcome'] for h in _bhist if h.get('outcome') is not None]
+                        if len(_bouts) >= 3:
+                            _balpha = 0.9   # decaimento: observações recentes valem mais
+                            _bws    = [_balpha ** (len(_bouts)-1-i) for i in range(len(_bouts))]
+                            _bewa   = sum(w * int(o) for w, o in zip(_bws, _bouts)) / sum(_bws)
+                            # Multiplicador: 0.60 (0% acc) → 1.00 (50% acc) → 1.40 (100% acc)
+                            self._bma_perf_mult[_bk] = 0.60 + 0.80 * _bewa
+
+                # Aplica Camada 2 (incerteza) + Camada 3 (performance) nos pesos
+                _bma_adj = {}
+                for sig, w, name, key in expert_signals:
+                    _unc_factor  = 0.70 + 0.30 * float(sig.confidence)   # Camada 2
+                    _perf_factor = self._bma_perf_mult.get(key, 1.0)      # Camada 3
+                    _bma_adj[key] = w * _unc_factor * _perf_factor
+
+                _bma_tot = sum(_bma_adj.values())
+                if _bma_tot > 0:
+                    # Normaliza provisório → aplica floor/cap → renormaliza final
+                    _bprov   = {k: v / _bma_tot for k, v in _bma_adj.items()}
+                    _bcl     = {k: float(np.clip(v, 0.15, 0.70)) for k, v in _bprov.items()}
+                    _bcl_tot = sum(_bcl.values())
+                    if _bcl_tot > 0:
+                        _bfw = {k: v / _bcl_tot for k, v in _bcl.items()}
+                        expert_signals = [
+                            (sig, _bfw.get(key, w), name, key)
+                            for sig, w, name, key in expert_signals
+                        ]
+                        logger.info(
+                            "🎯 [BMA] Pesos finais (3 camadas BMA): "
+                            + " | ".join(
+                                f"{k.upper()}={_bfw.get(k, 0):.0%}"
+                                for k in sorted(_bfw)
+                            )
+                        )
+
+                # Registra decisão atual para scoring na próxima barra
+                for sig, w, name, key in expert_signals:
+                    if key not in self._bma_perf_history:
+                        self._bma_perf_history[key] = deque(maxlen=20)
+                    self._bma_perf_history[key].append({
+                        'action':  sig.action,
+                        'price':   _cur_price,
+                        'outcome': None,
+                    })
+            # ─────────────────────────────────────────────────────────────────────────
+
             # 3. Combinar sinais dos especialistas (Soft Ensemble)
             if not expert_signals:
                 strategic_signal = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "Nenhum sinal gerado pelos especialistas."})
@@ -2851,15 +3038,28 @@ class AIController:
                     weighted_sl /= sum_weights
                     weighted_tp /= sum_weights
 
+                # --- Etapa Contextual (Movida para suportar Threshold Adaptativo) ---
+                onchain_signal = self.onchain_engine.get_onchain_sentiment_signal(asset='BTC')
+                tape_pulse = self.tape_engine.get_market_pulse(self.config_trading.PRIMARY_PAIR)
+
                 # --- Cálculo de Confiança do Ensemble ---
                 # confidence = |score| — mesma escala [0, 1], proporcional à convicção direcional real.
                 confidence = abs(weighted_action_score)
                 weighted_confidence = float(np.clip(confidence, 0.0, 1.0))
 
-                # Threshold alinhado com MIN_CONFIDENCE_FOR_TRADE (0.60) para evitar labels
-                # SELL/BUY em sinais fracos que seriam vetados de qualquer forma pelo RiskManager.
-                # Sinais com |score| < 0.60 saem como HOLD diretamente (sem gerar "TRADE VETADO" falso).
-                _min_conf = getattr(self.config_trading, 'MIN_CONFIDENCE_FOR_TRADE', 0.60)
+                # [ADAPTIVE THRESHOLD] Ajusta sensibilidade com base na convicção do regime e força do Tape
+                _base_threshold = getattr(self.config_trading, 'MIN_CONFIDENCE_FOR_TRADE', 0.60)
+                _min_conf = _base_threshold
+                
+                # Se regime é incerto (<75%) e Tape é forte, reduzimos exigência (Opção 1 científica)
+                # Isso permite capturar correções ou explosões quando o regime ainda não virou mas o fluxo já.
+                _reg_conf = latest_row.get('regime_confidence', 0.5)
+                _pulse = tape_pulse.get('pulse', '')
+                if _reg_conf < 0.75 and _pulse.startswith(('STRONG', 'EXTREME')):
+                    _min_conf = max(0.40, _base_threshold * 0.7)
+                    if _min_conf < _base_threshold:
+                        logger.info(f"⚡ [ADAPTIVE] Threshold reduzido: {_base_threshold:.2f} -> {_min_conf:.2f} (Regime Conf: {_reg_conf:.0%}, Tape: {_pulse})")
+
                 if weighted_action_score > _min_conf:
                     final_action = Action.BUY
                 elif weighted_action_score < -_min_conf:
@@ -2906,8 +3106,7 @@ class AIController:
                 return strategic_signal
 
             # --- Etapa 7: Modulação Contextual e Aprovação Final de Risco ---
-            onchain_signal = self.onchain_engine.get_onchain_sentiment_signal(asset='BTC')
-            tape_pulse = self.tape_engine.get_market_pulse(self.config_trading.PRIMARY_PAIR)
+            # (onchain_signal e tape_pulse já foram extraídos acima para o Threshold Adaptativo)
             
             # RiskManager (MIN_PROFIT_PROBABILITY=0.60). O ProfitabilityPredictor foi removido;
             # usamos a confiança do especialista como proxy: especialista confiante → alta
@@ -2925,6 +3124,7 @@ class AIController:
                 # [XAI] Armazena metadados da rejeição para o Explainer
                 modulated_signal.explanation['reason'] = reason
                 modulated_signal.explanation['original_action'] = strategic_signal.action # Salva a intenção original
+                modulated_signal.explanation['original_confidence'] = strategic_signal.confidence # Salva a confiança original
                 
                 final_rejection = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
                                          explanation=modulated_signal.explanation)
@@ -2985,14 +3185,50 @@ class AIController:
         # --- Classificacao da forca do Tape Pulse ----------------------------
         # TapeEngine retorna: EXTREME_BULLISH | STRONG_BULLISH | BULLISH |
         #                     NEUTRAL | BEARISH | STRONG_BEARISH | EXTREME_BEARISH
-        # O score já está amplificado pelo RVol — usamos ele como proxy de força.
+        # O score já está amplificado pelo RVol e penalizado pelo depth_quality.
         pulse      = tape_pulse.get('pulse', 'NEUTRAL')
-        tape_score = abs(float(tape_pulse.get('score', 0.0)))  # já amplificado pelo RVol
+        tape_score = abs(float(tape_pulse.get('score', 0.0)))
         rvol       = float(tape_pulse.get('relative_volume', 1.0))
 
-        # STRONG quando: sinal já é STRONG/EXTREME OU score alto OU volume institucional
-        is_strong  = pulse.startswith('STRONG') or pulse.startswith('EXTREME') or \
-                     tape_score >= 0.50 or rvol >= 1.5
+        # ── Depth profile (Fase 1) ────────────────────────────────────────────
+        depth_quality     = float(tape_pulse.get('depth_quality', 1.0))
+        zone_near         = float(tape_pulse.get('zone_imbalance_near', 0.0))
+        zone_mid          = float(tape_pulse.get('zone_imbalance_mid', 0.0))
+        wall_bid          = bool(tape_pulse.get('wall_bid', False))
+        wall_ask          = bool(tape_pulse.get('wall_ask', False))
+        wall_bid_price    = float(tape_pulse.get('wall_bid_price', 0.0))
+        wall_ask_price    = float(tape_pulse.get('wall_ask_price', 0.0))
+
+        # ── STRONG: pulso já é STRONG/EXTREME, OU score alto, OU institucional ──
+        is_strong = (
+            pulse.startswith('STRONG') or pulse.startswith('EXTREME') or
+            tape_score >= 0.50 or rvol >= 1.5
+        )
+
+        # ── Ajuste por qualidade de profundidade ──────────────────────────────
+        # Livro raso (depth_quality < 0.85): sinal pode ser 1 ordem grande mascarada.
+        # Downgrade de STRONG para regular BUY/SELL, exceto se fluxo for institucional.
+        if depth_quality < 0.85 and rvol < 2.5:
+            is_strong = False
+
+        # ── Convergência de zonas: near e mid confirmam? ──────────────────────
+        # Se pressão imediata (0-2) e intenção (3-9) apontam na mesma direção
+        # → confirma o sinal e pode promover a STRONG.
+        # Se divergem → sinal ambíguo, downgrade (exceto fluxo institucional).
+        bullish_pulse = 'BULLISH' in pulse
+        zones_confirm = (
+            (zone_near > 0.08 and zone_mid > 0.05 and bullish_pulse) or
+            (zone_near < -0.08 and zone_mid < -0.05 and not bullish_pulse)
+        )
+        zones_diverge = (
+            (zone_near > 0.08 and zone_mid < -0.05) or
+            (zone_near < -0.08 and zone_mid > 0.05)
+        )
+
+        if zones_confirm and not is_strong:
+            is_strong = True   # zonas convergentes promovem o sinal
+        if zones_diverge and rvol < 2.5:
+            is_strong = False  # zonas divergentes rebaixam (exceto institucional)
 
         if 'BULLISH' in pulse:
             tape_strength = 'STRONG_BUY' if is_strong else 'BUY'
@@ -3000,6 +3236,14 @@ class AIController:
             tape_strength = 'STRONG_SELL' if is_strong else 'SELL'
         else:
             tape_strength = 'NEUTRAL'
+
+        # ── Wall check: muro na direção oposta ao trade ───────────────────────
+        # Não veta (o VETO já trata tape oposto), mas impede AMPLIFICAÇÃO.
+        # Comprar contra um muro de ask = redução de potencial de alta.
+        has_opposing_wall = (
+            (action == Action.BUY  and wall_ask) or
+            (action == Action.SELL and wall_bid)
+        )
 
         # --- Bloco de VETO ---------------------------------------------------
         # Condicoes em que o trade e vetado (convertido em HOLD)
@@ -3023,12 +3267,13 @@ class AIController:
         elif action == Action.SELL and onchain_sig == 'BULLISH' and onchain_conf > 0.7:
             veto_reason = 'VETO: Sentimento fortemente BULLISH contra venda'
         elif action == Action.BUY and tape_strength == 'STRONG_SELL':
-            veto_reason = f'VETO: Tape BEARISH de alta confianca ({tape_conf:.0%}) contra compra'
+            veto_reason = f'VETO: Tape BEARISH de alta confianca (score={tape_score:.2f}, rvol={rvol:.1f}x) contra compra'
         elif action == Action.SELL and tape_strength == 'STRONG_BUY':
-            veto_reason = f'VETO: Tape BULLISH de alta confianca ({tape_conf:.0%}) contra venda'
+            veto_reason = f'VETO: Tape BULLISH de alta confianca (score={tape_score:.2f}, rvol={rvol:.1f}x) contra venda'
 
         if veto_reason:
             final_signal.explanation['modulation'] = veto_reason
+            final_signal.explanation['original_confidence'] = final_signal.confidence
             logger.info(f'[MOD] {veto_reason}')
             return replace(final_signal, action=Action.HOLD, confidence=0.0, position_size_pct=0.0)
 
@@ -3039,12 +3284,14 @@ class AIController:
             and profit_prob > 0.75
             and onchain_sig == 'BULLISH'
             and tape_strength in ('STRONG_BUY', 'BUY')
+            and not has_opposing_wall   # não amplifica contra muro de ask
         )
         is_sell_amplified = (
             action == Action.SELL
             and profit_prob > 0.75
             and onchain_sig == 'BEARISH'
             and tape_strength in ('STRONG_SELL', 'SELL')
+            and not has_opposing_wall   # não amplifica contra muro de bid
         )
 
         if is_buy_amplified or is_sell_amplified:
@@ -3093,7 +3340,16 @@ class AIController:
             return final_signal
 
         # --- Sinal aprovado sem modificacao ----------------------------------
-        msg = f'APROVADO: Tape={tape_strength} | Sentiment={onchain_sig} | prob={profit_prob:.2%}'
+        wall_info = ""
+        if wall_ask and action == Action.BUY:
+            wall_info = f" | ⚠️ Muro ask ${wall_ask_price:,.0f}"
+        elif wall_bid and action == Action.SELL:
+            wall_info = f" | ⚠️ Muro bid ${wall_bid_price:,.0f}"
+        depth_info = f" | Livro={'raso' if depth_quality < 0.85 else 'profundo'} (q={depth_quality:.0%})"
+        msg = (
+            f'APROVADO: Tape={tape_strength} | Sentiment={onchain_sig} | '
+            f'prob={profit_prob:.2%}{depth_info}{wall_info}'
+        )
         final_signal.explanation['modulation'] = msg
         return final_signal
 
