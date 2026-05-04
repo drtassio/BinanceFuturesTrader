@@ -3117,7 +3117,19 @@ class AIController:
             from dataclasses import replace as dc_replace
             strategic_signal = dc_replace(strategic_signal, profit_probability=profit_prob)
 
-            modulated_signal = self._apply_contextual_modulation(strategic_signal, onchain_signal, tape_pulse, profit_prob)
+            # Determina regime atual para modulação
+            regime_code = int(latest_row.get('regime', 2))
+            regime_map = {0: 'BULL', 1: 'BEAR', 2: 'RANGER'}
+            current_regime_str = regime_map.get(regime_code, 'RANGER')
+
+            modulated_signal = self._apply_contextual_modulation(
+                strategic_signal, 
+                onchain_signal, 
+                tape_pulse, 
+                profit_prob, 
+                current_regime_str,
+                recent_market_df
+            )
             is_approved, reason = self.risk_manager.check_trade_approval(modulated_signal)
             
             if not is_approved:
@@ -3162,7 +3174,33 @@ class AIController:
             return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
                           explanation={"reason": f"Critical error: {e}"})    
 
-    def _apply_contextual_modulation(self, strategic_signal: Signal, onchain_signal: Dict, tape_pulse: Dict, profit_prob: float) -> Signal:
+    def _calculate_hurst_exponent(self, prices: np.ndarray, max_lags: int = 20) -> float:
+        """
+        Calcula o Expoente de Hurst simplificado via Análise de Variância.
+        H > 0.5: Tendência (Persistente)
+        H < 0.5: Reversão à Média (Anti-persistente)
+        H = 0.5: Random Walk
+        """
+        try:
+            if len(prices) < max_lags * 2:
+                return 0.5
+            
+            # Usa log-prices para estabilidade
+            log_prices = np.log(prices)
+            lags = range(2, max_lags)
+            
+            # Calcula a desvio padrão das diferenças para cada lag
+            tau = [np.std(np.subtract(log_prices[lag:], log_prices[:-lag])) for lag in lags]
+            
+            # Regressão linear: log(lags) vs log(tau)
+            reg = np.polyfit(np.log(lags), np.log(tau), 1)
+            
+            # O expoente de Hurst é a inclinação da reta
+            return float(np.clip(reg[0], 0.0, 1.0))
+        except Exception:
+            return 0.5
+
+    def _apply_contextual_modulation(self, strategic_signal: Signal, onchain_signal: Dict, tape_pulse: Dict, profit_prob: float, current_regime: str, recent_df: pd.DataFrame = None) -> Signal:
         """
         Modula o sinal estrategico com base no contexto de mercado em tempo real.
 
@@ -3191,7 +3229,6 @@ class AIController:
         rvol       = float(tape_pulse.get('relative_volume', 1.0))
 
         # ── Depth profile (Fase 1) ────────────────────────────────────────────
-        depth_quality     = float(tape_pulse.get('depth_quality', 1.0))
         zone_near         = float(tape_pulse.get('zone_imbalance_near', 0.0))
         zone_mid          = float(tape_pulse.get('zone_imbalance_mid', 0.0))
         wall_bid          = bool(tape_pulse.get('wall_bid', False))
@@ -3252,10 +3289,98 @@ class AIController:
 
         if profit_prob < 0.40:
             veto_reason = f'VETO: Probabilidade de lucro muito baixa ({profit_prob:.2%})'
-        # [FIX PRODUÇÃO] Replica a restrição de direção do ambiente de treino.
-        # BullSpecialist só opera LONG; BearSpecialist só opera SHORT.
-        # Durante o treino _specialist_long_only=True impede o ambiente de aceitar short.
-        # Em produção aplicamos o mesmo filtro: SELL em BULL ou BUY em BEAR → HOLD.
+        
+        # [SURPRISE FILTER + HURST EXPONENT]
+        # Calcula a 'física' do mercado: Hurst < 0.45 indica reversão à média (Range-bound)
+        # Nesses casos, operar contra a tendência é cientificamente correto.
+        hurst = 0.5
+        if recent_df is not None and not recent_df.empty:
+            _prices = recent_df['close'].tail(100).values
+            hurst = self._calculate_hurst_exponent(_prices)
+
+        is_counter_trend = (
+            (action == Action.BUY and current_regime == 'BEAR') or
+            (action == Action.SELL and current_regime == 'BULL')
+        )
+        
+        allow_counter_trend = False
+        if is_counter_trend:
+            # Se Hurst < 0.45, o mercado é anti-persistente (reverte). Liberamos o trade com menor exigência.
+            if hurst < 0.45:
+                if strategic_signal.confidence > 0.55 and tape_score > 0.40:
+                    allow_counter_trend = True
+                    logger.info(f"🌀 [HURST] Mercado Anti-Persistente (H={hurst:.2f}). Permitindo reversão à média.")
+            
+            # Se Hurst > 0.55, o mercado tem memória de tendência forte. Exigimos evidência extrema.
+            else:
+                _h_threshold = 0.80 if hurst < 0.60 else 0.90 # Mais rígido se tendência for muito forte
+                _tape_dir_match = (action == Action.BUY and 'BULLISH' in pulse) or (action == Action.SELL and 'BEARISH' in pulse)
+                
+                if strategic_signal.confidence > _h_threshold and _tape_dir_match and tape_score > 0.85:
+                    allow_counter_trend = True
+                    logger.info(f"⚡ [SURPRISE] Contra-tendência em mercado trend (H={hurst:.2f}) permitida por fluxo massivo.")
+            
+            if not allow_counter_trend:
+                veto_reason = f'VETO: Contra-tendência bloqueada (Regime: {current_regime}, Hurst: {hurst:.2f})'
+
+        # [FIX PRODUÇÃO] Mantém compatibilidade com flags de especialistas
+        elif strategic_signal.explanation.get('_regime_mismatch'):
+            regime_mismatch_info = strategic_signal.explanation.get('regime', 'UNKNOWN')
+            veto_reason = (
+                f'VETO: Sinal contra especialidade do regime ({regime_mismatch_info}). '
+                f'Ação {action.value} bloqueada para não operar fora da direção treinada.'
+            )
+
+        if zones_confirm and not is_strong:
+            is_strong = True   # zonas convergentes promovem o sinal
+        if zones_diverge and rvol < 2.5:
+            is_strong = False  # zonas divergentes rebaixam (exceto institucional)
+
+        if 'BULLISH' in pulse:
+            tape_strength = 'STRONG_BUY' if is_strong else 'BUY'
+        elif 'BEARISH' in pulse:
+            tape_strength = 'STRONG_SELL' if is_strong else 'SELL'
+        else:
+            tape_strength = 'NEUTRAL'
+
+        # ── Wall check: muro na direção oposta ao trade ───────────────────────
+        # Não veta (o VETO já trata tape oposto), mas impede AMPLIFICAÇÃO.
+        # Comprar contra um muro de ask = redução de potencial de alta.
+        has_opposing_wall = (
+            (action == Action.BUY  and wall_ask) or
+            (action == Action.SELL and wall_bid)
+        )
+
+        # --- Bloco de VETO ---------------------------------------------------
+        # Condicoes em que o trade e vetado (convertido em HOLD)
+        onchain_sig  = onchain_signal.get('signal', 'NEUTRAL')
+        onchain_conf = float(onchain_signal.get('confidence', 0.0))
+
+        if profit_prob < 0.40:
+            veto_reason = f'VETO: Probabilidade de lucro muito baixa ({profit_prob:.2%})'
+        
+        # [SURPRISE FILTER] Logica de Contra-Tendencia (Soft Veto)
+        # Em vez de bloquear BUY em BEAR (e vice-versa), permitimos se houver EVIDENCIA EXTREMA.
+        is_counter_trend = (
+            (action == Action.BUY and current_regime == 'BEAR') or
+            (action == Action.SELL and current_regime == 'BULL')
+        )
+        
+        allow_counter_trend = False
+        if is_counter_trend:
+            # Requisitos para ignorar o veto de regime:
+            # 1. Confiança da IA muito alta (>80%)
+            # 2. Tape Pulse condizente com a direção e forte (score > 0.50)
+            # 3. OBI/Fluxo extremamente forte (> 0.80)
+            _tape_dir_match = (action == Action.BUY and 'BULLISH' in pulse) or (action == Action.SELL and 'BEARISH' in pulse)
+            
+            if strategic_signal.confidence > 0.80 and _tape_dir_match and tape_score > 0.80:
+                allow_counter_trend = True
+                logger.info(f"⚡ [SURPRISE] Operação contra-tendência permitida! Conf: {strategic_signal.confidence:.0%}, Tape: {tape_score:.2f}")
+            else:
+                veto_reason = f'VETO: Contra-tendência bloqueada (Regime: {current_regime}). Evidência insuficiente.'
+
+        # [FIX PRODUÇÃO] Mantém compatibilidade com flags de especialistas
         elif strategic_signal.explanation.get('_regime_mismatch'):
             regime_mismatch_info = strategic_signal.explanation.get('regime', 'UNKNOWN')
             veto_reason = (
@@ -3321,19 +3446,27 @@ class AIController:
         is_buy_dampened  = action == Action.BUY  and tape_strength in ('STRONG_SELL', 'SELL')
         is_sell_dampened = action == Action.SELL and tape_strength in ('STRONG_BUY',  'BUY')
 
-        if is_buy_dampened or is_sell_dampened:
+        if is_buy_dampened or is_sell_dampened or is_counter_trend:
             dampening_factor = 0.80
+            if is_counter_trend:
+                 # Contra-tendência é MUITO atenuada (proteção de capital)
+                 dampening_factor = 0.35 
+                 
             final_signal = replace(
                 final_signal,
                 position_size_pct=final_signal.position_size_pct * dampening_factor,
                 leverage=max(
-                    final_signal.leverage * dampening_factor,
+                    min(final_signal.leverage * dampening_factor, 2.0), # Cap alavancagem em 2x no contra-tendência
                     self.config_trading.MIN_LEVERAGE_PER_TRADE
                 ),
+                # Aperta o SL em 30% para operações contra-tendência
+                stop_loss=final_signal.stop_loss * (0.7 if is_counter_trend else 1.0)
             )
+            
+            _type = "CONTRA-TENDÊNCIA" if is_counter_trend else "ATENUADO"
             msg = (
-                f'ATENUADO x{dampening_factor}: Tape={tape_strength} opoe-se ao trade '
-                f'({action.value}). Sentiment={onchain_sig}'
+                f'{_type} x{dampening_factor}: Tape={tape_strength} | '
+                f'Regime={current_regime} | Conf={strategic_signal.confidence:.0%}'
             )
             final_signal.explanation['modulation'] = msg
             logger.info(f'[MOD] {msg}')
