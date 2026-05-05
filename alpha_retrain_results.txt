@@ -1,5 +1,0 @@
-
-✅ Resultados do Re-treinamento:
-   - Forward Return Bull (1h): 0.0342%
-   - Forward Return Bear (1h): -0.0303%
-   - Financial Validity: ✅ PASSED
