@@ -1,0 +1,4 @@
+  File "C:\Users\TAOLIVE\OneDrive - Daimler Truck\Desktop\aprendiz\Bot Shield\Bot Shield\tests\test_market_diagnostic.py", line 169
+    REGIME_COLS_STANDALONE = ["regime","regime_name"]
+    ^
+IndentationError: expected an indented block after 'if' statement on line 167

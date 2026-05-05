@@ -2153,8 +2153,6 @@ class TemporalAutoencoderPipeline:
             available_cols = [c for c in use_cols if c in df.columns]
             
             # [FIX] Usa o scaler treinado em vez de criar um novo.
-            # Criar RobustScaler() novo e fitá-lo nos dados de teste produzia
-            # erros em escala diferente do treino — resultados OOD inválidos.
             df_numeric = df[available_cols].copy()
             df_numeric.fillna(0, inplace=True)
             if self.scaler_fitted:
@@ -2162,33 +2160,12 @@ class TemporalAutoencoderPipeline:
             else:
                 logger.warning("⚠️ [SDAE] Scaler não fitado. OOD usará fit_transform (apenas fallback).")
                 scaled_data = RobustScaler().fit_transform(df_numeric.values)
-                if len(data) < seq_length + 1:
-                    return np.nan
-                
-                # [MEMORY FIX] Processa em blocos para evitar pre-alocação gigante
-                self.autoencoder.eval()
-                errors = []
-                
-                with torch.no_grad():
-                    batch_size = 128
-                    for i in range(0, len(data) - seq_length + 1, batch_size):
-                        end_idx = min(i + batch_size, len(data) - seq_length + 1)
-                        batch_data = []
-                        for j in range(i, end_idx):
-                            batch_data.append(data[j : j + seq_length])
-                        
-                        batch_tensor = torch.FloatTensor(np.array(batch_data)).to(self.device)
-                        recon, _, _, _ = self.autoencoder(batch_tensor, regime_labels=None, training=False)
-                        err = torch.mean((recon - batch_tensor) ** 2, dim=(1, 2))
-                        errors.extend(err.cpu().numpy())
-                
-                return float(np.mean(errors)) if errors else np.nan
             
             # Baseline: últimos 30% dos dados (excluindo OOD periods)
             baseline_start = int(len(scaled_data) * 0.7)
-            baseline_error = compute_reconstruction_error(scaled_data[baseline_start:])
+            baseline_error = self._compute_reconstruction_error(scaled_data[baseline_start:])
             
-            results = {'baseline': baseline_error}
+            results = {'baseline': float(baseline_error) if not np.isnan(baseline_error) else 0.0}
             
             # Testa cada período OOD
             for start_date, end_date, label in ood_periods:
@@ -2196,13 +2173,9 @@ class TemporalAutoencoderPipeline:
                     period_mask = (df.index >= start_date) & (df.index <= end_date)
                     period_data = scaled_data[period_mask.values]
                     
-                    if len(period_data) < seq_length:
-                        results[label] = {'error': np.nan, 'acceptable': False}
-                        continue
+                    ood_error = self._compute_reconstruction_error(period_data)
                     
-                    ood_error = compute_reconstruction_error(period_data)
-                    
-                    # Degradação aceitável: até 50% do baseline (Harmonizado)
+                    # Degradação aceitável: até 50% do baseline
                     degradation = (ood_error / baseline_error - 1) if baseline_error > 0 else 0
                     acceptable = degradation < 0.5  # Max 50% degradação
                     
@@ -2211,7 +2184,6 @@ class TemporalAutoencoderPipeline:
                         'degradation': float(degradation),
                         'acceptable': acceptable
                     }
-                    
                 except Exception as e:
                     results[label] = {'error': None, 'acceptable': False, 'exception': str(e)}
             
@@ -2220,7 +2192,33 @@ class TemporalAutoencoderPipeline:
         except Exception as e:
             logger.error(f"❌ [SDAE] Erro na validação OOD: {e}")
             return {'error': str(e)}
-    
+
+    def _compute_reconstruction_error(self, data: np.ndarray) -> float:
+        """Helper para calcular erro de reconstrução com proteção de memória."""
+        import torch
+        seq_length = self.hyperparams.get('sequence_length', 32)
+        if len(data) < seq_length:
+            return np.nan
+            
+        self.autoencoder.eval()
+        errors = []
+        with torch.no_grad():
+            batch_size = 128
+            # Usa stride para não processar cada milisegundo (performance)
+            stride = 5
+            for i in range(0, len(data) - seq_length + 1, batch_size * stride):
+                batch_data = []
+                for j in range(i, min(i + batch_size * stride, len(data) - seq_length + 1), stride):
+                    batch_data.append(data[j : j + seq_length])
+                
+                if not batch_data: continue
+                batch_tensor = torch.FloatTensor(np.array(batch_data)).to(self.device)
+                recon, _, _, _ = self.autoencoder(batch_tensor, regime_labels=None, training=False)
+                err = torch.mean((recon - batch_tensor) ** 2, dim=(1, 2))
+                errors.extend(err.cpu().numpy())
+        
+        return float(np.mean(errors)) if errors else np.nan
+
     def permutation_test_reconstruction(
         self, 
         df: pd.DataFrame, 
@@ -2228,18 +2226,6 @@ class TemporalAutoencoderPipeline:
     ) -> Dict[str, Any]:
         """
         🔬 Teste de permutação para verificar se modelo aprendeu padrões genuínos.
-        
-        Referência: Good, P. (2006) - "Permutation, Parametric and Bootstrap Tests of Hypotheses"
-        
-        H0: Modelo não captura estrutura temporal (reconstrução igual em dados shuffled)
-        H1: Modelo captura estrutura (reconstrução pior em dados shuffled)
-        
-        Args:
-            df: DataFrame com features
-            n_permutations: Número de permutações
-            
-        Returns:
-            Dicionário com p-value e interpretação
         """
         if self.autoencoder is None:
             return {'error': 'Model not trained', 'p_value': 1.0}
@@ -2248,89 +2234,43 @@ class TemporalAutoencoderPipeline:
             import torch
             from sklearn.preprocessing import RobustScaler
             
-            # Usa as colunas do modelo
             use_cols = self.feature_columns[:self.hyperparams.get('input_dim', len(self.feature_columns))]
             available_cols = [c for c in use_cols if c in df.columns]
             
-            # [FIX] Usa o scaler treinado — mesma escala do treino
             df_numeric = df[available_cols].copy()
             df_numeric.fillna(0, inplace=True)
+            
             if self.scaler_fitted:
                 scaled_data = self.scaler.transform(df_numeric.values)
             else:
                 scaled_data = RobustScaler().fit_transform(df_numeric.values)
+            
+            # Testa nos últimos 20%
+            test_start = int(len(scaled_data) * 0.8)
             test_data = scaled_data[test_start:]
             
-            def compute_error(data: np.ndarray) -> float:
-                """Calcula erro de reconstrução."""
-                if len(data) < seq_length + 1:
-                    return np.nan
-                
-                # [MEMORY FIX] Processa em blocos para evitar pre-alocação gigante
-                self.autoencoder.eval()
-                errors = []
-                
-                with torch.no_grad():
-                    batch_size = 128
-                    # Usa stride 5 para velocidade conforme original
-                    indices = np.arange(0, len(data) - seq_length + 1, 5)
-                    for i in range(0, len(indices), batch_size):
-                        batch_indices = indices[i:i + batch_size]
-                        batch_data = []
-                        for idx in batch_indices:
-                            batch_data.append(data[idx : idx + seq_length])
-                        
-                        batch_tensor = torch.FloatTensor(np.array(batch_data)).to(self.device)
-                        recon, _, _, _ = self.autoencoder(batch_tensor, regime_labels=None, training=False)
-                        err = torch.mean((recon - batch_tensor) ** 2, dim=(1, 2))
-                        errors.extend(err.cpu().numpy())
-                
-                return float(np.mean(errors)) if errors else np.nan
-            
             # Erro real
-            real_error = compute_error(test_data)
+            real_error = self._compute_reconstruction_error(test_data)
             
             # Erros permutados
             perm_errors = []
             for i in range(n_permutations):
-                # Shuffle temporal order
                 perm_data = test_data.copy()
                 np.random.shuffle(perm_data)
-                
-                perm_error = compute_error(perm_data)
-                if not np.isnan(perm_error):
-                    perm_errors.append(perm_error)
+                err = self._compute_reconstruction_error(perm_data)
+                if not np.isnan(err):
+                    perm_errors.append(err)
             
             if not perm_errors:
-                return {
-                    'error': 'No valid permutation errors computed',
-                    'p_value': 1.0
-                }
+                return {'error': 'No valid permutation errors', 'p_value': 1.0}
             
-            perm_mean = float(np.mean(perm_errors))
-            perm_std = float(np.std(perm_errors))
-            
-            # P-value: proporção de permutações com erro <= real
-            # Se modelo aprendeu padrões, real_error < perm_errors
             p_value = float(np.mean([1 if pe <= real_error else 0 for pe in perm_errors]))
             
-            # Interpretação
-            if p_value < 0.01:
-                interpretation = "🔬 EXCELENTE: Modelo captura padrões temporais genuínos (p<0.01)"
-            elif p_value < 0.05:
-                interpretation = "✅ BOM: Evidência de aprendizado de padrões (p<0.05)"
-            elif p_value < 0.10:
-                interpretation = "⚠️ MARGINAL: Evidência fraca de padrões (p<0.10)"
-            else:
-                interpretation = "❌ FALHOU: Sem evidência de aprendizado de padrões (p>=0.10)"
-            
             return {
-                'real_error': real_error,
-                'perm_error_mean': perm_mean,
-                'perm_error_std': perm_std,
+                'real_error': float(real_error),
+                'perm_error_mean': float(np.mean(perm_errors)),
                 'p_value': p_value,
-                'n_permutations': n_permutations,
-                'interpretation': interpretation
+                'interpretation': "✅ PADRÕES DETECTADOS" if p_value < 0.05 else "❌ SEM PADRÕES TEMPORAIS"
             }
             
         except Exception as e:

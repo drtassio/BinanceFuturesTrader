@@ -22,15 +22,27 @@ class TapeMetrics:
     def __init__(self):
         self.aggressor_delta: float = 0.0
         self.volume_imbalance: float = 0.0
-        self.vpin: float = 0.0  
+        self.vpin: float = 0.0
         self.trade_rate_per_sec: float = 0.0
-        self.last_update_time: Optional[datetime] = None 
-        self.obi: float = 0.0  
+        self.last_update_time: Optional[datetime] = None
+        self.obi: float = 0.0
         self.best_bid: float = 0.0
         self.best_ask: float = 0.0
-        # Novas métricas quânticas
+        # Volume relativo
         self.relative_volume: float = 1.0  # 1.0 = volume normal
         self.avg_volume_2h: float = 0.0
+        # ── LOB Depth Profile (Fase 1) ────────────────────────────────────────
+        # depth_slope: nível0 / nível9 — alto = livro raso/frágil; baixo = profundo
+        self.depth_slope_bid: float = 1.0
+        self.depth_slope_ask: float = 1.0
+        # zone_imbalance: pressão imediata (níveis 0-2) vs intenção (níveis 3-9)
+        self.zone_imbalance_near: float = 0.0
+        self.zone_imbalance_mid: float = 0.0
+        # wall: nível com volume > 3× a média — suporte/resistência dinâmica
+        self.wall_bid: bool = False
+        self.wall_ask: bool = False
+        self.wall_bid_price: float = 0.0
+        self.wall_ask_price: float = 0.0
 
 class TapeEngine:
     def __init__(self, connector: BinanceConnector, symbols: List[str]):
@@ -182,16 +194,95 @@ class TapeEngine:
                 data = await self.connector._make_request("GET", "/fapi/v1/depth", params={"symbol": symbol, "limit": 100}, signed=False)
             
             if data and 'bids' in data and 'asks' in data:
-                best_bid_qty = float(data['bids'][0][1])
-                best_ask_qty = float(data['asks'][0][1])
+                bids = data['bids']
+                asks = data['asks']
+                if not bids or not asks:
+                    return
+
+                best_bid_qty = float(bids[0][1])
+                best_ask_qty = float(asks[0][1])
                 m = self.metrics[symbol]
-                m.best_bid, m.best_ask = float(data['bids'][0][0]), float(data['asks'][0][0])
+                m.best_bid, m.best_ask = float(bids[0][0]), float(asks[0][0])
                 total_qty = best_bid_qty + best_ask_qty
                 if total_qty > 0:
                     m.obi = (best_bid_qty - best_ask_qty) / total_qty
                     m.last_update_time = datetime.utcnow()
+
+                # ── Perfil de profundidade com os níveis brutos disponíveis ──
+                self._calculate_depth_profile(m, bids, asks)
+
         except Exception:
             pass
+
+    def _calculate_depth_profile(self, m: 'TapeMetrics', bids: list, asks: list):
+        """
+        Calcula métricas de perfil de profundidade do LOB a partir dos níveis brutos.
+
+        Usa os primeiros 20 níveis disponíveis.
+
+        Métricas produzidas:
+          depth_slope_bid/ask   — vol_nível0 / vol_nível9  (livro raso vs profundo)
+          zone_imbalance_near   — imbalance nos níveis 0-2 (pressão imediata)
+          zone_imbalance_mid    — imbalance nos níveis 3-9 (intenção de curto prazo)
+          wall_bid / wall_ask   — nível com vol > 3× média (suporte/resistência)
+          wall_bid/ask_price    — preço do muro detectado
+        """
+        try:
+            n = min(20, len(bids), len(asks))
+            if n < 5:
+                return
+
+            bid_vols = [float(bids[i][1]) for i in range(n)]
+            ask_vols = [float(asks[i][1]) for i in range(n)]
+
+            # ── 1. Depth Slope ─────────────────────────────────────────────────
+            # Compara o nível mais próximo (0) com o nível 9 (distante).
+            # Slope alto (>5): liquidez concentrada no topo — livro frágil, fácil de mover.
+            # Slope baixo (<2): liquidez distribuída — livro resistente, slippage alto.
+            ref = min(9, n - 1)
+            m.depth_slope_bid = bid_vols[0] / (bid_vols[ref] + 1e-8)
+            m.depth_slope_ask = ask_vols[0] / (ask_vols[ref] + 1e-8)
+
+            # ── 2. Zone Imbalance ──────────────────────────────────────────────
+            # Near (0-2): quem está comprando/vendendo agora.
+            # Mid  (3-9): quem está posicionado para o próximo movimento.
+            near_end = min(3, n)
+            mid_end  = min(10, n)
+
+            bid_near = sum(bid_vols[:near_end])
+            ask_near = sum(ask_vols[:near_end])
+            tot_near = bid_near + ask_near
+            m.zone_imbalance_near = (bid_near - ask_near) / tot_near if tot_near > 0 else 0.0
+
+            bid_mid = sum(bid_vols[near_end:mid_end])
+            ask_mid = sum(ask_vols[near_end:mid_end])
+            tot_mid = bid_mid + ask_mid
+            m.zone_imbalance_mid = (bid_mid - ask_mid) / tot_mid if tot_mid > 0 else 0.0
+
+            # ── 3. Wall Detection ──────────────────────────────────────────────
+            # Nível com volume > 3× a média dos demais → muro de suporte/resistência.
+            # Pega o mais próximo do melhor preço (índice mais baixo).
+            avg_bid = sum(bid_vols) / len(bid_vols)
+            avg_ask = sum(ask_vols) / len(ask_vols)
+            wall_thr = 3.0
+
+            m.wall_bid = False
+            m.wall_ask = False
+            m.wall_bid_price = 0.0
+            m.wall_ask_price = 0.0
+
+            for i in range(n):
+                if not m.wall_bid and bid_vols[i] > avg_bid * wall_thr:
+                    m.wall_bid       = True
+                    m.wall_bid_price = float(bids[i][0])
+                if not m.wall_ask and ask_vols[i] > avg_ask * wall_thr:
+                    m.wall_ask       = True
+                    m.wall_ask_price = float(asks[i][0])
+                if m.wall_bid and m.wall_ask:
+                    break
+
+        except Exception:
+            pass   # falha silenciosa — métricas ficam com defaults seguros
 
     def _calculate_metrics(self, symbol: str):
         m = self.metrics[symbol]
@@ -248,40 +339,71 @@ class TapeEngine:
             return {
                 "pulse": "WARMUP...", "score": 0.0,
                 "obi": m.obi if m else 0.0, "relative_volume": 1.0,
+                "depth_slope": 1.0, "depth_quality": 1.0,
+                "zone_imbalance_near": 0.0, "zone_imbalance_mid": 0.0,
+                "wall_bid": False, "wall_ask": False,
+                "wall_bid_price": 0.0, "wall_ask_price": 0.0,
             }
 
-        rvol = m.relative_volume   # 1.0 = volume normal, 2.5+ = institucional
+        rvol = m.relative_volume   # 1.0 = normal, 2.5+ = institucional
 
-        # Score base: imbalance direcional + pressão do livro
+        # ── Score base: imbalance direcional + pressão do livro ───────────────
         base_score = (m.volume_imbalance * 0.7) + (m.obi * 0.3)
 
-        # Amplificador pelo volume relativo (baleias amplificam o sinal)
+        # ── Amplificador por volume relativo (baleias amplificam) ─────────────
         if rvol >= 2.5:
-            amp = 1.5    # Fluxo institucional — 50% de amplificação
+            amp = 1.5
         elif rvol >= 1.5:
-            amp = 1.25   # Acima da média  — 25% de amplificação
+            amp = 1.25
         else:
-            amp = 1.0    # Volume normal   — sem amplificação
+            amp = 1.0
 
-        score     = base_score * amp
+        score = base_score * amp
+
+        # ── Penalidade de qualidade de livro (Fase 1) ─────────────────────────
+        # Livro raso = liquidez concentrada só no nível 0 → ruído alto, possível
+        # manipulação por 1 ordem grande. Penaliza o score para não gerar sinais
+        # EXTREME/STRONG com base em microestrutura frágil.
+        #
+        #   depth_slope > 8 : quase toda liquidez no nível 0 → penaliza 25%
+        #   depth_slope 4-8 : livro moderado                 → penaliza 10%
+        #   depth_slope < 4 : livro distribuído              → sem penalidade
+        avg_slope = (m.depth_slope_bid + m.depth_slope_ask) / 2.0
+        if avg_slope > 8.0:
+            depth_quality = 0.75
+        elif avg_slope > 4.0:
+            depth_quality = 0.90
+        else:
+            depth_quality = 1.0
+
+        score     = score * depth_quality
         abs_score = abs(score)
         bullish   = score > 0
 
-        # Classificação: EXTREME só dispara com volume institucional confirmado
+        # ── Classificação ─────────────────────────────────────────────────────
         if rvol >= 2.5 and abs_score >= 0.35:
-            p = "EXTREME_BULLISH"  if bullish else "EXTREME_BEARISH"
+            p = "EXTREME_BULLISH" if bullish else "EXTREME_BEARISH"
         elif abs_score >= 0.40:
-            p = "STRONG_BULLISH"   if bullish else "STRONG_BEARISH"
+            p = "STRONG_BULLISH"  if bullish else "STRONG_BEARISH"
         elif abs_score >= 0.15:
-            p = "BULLISH"          if bullish else "BEARISH"
+            p = "BULLISH"         if bullish else "BEARISH"
         else:
             p = "NEUTRAL"
 
         return {
-            "pulse":           p,
-            "score":           round(score, 4),
-            "obi":             round(m.obi, 4),
-            "vpin":            round(m.vpin, 4),
-            "delta":           round(m.aggressor_delta, 2),
-            "relative_volume": round(rvol, 2),
+            "pulse":                p,
+            "score":                round(score, 4),
+            "obi":                  round(m.obi, 4),
+            "vpin":                 round(m.vpin, 4),
+            "delta":                round(m.aggressor_delta, 2),
+            "relative_volume":      round(rvol, 2),
+            # ── Depth profile (Fase 1) ────────────────────────────────────────
+            "depth_slope":          round(avg_slope, 2),
+            "depth_quality":        round(depth_quality, 2),
+            "zone_imbalance_near":  round(m.zone_imbalance_near, 4),
+            "zone_imbalance_mid":   round(m.zone_imbalance_mid, 4),
+            "wall_bid":             m.wall_bid,
+            "wall_ask":             m.wall_ask,
+            "wall_bid_price":       round(m.wall_bid_price, 2),
+            "wall_ask_price":       round(m.wall_ask_price, 2),
         }

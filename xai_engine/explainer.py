@@ -2,8 +2,11 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from trading.ai_controller import AIController
 
 # --- NOVAS IMPORTAÇÕES CRÍTICAS ---
 # import shap  # [LAZY LOAD] Movido para dentro da classe para economizar memória no import inicial
@@ -270,7 +273,8 @@ class Explainer:
                 narrative = f"⚖️ DECISÃO: MANTER AGUARDANDO (HOLD)\n"
                 narrative += f"📌 Motivo: {reason if reason else 'Incerteza do mercado ou falta de sinal claro.'}"
             
-            narrative += f"\n🎯 Confiança do Sinal: {signal.confidence:.2%}"
+            conf_val = signal.explanation.get('original_confidence', signal.confidence)
+            narrative += f"\n🎯 Confiança do Sinal: {conf_val:.2%}"
         else:
             # Caso de Execução
             narrative = f"🚀 DECISÃO: EXECUTAR {action_desc}\n"
