@@ -389,9 +389,9 @@ class TrendFollowingEnv(gym.Env):
             dtype=np.float32
         )
         # Extra features desejadas do TrendPredictor/Autoencoder
+        # qpnl_* removidos: sempre 0.0 (sem gerador real) → neurônios mortos
         self.extra_feature_keys: List[str] = [
             'tp_duration_median', 'tp_uncertainty',
-            'qpnl_24_p50', 'qpnl_24_p90', 'qpnl_48_p50', 'qpnl_48_p90',
             'tp_regime_up', 'tp_regime_down', 'tp_regime_sideways',
             'sdae_recon_error'
         ]
@@ -968,13 +968,17 @@ class TrendFollowingEnv(gym.Env):
         # 3. Padrões técnicos aceitos SOMENTE em _15m e _1h
         _TECH_PATTERNS = (
             'log_return', 'hl_range_pct', 'oc_move_pct', 'close_frac',
+            'high_frac', 'low_frac',        # fracdiff de high/low (estacionário)
             'realized_vol',
             'rsi',                          # rsi_15m, rsi_1h, rsi_oversold_*, rsi_overbought_*
             'macd_hist', 'macd_cross',
             'adx',                          # adx_15m, adx_1h, adx_strong_trend_*, adx_weak_trend_*
             'plus_di', 'minus_di',
+            'stoch_k', 'stoch_d',           # osciladores [0-100], bons para reversão
             'bb_width', 'bb_squeeze', 'bb_expansion',
             'atr_percentage',
+            'cmf',                          # Chaikin Money Flow [-1,1]
+            'hc_wick', 'lc_wick',           # tamanho de sombras — sinal de reversão
             'money_flow', 'volume_pressure',
             'ema_trend', 'psar_trend',
         )
@@ -1864,14 +1868,17 @@ class TrendFollowingEnv(gym.Env):
             if (self.position > 0 and should_open_short) or (self.position < 0 and should_open_long):
                 should_open_long = False
                 should_open_short = False
-        # [SAFETY FINAL] Long-only: bloqueia short independente de qualquer caminho anterior
-        if getattr(self, '_specialist_long_only', False):
-            should_open_short = False
-            trend_allows_short = False
-        # [SAFETY FINAL] Short-only: bloqueia long para BearSpecialist
-        if getattr(self, '_specialist_short_only', False):
-            should_open_long = False
-            trend_allows_long = False
+        # [SOFT VETO] Especialistas unidirecionais agora usam penalidades no reward
+        # em vez de bloqueios rígidos (Hard Gates). Isso permite que o gradiente
+        # de política (SAC) aprenda o "porquê" de não operar contra o regime.
+        if getattr(self, '_specialist_long_only', False) and should_open_short:
+            # Sinaliza mismatch para o scientific_reward
+            info['_regime_mismatch'] = True
+            # Não bloqueamos a abertura, deixamos o RL sentir a punição
+            pass
+        if getattr(self, '_specialist_short_only', False) and should_open_long:
+            info['_regime_mismatch'] = True
+            pass
 
         # [DIAGNOSTICO] Capturado APÓS todos os safety overrides — valores refletem decisão final.
         # CORREÇÃO CRÍTICA #5: Logs Diagnósticos Aprimorados

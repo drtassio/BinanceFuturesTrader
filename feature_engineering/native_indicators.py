@@ -6,6 +6,7 @@
 ImplementaÃ§Ã£o nativa de indicadores tÃ©cnicos usando Python, Pandas e NumPy.
 """
 
+import os
 import pandas as pd
 import numpy as np
 try:
@@ -13,7 +14,7 @@ try:
 except ImportError:
     torch = None
 from typing import Tuple, List, Dict, Optional
-from utils.logger import get_logger , LOG_LEVEL_DEBUG 
+from utils.logger import get_logger , LOG_LEVEL_DEBUG
 
 logger = get_logger("NativeIndicators" , LOG_LEVEL_DEBUG)
 
@@ -28,6 +29,38 @@ class NativeIndicators:
     # Formato: { "BTCUSDT-15m": (d_value, timestamp_unix) }
     _d_cache: Dict[str, Tuple[float, float]] = {}
     _D_CACHE_TTL_SECONDS: float = 3600.0  # Revalida 1x por hora
+
+    # Persist d values to disk so training d == inference d across restarts
+    _D_PERSIST_PATH: str = os.path.join(os.getcwd(), "models_ai", "fracdiff_d_values.json") if True else ""
+
+    @staticmethod
+    def _load_d_from_disk() -> Dict[str, float]:
+        """Load persisted d values. Returns {} on any failure."""
+        try:
+            import json
+            path = NativeIndicators._D_PERSIST_PATH
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _save_d_to_disk(cache_key: str, d_val: float) -> None:
+        """Persist d value for cache_key to disk (non-blocking, silent on error)."""
+        try:
+            import json
+            path = NativeIndicators._D_PERSIST_PATH
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            existing = NativeIndicators._load_d_from_disk()
+            existing[cache_key] = round(d_val, 4)
+            with open(path, "w") as f:
+                json.dump(existing, f, indent=2)
+        except Exception:
+            pass
 
     @staticmethod
     def _validate_series(series: pd.Series, min_length: int, name: str) -> bool:
@@ -144,10 +177,11 @@ class NativeIndicators:
             return 1.0
 
         # ------------------------------------------------------------------
-        # CAMADA 1: Cache TTL
+        # CAMADA 1: Cache TTL + Disco (training d == inference d cross-restart)
         # ------------------------------------------------------------------
         now = time.time()
         if cache_key and not force_recalc:
+            # 1a. In-memory cache (sub-second, TTL=1h)
             cached = NativeIndicators._d_cache.get(cache_key)
             if cached is not None:
                 d_cached, ts_cached = cached
@@ -155,6 +189,13 @@ class NativeIndicators:
                 if age < NativeIndicators._D_CACHE_TTL_SECONDS:
                     logger.debug(f"✅ [FRACDIFF CACHE] {cache_key}: d={d_cached:.3f} (age={age:.0f}s)")
                     return d_cached
+            # 1b. Disk cache — preserva o mesmo d entre restarts (treino == inferência)
+            disk_vals = NativeIndicators._load_d_from_disk()
+            if cache_key in disk_vals:
+                d_disk = disk_vals[cache_key]
+                NativeIndicators._d_cache[cache_key] = (d_disk, now)
+                logger.info(f"✅ [FRACDIFF DISK] {cache_key}: d={d_disk:.3f} (carregado do disco — consistente com treino)")
+                return d_disk
 
         # ------------------------------------------------------------------
         # CAMADA 2: Importa validator — fallback se indisponível
@@ -249,9 +290,10 @@ class NativeIndicators:
             f"{'✅ Estacionário' if guard_pv < p_threshold else '⚠️ Fallback d=1.0'}"
         )
 
-        # Salva no cache
+        # Salva em memória e em disco (garante treino == inferência entre restarts)
         if cache_key:
             NativeIndicators._d_cache[cache_key] = (final_d, now)
+            NativeIndicators._save_d_to_disk(cache_key, final_d)
 
         return final_d
 

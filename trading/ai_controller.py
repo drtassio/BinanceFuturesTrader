@@ -429,10 +429,8 @@ class AIController:
                     cols = json.load(f)
                     if isinstance(cols, list) and cols:
                         self.metadata['base_feature_columns'] = cols
-                        self.metadata['final_feature_count'] = len(cols)
                         self.base_feature_columns = cols
-                        self.final_feature_count = len(cols)
-                        logger.debug(f"ðŸ”§ Contrato de features inferido: {len(cols)} colunas")
+                        logger.debug(f"Contrato de features inferido: {len(cols)} colunas AE (base_feature_columns)")
             except Exception as e:
                 logger.debug(f"âš ï¸ NÃ£o foi possÃ­vel inferir contrato de features: {e}")
         
@@ -573,7 +571,7 @@ class AIController:
             # Se não há specialists ou HRL Master, inicializar agora
             if not self.specialists or not self.hrl_master:
                 # Determina input_dim a partir dos metadados ou padrão
-                input_dim = int(self.metadata.get('final_feature_count') or 54)
+                input_dim = int(self.metadata.get('final_feature_count') or 75)
                 logger.info(f"⚡ [FAST_STARTUP] Inicializando agentes de decisão com input_dim={input_dim}...")
                 self._initialize_decision_agents(input_dim)
             
@@ -1148,10 +1146,9 @@ class AIController:
             df_enriched['trend_pred_neutral'] = df_enriched['tp_regime_sideways']
             
             # Fill remaining with defaults if missing
+            # trend_success_prob / predicted_volatility_high / predicted_breakout removidos:
+            # sem gerador real → sempre constantes → std=0 → scaler output zero → dead neurons
             defaults = {
-                'trend_success_prob': 0.5,
-                'predicted_volatility_high': 0.0,
-                'predicted_breakout': 0.0,
                 'tp_uncertainty': 0.5,
                 'tp_duration_median': 10.0
             }
@@ -1171,15 +1168,12 @@ class AIController:
                 'trend_pred_uptrend': 0.0,
                 'trend_pred_downtrend': 0.0,
                 'trend_pred_confidence': 0.5,
-                'trend_success_prob': 0.5,
-                'predicted_volatility_high': 0.0,
-                'predicted_breakout': 0.0,
-                # Compatibilidade com TrendSpecialist (tp_ prefix)
-                'tp_prior_dir': 0.0, # Neutral direction
-                'tp_prior_conf': 0.5, # Neutral confidence
+                # trend_success_prob / predicted_volatility_high / predicted_breakout removidos
+                'tp_prior_dir': 0.0,
+                'tp_prior_conf': 0.5,
                 'tp_regime_up': 0.0,
                 'tp_regime_down': 0.0,
-                'tp_regime_sideways': 1.0, 
+                'tp_regime_sideways': 1.0,
                 'tp_uncertainty': 0.5,
                 'tp_duration_median': 10.0,
             }
@@ -2478,10 +2472,9 @@ class AIController:
                  
                  extra_feature_keys = [
                      'tp_duration_median', 'tp_uncertainty',
-                     'qpnl_24_p50', 'qpnl_24_p90', 'qpnl_48_p50', 'qpnl_48_p90',
                      'tp_regime_up', 'tp_regime_down', 'tp_regime_sideways',
                      'sdae_recon_error',
-                     'dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50' # Memory features
+                     'dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50'
                  ]
                  
                  existing_essential_cols = [col for col in essential_env_cols if col in df_fully_enriched.columns]
@@ -2814,42 +2807,53 @@ class AIController:
             if not expert_signals:
                 strategic_signal = Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "Nenhum sinal gerado pelos especialistas."})
             else:
+                # --- Cálculo de Ensemble com Normalização de Votantes ---
+                # Evita a "Dead Zone" onde especialistas em HOLD diluem a convicção de quem quer operar.
+                # Referência: Jacobs et al. (1991) - Adaptive Mixtures of Local Experts (Gating Refinement)
+                voters = [(s, weight, n, k) for s, weight, n, k in expert_signals if s.action != Action.HOLD]
+                
                 weighted_action_score = 0.0
-                weighted_confidence = 0.0
                 weighted_leverage = 0.0
                 weighted_size = 0.0
                 weighted_sl = 0.0
                 weighted_tp = 0.0
-                
                 sum_weights = 0.0
                 ensemble_details = {}
-                
-                for sig, w, name, key in expert_signals:
-                    if sig.action == Action.BUY:
-                        act_val = sig.confidence
-                    elif sig.action == Action.SELL:
-                        act_val = -sig.confidence
-                    else:
-                        act_val = 0.0
+
+                if voters:
+                    # Normaliza pesos apenas entre quem quer operar (Votantes Ativos)
+                    voter_weight_sum = sum(v[1] for v in voters)
+                    for sig, w, name, key in expert_signals:
+                        # Detalhes do ensemble usam o peso original para transparência
+                        ensemble_details[name] = {"action": sig.action.value, "confidence": sig.confidence, "weight": float(w), "regime": key.upper()}
+                        
+                        # Cálculo ponderado usa peso normalizado se for votante, senão 0.0
+                        is_voter = sig.action != Action.HOLD
+                        w_norm = (w / voter_weight_sum) if is_voter else 0.0
+                        
+                        if sig.action == Action.BUY:
+                            act_val = sig.confidence
+                        elif sig.action == Action.SELL:
+                            act_val = -sig.confidence
+                        else:
+                            act_val = 0.0
+                        
+                        weighted_action_score += act_val * w_norm
+                        weighted_leverage += sig.leverage * w_norm
+                        weighted_size += sig.position_size_pct * w_norm
+                        
+                        sl_val = sig.stop_loss if (sig.stop_loss is not None and sig.stop_loss > 0) else self.config_trading.DEFAULT_STOP_LOSS_PCT
+                        tp_val = sig.take_profit if (sig.take_profit is not None and sig.take_profit > 0) else self.config_trading.DEFAULT_TAKE_PROFIT_PCT
+                        weighted_sl += sl_val * w_norm
+                        weighted_tp += tp_val * w_norm
                     
-                    weighted_action_score += act_val * w
-                    weighted_leverage += sig.leverage * w
-                    weighted_size += sig.position_size_pct * w
-                    
-                    sl_val = sig.stop_loss if (sig.stop_loss is not None and sig.stop_loss > 0) else self.config_trading.DEFAULT_STOP_LOSS_PCT
-                    tp_val = sig.take_profit if (sig.take_profit is not None and sig.take_profit > 0) else self.config_trading.DEFAULT_TAKE_PROFIT_PCT
-                    
-                    weighted_sl += sl_val * w
-                    weighted_tp += tp_val * w
-                    
-                    sum_weights += w
-                    ensemble_details[name] = {"action": sig.action.value, "confidence": sig.confidence, "weight": float(w), "regime": key.upper()}
-                
-                if sum_weights > 0:
-                    weighted_leverage /= sum_weights
-                    weighted_size /= sum_weights
-                    weighted_sl /= sum_weights
-                    weighted_tp /= sum_weights
+                    sum_weights = 1.0 # Pesos normalizados sempre somam 1.0
+                else:
+                    # Ninguém quer operar: preenche detalhes mas mantém scores zerados
+                    for sig, w, name, key in expert_signals:
+                        ensemble_details[name] = {"action": sig.action.value, "confidence": sig.confidence, "weight": float(w), "regime": key.upper()}
+                    weighted_action_score = 0.0
+                    sum_weights = 0.0
 
                 # --- Cálculo de Confiança do Ensemble ---
                 # confidence = |score| — mesma escala [0, 1], proporcional à convicção direcional real.

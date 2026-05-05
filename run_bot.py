@@ -776,12 +776,14 @@ async def initialize_all_components():
                     background_df = background_df[available_cols]
                     logger.info(f"✅ [SHAP] Background filtrado para {len(available_cols)} features")
                 else:
-                    logger.info("ℹ️ [SHAP] Colunas base não encontradas. Usando primeiras 53 colunas.")
-                    background_df = background_df.iloc[:, :53]
+                    _n_shap = getattr(ai_controller, 'final_feature_count', 62)
+                    logger.info(f"ℹ️ [SHAP] Colunas base não encontradas. Usando primeiras {_n_shap} colunas.")
+                    background_df = background_df.iloc[:, :_n_shap]
             else:
-                # Fallback: use first 53 columns if no base_feature_columns defined anywhere
-                logger.info("ℹ️ [SHAP] base_feature_columns não encontrado. Usando primeiras 53 colunas.")
-                background_df = background_df.iloc[:, :53]
+                # Fallback: use first N columns based on known feature count
+                _n_shap = getattr(ai_controller, 'final_feature_count', 62)
+                logger.info(f"ℹ️ [SHAP] base_feature_columns não encontrado. Usando primeiras {_n_shap} colunas.")
+                background_df = background_df.iloc[:, :_n_shap]
             
             # 1. Cria a instância do Explainer, passando o controller e os dados
             # [MELHORIA] Explainer com modo de produção

@@ -697,6 +697,24 @@ def compute_scientific_reward(
         reward -= 0.8
 
     # ─────────────────────────────────────────────────────────────────────────
+    # COMPONENTE 12: CORRECT HOLD BONUS (Recompensa por Prudência)
+    # ─────────────────────────────────────────────────────────────────────────
+    # Premia o agente por estar FLAT quando o regime do especialista está em
+    # desacordo com a movimentação imediata do preço (evitando perdas).
+    # Ex: Bull specialist está FLAT enquanto o preço cai -> bônus por prudência.
+    if env.position == 0 and not trade_closed_this_step and prev_price:
+        price_change_pct = (current_price - prev_price) / (prev_price + 1e-9)
+        # Se Bull e preço cai, HOLD é correto
+        if 'bull' in _specialist_name and price_change_pct < -0.0005:
+            # Bônus proporcional à queda evitada, saturado em 0.10
+            patience_bonus = 0.10 * np.tanh(abs(price_change_pct) / (atr_pct + 1e-9))
+            reward += float(patience_bonus)
+        # Se Bear e preço sobe, HOLD é correto
+        elif 'bear' in _specialist_name and price_change_pct > 0.0005:
+            patience_bonus = 0.10 * np.tanh(abs(price_change_pct) / (atr_pct + 1e-9))
+            reward += float(patience_bonus)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # FINALIZACAO: CQL Clipping implicito via clip final
     # ─────────────────────────────────────────────────────────────────────────
     # Ref: Kumar et al. (2020) CQL — Conservative Q-Learning.

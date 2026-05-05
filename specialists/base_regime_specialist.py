@@ -487,10 +487,10 @@ class BaseRegimeSpecialist(TrendSpecialist):
         if signal is None:
             return None
 
-        # Aplica restrições de direção baseadas no especialista
-        direction = getattr(self, '_specialist_direction', 'both')
-        
-        # Bull: long_only | Bear: short_only | Ranger: both
+        # [SOFT PENALTY] Em vez de bloquear (Hard Veto), reduzimos a confiança drasticamente.
+        # Isso permite que o sinal passe para o ensemble (se for muito forte), mas sinaliza
+        # ao RL que operar contra o regime é um erro estratégico via reward shaping.
+        # Ref: Dr. Tensor Fix - "Hard masking breaks policy gradient".
         mismatch = False
         if direction == 'long_only' and signal.action == Action.SELL:
             mismatch = True
@@ -498,18 +498,18 @@ class BaseRegimeSpecialist(TrendSpecialist):
             mismatch = True
 
         if mismatch:
-            # [HARD BLOCK] Em produção, não permitimos operações contra a especialidade do regime.
-            # Bull: apenas BUY | Bear: apenas SELL.
             if signal.explanation is None:
                 signal.explanation = {}
             
             original_action = signal.action.value
-            signal.action = Action.HOLD
-            signal.confidence = 0.0
-            signal.explanation['_regime_mismatch'] = True
-            signal.explanation['reason'] = f"{self.name}: sinal {original_action} bloqueado (regime {self.regime_type} exige {direction})"
+            original_conf = signal.confidence
             
-            logger.info(f"{'🐂' if direction == 'long_only' else '🐻'} [REGIME FILTER] {self.name}: {original_action} bloqueado → HOLD ({direction} em produção)")
+            # Redução de 80% na confiança - o sinal ainda existe mas é "sussurrado" no ensemble
+            signal.confidence *= 0.20
+            signal.explanation['_regime_mismatch'] = True
+            signal.explanation['reason'] = f"{self.name}: sinal {original_action} suavizado (regime {self.regime_type} prefere {direction})"
+            
+            logger.debug(f"{'🐂' if direction == 'long_only' else '🐻'} [REGIME SOFT-FILTER] {self.name}: {original_action} ({original_conf:.2f}) suavizado para {signal.confidence:.2f}")
         
         return signal
 
