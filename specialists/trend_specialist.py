@@ -44,6 +44,7 @@ from models.trade_schema import Signal, Action, OrderSide
 from learning.profitability_predictor import ProfitabilityPredictor
 from feature_engineering.native_indicators import NativeIndicators
 from governance.learning_monitor import LearningMonitor
+from utils.physics_sensors import get_market_chaos_metrics # Dr. Tensor: Sensores de Física
 
 logger = get_logger("TrendSpecialist", LOG_LEVEL_DEBUG) 
 ANTI_SCALPING_CONFIG_VERSION = 4
@@ -432,7 +433,7 @@ class TrendFollowingEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(num_enriched_features + self._num_extras_appended + 3 + 4 + 2,),  # +2: prior_dir + prior_conf
+            shape=(num_enriched_features + self._num_extras_appended + 3 + 4 + 2 + 2,),  # +2: entropy + hurst
             dtype=np.float32
         )
         
@@ -910,7 +911,29 @@ class TrendFollowingEnv(gym.Env):
                     extras.append(float(val))
                 except Exception:
                     extras.append(0.0)
-        return np.concatenate([market_features, np.array(extras, dtype=np.float32), agent_state, time_features, np.array([prior_dir_val, prior_conf_val], dtype=np.float32)])
+
+        # 🔬 Dr. Tensor: Injeção de Física na Observação
+        # Calcula em tempo real para o estado atual
+        try:
+            lookback_start = max(0, self.start_idx + self.current_step - 100)
+            lookback_end = self.start_idx + self.current_step + 1
+            chaos_data = self.df.iloc[lookback_start:lookback_end]
+            physics_metrics = get_market_chaos_metrics(chaos_data) if len(chaos_data) >= 30 else {}
+        except Exception:
+            physics_metrics = {}
+
+        market_entropy = float(physics_metrics.get('shannon_entropy', 0.0))
+        market_hurst = float(physics_metrics.get('hurst_exponent', 0.5))
+        physics_state = np.array([market_entropy, market_hurst], dtype=np.float32)
+
+        return np.concatenate([
+            market_features, 
+            np.array(extras, dtype=np.float32), 
+            agent_state, 
+            time_features, 
+            np.array([prior_dir_val, prior_conf_val], dtype=np.float32),
+            physics_state
+        ])
 
     def _get_ema_trend_value(self, row: _TrendNpRow) -> float:
         # [FIX #6] Removido código morto de _simulate_slippage que estava colado aqui
@@ -1851,27 +1874,21 @@ class TrendFollowingEnv(gym.Env):
         if getattr(self, 'disable_new_entries', False):
             should_open_long = False
             should_open_short = False
-        # [AUDITORIA] Hard gates removidos para permitir que o agente aprenda com Soft Penalties
-        # if low_confidence_gate:
-        #     should_open_long = False
-        #     should_open_short = False
-        
-        # Bloqueio de reversões em regime neutro (sideways dominante)
-        regime_neutral = (regime_side >= max(regime_up, regime_down))
-        if self.relaxed_gates:
-            regime_neutral = False
-        if regime_neutral and self.position != 0:
-            if (self.position > 0 and should_open_short) or (self.position < 0 and should_open_long):
-                should_open_long = False
-                should_open_short = False
-        # [SAFETY FINAL] Long-only: bloqueia short independente de qualquer caminho anterior
+        # [SCIENTIFIC IMPROVEMENT] Hard gates softened for learning.
+        # Instead of blocking, we flag for the scientific reward function.
+        if low_confidence_gate:
+            info['_low_conf_penalty'] = True
+
+        # [SAFETY SOFTENED] Long-only/Short-only logic now uses soft penalties in training
         if getattr(self, '_specialist_long_only', False):
-            should_open_short = False
-            trend_allows_short = False
-        # [SAFETY FINAL] Short-only: bloqueia long para BearSpecialist
+            if should_open_short:
+                info['_regime_mismatch'] = True
+                # No longer blocking: should_open_short = False
+        
         if getattr(self, '_specialist_short_only', False):
-            should_open_long = False
-            trend_allows_long = False
+            if should_open_long:
+                info['_regime_mismatch'] = True
+                # No longer blocking: should_open_long = False
 
         # [DIAGNOSTICO] Capturado APÓS todos os safety overrides — valores refletem decisão final.
         # CORREÇÃO CRÍTICA #5: Logs Diagnósticos Aprimorados
@@ -2826,10 +2843,26 @@ class TrendFollowingEnv(gym.Env):
             elif should_open_long and agent_vote_strength > 0.1: # Tentando abrir long em bear
                 is_mismatch = True
             
+        # --- Sensores de Física (Dr. Tensor) ---
+        # Calcula caos e ruído do mercado para o motor de recompensa
+        physics_metrics = {}
+        try:
+            # Pega os últimos 100 candles a partir do step atual
+            lookback_start = max(0, self.start_idx + self.current_step - 100)
+            lookback_end = self.start_idx + self.current_step + 1
+            chaos_data = self.df.iloc[lookback_start:lookback_end]
+            
+            if len(chaos_data) >= 30:
+                physics_metrics = get_market_chaos_metrics(chaos_data)
+        except Exception:
+            pass
+
         info.update({
             'prior_dir_val': prior_dir_val,
             'prior_conf_val': prior_conf_dyn,
-            '_regime_mismatch': bool(is_mismatch or info.get('_regime_mismatch', False))
+            '_regime_mismatch': bool(is_mismatch or info.get('_regime_mismatch', False)),
+            'market_entropy': physics_metrics.get('shannon_entropy', 0.0),
+            'market_hurst': physics_metrics.get('hurst_exponent', 0.5)
         })
         
         # Se o trade fechou AGORA, passamos os dados dele. Senão, 0.0.
@@ -4176,7 +4209,7 @@ class TrendSpecialist:
                 try:
                     # Permitir fase de explora��o mais longa antes de podar
                     # [BUG 1 FIX] Reajuste do Mean Reward Floor para permitir aprendizado
-                    setattr(eval_callback, "mean_reward_floor", float(os.getenv('TREND_MEAN_REWARD_FLOOR', '-1500')))
+                    setattr(eval_callback, "mean_reward_floor", float(os.getenv('TREND_MEAN_REWARD_FLOOR', '-10000')))
                     setattr(eval_callback, "early_negative_prune_step", int(os.getenv('TREND_GUARD_STEP', '15000')))
                     if hasattr(eval_callback, 'required_guard_evaluations'):
                         setattr(eval_callback, 'required_guard_evaluations', int(os.getenv('TREND_GUARD_EVALS', '4')))
@@ -4239,7 +4272,7 @@ class TrendSpecialist:
                 guard_threshold = int(getattr(_real_eval_cb, "early_negative_prune_step", 3000))
                 # guard_floor: lê do TrialEvalCallback já unwrapped (tem mean_reward_floor correto)
                 # Fallback ao env var caso o atributo ainda não tenha sido setado.
-                _floor_from_env = float(os.getenv('TREND_MEAN_REWARD_FLOOR', '-1500'))
+                _floor_from_env = float(os.getenv('TREND_MEAN_REWARD_FLOOR', '-10000'))
                 _floor_from_cb  = float(getattr(_real_eval_cb, "mean_reward_floor", _floor_from_env))
                 guard_floor = min(_floor_from_cb, _floor_from_env)  # usa o mais permissivo (mais negativo)
                 eval_history = getattr(_real_eval_cb, "eval_history", []) or []

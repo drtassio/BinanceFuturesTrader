@@ -73,8 +73,8 @@ class RegimeConfig:
     returns_window: int = 1
     volatility_window: int = 10  # vs 20 for stocks
     volume_window: int = 10
-    autocorr_window: int = 20
-    drawdown_window: int = 50   # [M2] Agora configurável (antes hardcoded em 50)
+    autocorr_window: int = 15    # Reduced from 20 for better responsiveness
+    drawdown_window: int = 20    # [M2] Reduced from 50 (12.5h -> 5h lookback)
     
     # Validation thresholds
     min_persistence_bars: int = 10

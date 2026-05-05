@@ -486,9 +486,11 @@ def compute_scientific_reward(
     if info.get('_regime_mismatch', False) and not _is_ranger:
         prior_conf_val = float(info.get('prior_conf_val', 0.5))
         prior_dir_val = float(info.get('prior_dir_val', 0.0))
+        # 🔬 Elite Approach: Scale penalty by both regime and action confidence
+        # Formula: -3.0 * tanh(2.5 * signal_strength)
         signal_strength = abs(prior_conf_val) * abs(prior_dir_val)
-        mismatch_penalty = -2.0 * np.tanh(2.0 * signal_strength)
-        reward += float(np.clip(mismatch_penalty, -2.0, 0.0))
+        mismatch_penalty = -3.0 * np.tanh(2.5 * signal_strength)
+        reward += float(np.clip(mismatch_penalty, -3.0, 0.0))
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMPONENTE 6: GRACE PERIOD EMERGENCY EXIT SIGNAL
@@ -697,6 +699,34 @@ def compute_scientific_reward(
         reward -= 0.8
 
     # ─────────────────────────────────────────────────────────────────────────
+    # COMPONENTE 12: QUANTUM CHAOS GUARD (Uncertainty Penalty)
+    # 🧪 Baseado em Shannon (Entropia) e Mandelbrot (Hurst)
+    # ─────────────────────────────────────────────────────────────────────────
+    market_entropy = info.get('market_entropy', 0.0)
+    market_hurst = info.get('market_hurst', 0.5)
+    gating_entropy = info.get('gating_entropy', 0.0)
+    
+    uncertainty_penalty = 0.0
+    if env.position != 0:
+        # 1. Filtro de Caos (Entropia alta > 3.0)
+        if market_entropy > 3.0:
+            uncertainty_penalty -= 2.0 * (market_entropy - 2.5)
+            
+        # 2. Filtro de Ruído (Hurst 0.45 < H < 0.55 - Movimento Browniano)
+        if 0.45 < market_hurst < 0.55:
+            uncertainty_penalty -= 1.5
+            
+        # 3. Incerteza do Ensemble (Gating Entropy alta)
+        if gating_entropy > 0.8:
+            uncertainty_penalty -= 1.0
+    else:
+        # Recompensa Paciência (Hold) em mercados caóticos
+        if market_entropy > 3.2 or (0.48 < market_hurst < 0.52):
+            uncertainty_penalty += 0.3 # Bônus por paciência em ruído puro
+            
+    reward += uncertainty_penalty
+
+    # ─────────────────────────────────────────────────────────────────────────
     # FINALIZACAO: CQL Clipping implicito via clip final
     # ─────────────────────────────────────────────────────────────────────────
     # Ref: Kumar et al. (2020) CQL — Conservative Q-Learning.
@@ -720,7 +750,7 @@ def compute_scientific_reward(
     # EXCETO se um trade acabou de ser fechado (exit_reason não é nulo). Quando um 
     # trade fecha, é normal o SciRwd ser 0.0 (pois o TradeRwd já lidou com os bônus).
     if reward_clipped == 0.0 and not exit_reason:
-        reward_clipped = -0.50
+        reward_clipped = -0.10
 
     return reward_clipped
 

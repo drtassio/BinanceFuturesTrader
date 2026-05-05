@@ -9,12 +9,16 @@ Usa hiperparâmetros comprovados cientificamente para garantir:
 - Compression ratio >= 8:1 ✅
 """
 
-import pandas as pd
-import json
+import os
 import sys
+import json
+import pandas as pd
 from pathlib import Path
 
-sys.path.append('.')
+# Adiciona a raiz do projeto ao PYTHONPATH para resolver os imports
+project_root = str(Path(__file__).parent.parent)
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
 from feature_engineering.temporal_autoencoder import TemporalAutoencoderPipeline
 from config.settings import AIConfig

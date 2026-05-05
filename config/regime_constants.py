@@ -13,10 +13,9 @@ pesos locais de RegimeConfig em outros módulos.
 """
 
 try:
-    from learning.regime_switch import RegimeConfig
+    from feature_engineering.crypto_regime_detector import RegimeConfig
     
-    # weight_funding mantido em 0.10 (sinal real mas ruidoso no crypto).
-    # weight_gmm=0.35 é valor de consenso entre 0.30 (sdp) e 0.40 (base_regime).
+    # [FIX] Configuração sincronizada com a volatilidade atual do mercado.
     CANONICAL_REGIME_CONFIG = RegimeConfig(
         adx_period=9,
         adx_trend_threshold=20.0,
@@ -25,6 +24,8 @@ try:
         weight_gmm=0.35,
         weight_adx=0.20,
         weight_funding=0.10,
+        drawdown_window=20,    # Sincronizado
+        autocorr_window=15     # Sincronizado
     )
 
 except Exception:

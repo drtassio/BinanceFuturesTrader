@@ -257,7 +257,7 @@ class AIConfig(Config):
         # max_training_runs: força avanço de estágio mesmo sem atingir critérios (válvula de segurança)
         {
             'name': 'Calm Markets',
-            'volatility_max': 0.01, 'trend_clarity_max': 0.2,
+            'volatility_max': 0.02, 'trend_clarity_max': 0.3,
             'episodes': 50000,
             'min_training_runs': 5,   # avalia a partir do 5º ciclo de treino
             'max_training_runs': 20,  # avança forçado após 20 ciclos (~5-7 sessões de treino)

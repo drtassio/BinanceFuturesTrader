@@ -2,8 +2,11 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from trading.ai_controller import AIController
 
 # --- NOVAS IMPORTAÇÕES CRÍTICAS ---
 # import shap  # [LAZY LOAD] Movido para dentro da classe para economizar memória no import inicial

@@ -68,9 +68,9 @@ class TrialEvalCallback(EvalCallback):
         # Baseado em best practices de RL HPO para mercados financeiros
         self.trade_prune_threshold = 5  # Poucos trades esperados em 10k
         self.min_force_prune_step = 8500  # ~85% do trial de 10k
-        self.early_negative_prune_step = 7000  # ~70% do trial de 10k
-        self.mean_reward_floor = -1000.0  # SAC pode ter reward negativo inicialmente
-        self.episode_reward_floor = -10000.0  # Muito tolerante
+        self.early_negative_prune_step = 15000  # Dá mais tempo para o SAC sair do buraco inicial
+        self.mean_reward_floor = -10000.0  # Praticamente desativa poda por valor negativo absoluto
+        self.episode_reward_floor = -50000.0  # Muito tolerante
         self.min_episode_count_for_prune = 2  # Menos episódios em 10k steps
         self.negative_streak_patience = 6  # Paciência razoável
         

@@ -17,13 +17,15 @@ def main():
     df = pd.read_pickle(df_path)
     print(f"📊 Dados para treino: {len(df)} linhas")
     
-    # 2. Configurar novo detector
+    # 2. Configurar novo detector (Mais agressivo para reversões)
     config = RegimeConfig(
         confidence_threshold=0.55,
-        min_regime_duration=12,  # Aumentado para evitar ruído
+        min_regime_duration=12,
         weight_hmm=0.40,
         weight_gmm=0.40,
-        weight_adx=0.20
+        weight_adx=0.20,
+        drawdown_window=20,    # Foco em 5h de histórico em vez de 12h
+        autocorr_window=15     # Mais sensível a mudanças de momento
     )
     detector = CryptoRegimeDetector(config)
     

@@ -207,6 +207,18 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
         return
 
     action_str = signal.action.value.upper() if hasattr(signal.action, 'value') else str(signal.action)
+    
+    # [OBSERVABILIDADE] Diferencia tipos de HOLD para transparência
+    hold_type = signal.explanation.get('hold_type') if signal.explanation else None
+    if signal.action == Action.HOLD and hold_type:
+        if hold_type == 'LOW_CONF':
+            action_str = "HOLD (AGUARDANDO)"
+        elif hold_type == 'COUNTER_TREND_VETO':
+            action_str = "HOLD (VETO REGIME)"
+        elif hold_type == 'LOW_PROB':
+            action_str = "HOLD (RISCO/RETORNO)"
+        elif hold_type == 'RISK':
+            action_str = "HOLD (VETO RISCO)"
     latest_features = system_state.get('latest_features')
 
     # ── Gera explicação ──────────────────────────────────────────────────────
@@ -237,21 +249,18 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
     narrative = explanation.get('narrative', '')
     divider = "─" * 60
     
-    # Prepara valores para o dashboard
-    orig_conf = signal.explanation.get('original_confidence', signal.confidence)
-    final_conf = signal.confidence
-    reason = signal.explanation.get('reason', 'N/A') if signal.explanation else 'N/A'
-    
-    status_icon = "⚖️" if signal.action == Action.HOLD else ("🚀" if action_str == "BUY" else "🔻")
-    conf_display = f"{orig_conf:.2%}"
+    _exp = signal.explanation or {}
+    reason = _exp.get('reason', 'N/A')
 
+    status_icon = "⚖️" if signal.action == Action.HOLD else ("🚀" if action_str == "BUY" else "🔻")
+    
     log_message = (
         f"\n🧠 {divider}\n"
         f"   🧠 DECISÃO IA: {action_str}\n"
         f"   {divider}\n"
         f"   {status_icon} Ação:        {action_str:<10}\n"
         f"   📌 Motivo:      {reason}\n"
-        f"   🎯 Confiança:   {conf_display}\n"
+        f"   🎯 Confiança:   {signal.confidence:.2%}\n"
         f"   \n"
         f"   {narrative}\n"
         f"🧠 {divider}\n"
@@ -279,15 +288,22 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
             "stop_loss":    signal.stop_loss,
             "take_profit":  signal.take_profit,
             "position_pct": signal.position_size_pct,
+            "quantum":      signal.explanation.get('quantum', {})
         }
 
         # Exibe Dados Técnicos Formatados no Terminal
+        quantum = context.get('quantum', {})
+        h_val = quantum.get('hurst', 0.5)
+        e_val = quantum.get('entropy', 0.0)
+        c_lbl = quantum.get('chaos_label', 'N/A')
+        
         technical_log = (
             f"🛠️ DADOS TÉCNICOS:\n"
             f"   🔹 Preço:       ${context['price']:,.2f}\n"
             f"   🔹 Specialist:  {context['specialist']}\n"
             f"   🔹 Regime:       {context['regime'].upper()}\n"
             f"   🔹 OBI/Tape:     {context['obi']:.4f} / {context['tape_pulse']}\n"
+            f"   🔹 Hurst/Caos:   {h_val:.2f} / {c_lbl} (E:{e_val:.1f})\n"
             f"   {divider}"
         )
         logger.info(technical_log)

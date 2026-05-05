@@ -2,6 +2,6 @@
   "pythonVersion": "3.10",
   "include": ["."],
   "extraPaths": ["."],
-  "venvPath": ".",
-  "venv": "venv"
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true
 }
