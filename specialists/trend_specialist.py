@@ -849,7 +849,7 @@ class TrendFollowingEnv(gym.Env):
         if not hasattr(self, '_feature_scaler') or self._feature_scaler is None:
             # Se nenhum scaler externo foi fornecido, emite warning e usa passthrough
             if not hasattr(self, '_scaler_warning_shown'):
-                logger.warning("[SCALER] Nenhum scaler externo fornecido. Features não serão normalizadas.")
+                logger.info("[SCALER] Passthrough mode: Normalização externa não detectada (conduzida pelo ScientificDataProcessor). Evitando dupla normalização.")
                 self._scaler_warning_shown = True
             return features
         
@@ -4099,8 +4099,8 @@ class TrendSpecialist:
             sac_params = {
                 # Learning Rate: centro do range ótimo (Kumar et al., 2020)
                 # Com decay linear durante treinamento
-                # [P0 FIX] SAC colapsa acima de ~1e-4 no trial 16. Upper limit reduzido para 5e-5.
-                "learning_rate": trial.suggest_float('learning_rate', 1e-5, 5e-5, log=True),
+                # [P0 FIX] SAC colapsa acima de ~1e-4 no trial 16. Upper limit reduzido para 3e-5 (Stability Patch).
+                "learning_rate": trial.suggest_float('learning_rate', 1e-5, 3e-5, log=True),
                 
                 # Buffer Size: limitado ao trial de 50k steps para que o buffer encha (Haarnoja 2018).
                 # buffer > trial = agente só vê amostras recentes = convergência lenta.
@@ -4132,8 +4132,8 @@ class TrendSpecialist:
             }
             
             # max_grad_norm é passado separadamente para ClippedSAC (não no dict)
-            # [FIX] Reduzido teto 2.0→1.5: valores >1.5 causam explosão de gradiente (actor_loss >5)
-            max_grad_norm = trial.suggest_float('max_grad_norm', 0.5, 1.5)
+            # [FIX] Reduzido teto 1.5→1.0: valores >1.0 causam explosão de gradiente (actor_loss >5)
+            max_grad_norm = trial.suggest_float('max_grad_norm', 0.5, 1.0)
             reward_params = self._suggest_reward_params(trial)
             self._apply_reward_params_to_config(reward_params)
             train_env: Optional[SubprocVecEnv] = None

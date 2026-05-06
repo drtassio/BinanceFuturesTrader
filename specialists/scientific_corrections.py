@@ -716,32 +716,11 @@ def compute_scientific_reward(
             patience_bonus = 0.10 * np.tanh(abs(price_change_pct) / (atr_pct + 1e-9))
             reward += float(patience_bonus)
 
-    # COMPONENTE 13: QUANTUM CHAOS GUARD (Uncertainty Penalty)
-    # 🧪 Baseado em Shannon (Entropia) e Mandelbrot (Hurst)
-    # ─────────────────────────────────────────────────────────────────────────
-    market_entropy = info.get('market_entropy', 0.0)
-    market_hurst = info.get('market_hurst', 0.5)
-    gating_entropy = info.get('gating_entropy', 0.0)
-    
-    uncertainty_penalty = 0.0
-    if env.position != 0:
-        # 1. Filtro de Caos (Entropia alta > 3.0)
-        if market_entropy > 3.0:
-            uncertainty_penalty -= 2.0 * (market_entropy - 2.5)
-            
-        # 2. Filtro de Ruído (Hurst 0.45 < H < 0.55 - Movimento Browniano)
-        if 0.45 < market_hurst < 0.55:
-            uncertainty_penalty -= 1.5
-            
-        # 3. Incerteza do Ensemble (Gating Entropy alta)
-        if gating_entropy > 0.8:
-            uncertainty_penalty -= 1.0
-    else:
-        # Recompensa Paciência (Hold) em mercados caóticos
-        if market_entropy > 3.2 or (0.48 < market_hurst < 0.52):
-            uncertainty_penalty += 0.3 # Bônus por paciência em ruído puro
-            
-    reward += uncertainty_penalty
+    # COMPONENTE 13: REMOVIDO
+    # Razão: penalidade linear ilimitada (sem tanh) em entropy/Hurst dominava reward.
+    # Default market_hurst=0.5 disparava -1.5/step mesmo sem métrica disponível.
+    # Bear markets estruturalmente têm entropy > 3.0 → Bear HPO sistematicamente sabotado.
+    # Caos deve ser usado como GATE DE ENTRADA, não como punição per-step.
 
     # ─────────────────────────────────────────────────────────────────────────
     # FINALIZACAO: CQL Clipping implicito via clip final
