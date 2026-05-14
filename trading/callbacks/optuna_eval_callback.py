@@ -5,14 +5,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import optuna
+from scipy import stats
 from stable_baselines3.common.callbacks import EvalCallback
 
 from utils.logger import LOG_LEVEL_DEBUG, get_logger
 
 # Caminho absoluto do projeto (independente de os.getcwd())
 _CALLBACKS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT   = os.path.dirname(os.path.dirname(_CALLBACKS_DIR))
-_HPO_TB_ROOT    = os.path.join(_PROJECT_ROOT, "logs", "tensorboard")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_CALLBACKS_DIR))
+_HPO_TB_ROOT = os.path.join(_PROJECT_ROOT, "logs", "tensorboard")
 
 
 class TrialEvalCallback(EvalCallback):
@@ -59,21 +60,27 @@ class TrialEvalCallback(EvalCallback):
         self.best_mean_reward = -np.inf
         # Controla reportes para o Optuna de forma independente de n_calls
         self._last_eval_count = 0
-        self._total_evals = max(1, total_timesteps // eval_freq) if total_timesteps > 0 else 0
+        self._total_evals = (
+            max(1, total_timesteps // eval_freq) if total_timesteps > 0 else 0
+        )
         self._learning_monitor = learning_monitor
         self.financial_history: List[Dict[str, Any]] = []
-        self._last_report_step: float = float('-inf')
-        
+        self._last_report_step: float = float("-inf")
+
         # 🚀 HPO ULTRA RÁPIDO: Configuração de pruning para 10k timesteps
         # Baseado em best practices de RL HPO para mercados financeiros
         self.trade_prune_threshold = 5  # Poucos trades esperados em 10k
         self.min_force_prune_step = 8500  # ~85% do trial de 10k
-        self.early_negative_prune_step = 7000  # ~70% do trial de 10k
-        self.mean_reward_floor = -1000.0  # SAC pode ter reward negativo inicialmente
-        self.episode_reward_floor = -10000.0  # Muito tolerante
+        self.early_negative_prune_step = (
+            15000  # Dá mais tempo para o SAC sair do buraco inicial
+        )
+        self.mean_reward_floor = (
+            -10000.0
+        )  # Praticamente desativa poda por valor negativo absoluto
+        self.episode_reward_floor = -50000.0  # Muito tolerante
         self.min_episode_count_for_prune = 2  # Menos episódios em 10k steps
         self.negative_streak_patience = 6  # Paciência razoável
-        
+
         self._negative_mean_reward_streak = 0
         self.eval_history: List[Tuple[int, float]] = []
         self.last_eval_step: int = -1
@@ -88,7 +95,7 @@ class TrialEvalCallback(EvalCallback):
             step = self._last_report_step + 1.0
         self.trial.report(float(value), step=step)
         self._last_report_step = step
-    
+
     def _raise_prune(self, *, reason: str, step: float, log_message: str) -> None:
         self.trial.set_user_attr("forced_prune_reason", reason)
         self.trial.set_user_attr("pruned_timesteps", int(step))
@@ -122,7 +129,11 @@ class TrialEvalCallback(EvalCallback):
             episode_summaries = self._collect_episode_metrics()
             aggregated: Dict[str, Any] = {}
             if episode_summaries:
-                record = {"timesteps": step_value, "mean_reward": mean_reward_value, "episodes": episode_summaries}
+                record = {
+                    "timesteps": step_value,
+                    "mean_reward": mean_reward_value,
+                    "episodes": episode_summaries,
+                }
                 aggregated = self._aggregate_episode_metrics(episode_summaries)
                 if aggregated:
                     record.update(aggregated)
@@ -135,54 +146,122 @@ class TrialEvalCallback(EvalCallback):
                     "mean_reward": mean_reward_value,
                     "num_episodes": len(episode_summaries),
                 }
-                log_payload.update({k: v for k, v in record.items() if k not in {"timesteps", "mean_reward", "episodes"}})
-                get_logger(self.log_name, LOG_LEVEL_DEBUG).info("[Optuna Eval] %s", log_payload)
+                log_payload.update(
+                    {
+                        k: v
+                        for k, v in record.items()
+                        if k not in {"timesteps", "mean_reward", "episodes"}
+                    }
+                )
+                get_logger(self.log_name, LOG_LEVEL_DEBUG).info(
+                    "[Optuna Eval] %s", log_payload
+                )
             else:
-                get_logger(self.log_name, LOG_LEVEL_DEBUG).info("[Optuna Eval] steps=%s mean_reward=%.2f (sem metricas financeiras - nenhum episodio finalizado)", step_value, mean_reward_value)
+                get_logger(self.log_name, LOG_LEVEL_DEBUG).info(
+                    "[Optuna Eval] steps=%s mean_reward=%.2f (sem metricas financeiras - nenhum episodio finalizado)",
+                    step_value,
+                    mean_reward_value,
+                )
 
-            # Logs financeiros periódicos (PF, Trades, Score) durante o treino
-            profit_factor = float(aggregated.get("mean_profit_factor", 0.0)) if aggregated else 0.0
-            trade_sharpe = float(aggregated.get("mean_trade_sharpe", 0.0)) if aggregated else 0.0
-            avg_return_pct = float(aggregated.get("mean_avg_return_pct", 0.0)) if aggregated else 0.0
-            max_drawdown_pct = float(aggregated.get("mean_max_drawdown_pct", 0.0)) if aggregated else 0.0
+            # Logs financeiros peridicos (PF, Trades, Score) durante o treino
+            fin_stats: Dict[str, Any] = {}
+            profit_factor = (
+                float(aggregated.get("mean_profit_factor", 0.0)) if aggregated else 0.0
+            )
+            trade_sharpe = (
+                float(aggregated.get("mean_trade_sharpe", 0.0)) if aggregated else 0.0
+            )
+            avg_return_pct = (
+                float(aggregated.get("mean_avg_return_pct", 0.0)) if aggregated else 0.0
+            )
+            max_drawdown_pct = (
+                float(aggregated.get("mean_max_drawdown_pct", 0.0))
+                if aggregated
+                else 0.0
+            )
             num_trades = float(aggregated.get("num_trades", 0.0)) if aggregated else 0.0
             if not aggregated:
                 try:
                     fin_stats_list = self.eval_env.env_method("get_financial_stats")
-                    fin_stats: Dict[str, Any] = fin_stats_list[0] if isinstance(fin_stats_list, list) and fin_stats_list else {}
+                    fin_stats = (
+                        fin_stats_list[0]
+                        if isinstance(fin_stats_list, list) and fin_stats_list
+                        else {}
+                    )
                     profit_factor = float(fin_stats.get("profit_factor", profit_factor))
                     trade_sharpe = float(fin_stats.get("trade_sharpe", trade_sharpe))
-                    avg_return_pct = float(fin_stats.get("avg_return_pct", avg_return_pct))
-                    max_drawdown_pct = float(fin_stats.get("max_drawdown_pct", max_drawdown_pct))
+                    avg_return_pct = float(
+                        fin_stats.get("avg_return_pct", avg_return_pct)
+                    )
+                    max_drawdown_pct = float(
+                        fin_stats.get("max_drawdown_pct", max_drawdown_pct)
+                    )
                     num_trades = float(fin_stats.get("num_trades", num_trades))
                 except Exception:
                     pass
             profit_factor = min(profit_factor, 10.0)
             trade_sharpe = float(np.clip(trade_sharpe, -5.0, 5.0))
             avg_return_pct = float(np.clip(avg_return_pct, -1.0, 1.0))
-            max_drawdown_pct = max(0.001, float(max_drawdown_pct))  # Evita divisão por zero
-            
+            max_drawdown_pct = max(
+                0.001, float(max_drawdown_pct)
+            )  # Evita divisão por zero
+
             # 🔬 SCORE CIENTÍFICO PARA TRADING RL (Papers 2023-2024)
             # Baseado em: "DRL for Cryptocurrency Trading" (MDPI 2023)
             # e "Deep Reinforcement Learning for Stock Trading" (2025)
             #
             # Componentes:
-            # 1. Sharpe Ratio: métrica padrão de risco-retorno (peso 0.4)
+            # 1. PSR (Probabilistic Sharpe Ratio): probabilidade de Sharpe > 0 (peso 0.4)
+            #    Ref: Bailey & Lopez de Prado (2012) - corrige non-normality
             # 2. Calmar Ratio: retorno/drawdown - foco em drawdown (peso 0.3)
             # 3. Profit Factor: lucros/perdas - qualidade dos trades (peso 0.2)
             # 4. Retorno médio: ganho absoluto (peso 0.1)
-            
+
             # Calmar Ratio aproximado (retorno / max_drawdown)
-            calmar_ratio = float(np.clip(avg_return_pct / max_drawdown_pct, -10.0, 10.0))
-            
+            calmar_ratio = float(
+                np.clip(avg_return_pct / max_drawdown_pct, -10.0, 10.0)
+            )
+
+            # 🔬 PSR: Probabilistic Sharpe Ratio (Bailey & Lopez de Prado 2012)
+            # PSR = Prob[Sharpe verdadeiro > 0] usando Edgeworth expansion.
+            # Mais robusto que Sharpe bruto — penaliza distribuições não-normais.
+            # Se trade_returns disponível, usa fórmula completa c/ skew/kurtosis.
+            # Caso contrário, aproximação gaussiana: PSR ≈ Φ(Sharpe × √N_trades).
+            psr_value = 0.0
+            try:
+                trade_returns_raw = fin_stats.get("trade_returns", None)
+                if trade_returns_raw is None and hasattr(self.eval_env, "env_method"):
+                    tr_list = self.eval_env.env_method("get_trade_returns")
+                    if tr_list and tr_list[0] is not None:
+                        trade_returns_raw = tr_list[0]
+                if trade_returns_raw is not None and len(trade_returns_raw) >= 10:
+                    from utils.sharpe_ratio import probabilistic_sharpe_ratio
+
+                    psr_value = probabilistic_sharpe_ratio(
+                        float(trade_sharpe),
+                        np.asarray(trade_returns_raw, dtype=np.float64),
+                    )
+                else:
+                    # Aproximação normal: SE ≈ 1/√n para Sharpe
+                    psr_value = float(
+                        stats.norm.cdf(
+                            float(trade_sharpe) * np.sqrt(max(num_trades, 1))
+                        )
+                    )
+            except Exception:
+                psr_value = float(
+                    stats.norm.cdf(float(trade_sharpe) * np.sqrt(max(num_trades, 1)))
+                )
+            psr_value = float(np.clip(psr_value, 0.0, 1.0))
+
             # Score combinado (pesos baseados em literatura)
             score = (
-                0.40 * trade_sharpe +                          # Sharpe: risco-retorno
-                0.30 * calmar_ratio +                          # Calmar: drawdown-focado
-                0.20 * max(0.0, profit_factor - 1.0) +         # PF > 1 = lucro
-                0.10 * (avg_return_pct * 100)                  # Retorno em %
+                0.40 * psr_value  # PSR: probabilidade de Sharpe positivo
+                + 0.30 * calmar_ratio  # Calmar: drawdown-focado
+                + 0.20 * max(0.0, profit_factor - 1.0)  # PF > 1 = lucro
+                + 0.10 * (avg_return_pct * 100)  # Retorno em %
             )
-            
+
             # Penalidade suave por poucos trades (mínimo 5, não 20)
             # Papers indicam que qualidade > quantidade
             if num_trades < 5:
@@ -206,22 +285,34 @@ class TrialEvalCallback(EvalCallback):
             _eval_scalp_rate: float | None = None
             try:
                 fin_stats_list = self.eval_env.env_method("get_financial_stats")
-                fin_stats = fin_stats_list[0] if isinstance(fin_stats_list, list) and fin_stats_list else {}
+                fin_stats = (
+                    fin_stats_list[0]
+                    if isinstance(fin_stats_list, list) and fin_stats_list
+                    else {}
+                )
                 avg_duration = float(fin_stats.get("avg_trade_duration", 0.0))
                 min_duration = float(fin_stats.get("min_trade_duration", 0.0))
                 max_duration = float(fin_stats.get("max_trade_duration", 0.0))
                 # Tenta obter misalign_rate e scalp_rate se o env os expuser
-                _mr = fin_stats.get("vote_misalign_rate", fin_stats.get("misalign_rate", None))
+                _mr = fin_stats.get(
+                    "vote_misalign_rate", fin_stats.get("misalign_rate", None)
+                )
                 if _mr is not None:
                     _eval_misalign_rate = float(_mr)
-                _sr = fin_stats.get("scalp_rate", fin_stats.get("scalp_rate_duration1", None))
+                _sr = fin_stats.get(
+                    "scalp_rate", fin_stats.get("scalp_rate_duration1", None)
+                )
                 if _sr is not None:
                     _eval_scalp_rate = float(_sr)
             except Exception:
                 pass
-            
+
             if avg_duration > 0:
-                trade_style = "🏄 SURFING" if avg_duration >= 20 else ("⚡ SCALPING" if avg_duration < 10 else "📊 MODERATE")
+                trade_style = (
+                    "🏄 SURFING"
+                    if avg_duration >= 20
+                    else ("⚡ SCALPING" if avg_duration < 10 else "📊 MODERATE")
+                )
                 get_logger(self.log_name, LOG_LEVEL_DEBUG).info(
                     "[Trade Duration] steps=%s | Avg=%.1f | Min=%.0f | Max=%.0f | Style=%s",
                     step_value,
@@ -230,10 +321,14 @@ class TrialEvalCallback(EvalCallback):
                     max_duration,
                     trade_style,
                 )
-            
+
             # Log exit reasons for diagnostics
             try:
-                exit_counts_list = self.eval_env.env_method("get_exit_reason_counts") if hasattr(self.eval_env, 'env_method') else [{}]
+                exit_counts_list = (
+                    self.eval_env.env_method("get_exit_reason_counts")
+                    if hasattr(self.eval_env, "env_method")
+                    else [{}]
+                )
                 exit_counts = {}
                 for env_counts in exit_counts_list:
                     if isinstance(env_counts, dict):
@@ -241,12 +336,27 @@ class TrialEvalCallback(EvalCallback):
                             exit_counts[reason] = exit_counts.get(reason, 0) + count
                 if any(exit_counts.values()):
                     total_exits = sum(exit_counts.values())
-                    agent_pct = (exit_counts.get('agent', 0) / total_exits * 100) if total_exits > 0 else 0
-                    sl_pct = (exit_counts.get('stop_loss', 0) / total_exits * 100) if total_exits > 0 else 0
-                    ts_pct = (exit_counts.get('time_stop', 0) / total_exits * 100) if total_exits > 0 else 0
+                    agent_pct = (
+                        (exit_counts.get("agent", 0) / total_exits * 100)
+                        if total_exits > 0
+                        else 0
+                    )
+                    sl_pct = (
+                        (exit_counts.get("stop_loss", 0) / total_exits * 100)
+                        if total_exits > 0
+                        else 0
+                    )
+                    ts_pct = (
+                        (exit_counts.get("time_stop", 0) / total_exits * 100)
+                        if total_exits > 0
+                        else 0
+                    )
                     get_logger(self.log_name, LOG_LEVEL_DEBUG).info(
                         "[Exit Reasons] Agent=%.0f%% | SL=%.0f%% | TimeStop=%.0f%% | Other=%.0f%%",
-                        agent_pct, sl_pct, ts_pct, 100 - agent_pct - sl_pct - ts_pct
+                        agent_pct,
+                        sl_pct,
+                        ts_pct,
+                        100 - agent_pct - sl_pct - ts_pct,
                     )
             except Exception:
                 pass
@@ -255,14 +365,14 @@ class TrialEvalCallback(EvalCallback):
             _eval_num = self._last_eval_count
             _total_evals_str = f"/{self._total_evals}" if self._total_evals > 0 else ""
             # Usa atributos cacheados no ClippedSAC.train() — name_to_value é limpo apos dump()
-            _actor_loss  = float(getattr(self.model, "_last_actor_loss",  float("nan")))
-            _ent_coef    = float(getattr(self.model, "_last_ent_coef",    float("nan")))
+            _actor_loss = float(getattr(self.model, "_last_actor_loss", float("nan")))
+            _ent_coef = float(getattr(self.model, "_last_ent_coef", float("nan")))
             _critic_loss = float(getattr(self.model, "_last_critic_loss", float("nan")))
-            _pf_str    = f"{profit_factor:.3f}" if profit_factor else "n/a"
+            _pf_str = f"{profit_factor:.3f}" if profit_factor else "n/a"
             _sharpe_str = f"{trade_sharpe:.3f}" if trade_sharpe else "n/a"
             _trades_str = f"{int(num_trades)}"
             _actor_str = f"{_actor_loss:.4f}" if not np.isnan(_actor_loss) else "n/a"
-            _ent_str   = f"{_ent_coef:.4f}"  if not np.isnan(_ent_coef)  else "n/a"
+            _ent_str = f"{_ent_coef:.4f}" if not np.isnan(_ent_coef) else "n/a"
             _eval_line = (
                 f"  [Trial {self.trial.number} | Eval {_eval_num}{_total_evals_str} | step {step_value}] "
                 f"reward={mean_reward_value:.2f} (best={self.best_mean_reward:.2f}) | "
@@ -271,6 +381,7 @@ class TrialEvalCallback(EvalCallback):
             )
             try:
                 import tqdm as _tqdm_mod
+
                 _tqdm_mod.tqdm.write(_eval_line)
             except Exception:
                 print(_eval_line, flush=True)
@@ -281,17 +392,28 @@ class TrialEvalCallback(EvalCallback):
                 # ou nn.Parameter (use_sde=True), e falhar não deve impedir o monitor de rodar.
                 _std_val: float | None = None
                 try:
-                    if self.model and hasattr(self.model, 'actor') and self.model.actor is not None:
+                    if (
+                        self.model
+                        and hasattr(self.model, "actor")
+                        and self.model.actor is not None
+                    ):
                         import torch as _torch
-                        _log_std_attr = getattr(self.model.actor, 'log_std', None)
+
+                        _log_std_attr = getattr(self.model.actor, "log_std", None)
                         if _log_std_attr is not None:
                             with _torch.no_grad():
-                                if hasattr(_log_std_attr, 'data'):
+                                if hasattr(_log_std_attr, "data"):
                                     # nn.Parameter (use_sde=True)
-                                    _std_val = float(_torch.exp(_log_std_attr.data).mean().item())
-                                elif hasattr(_log_std_attr, 'weight'):
+                                    _std_val = float(
+                                        _torch.exp(_log_std_attr.data).mean().item()
+                                    )
+                                elif hasattr(_log_std_attr, "weight"):
                                     # nn.Linear (use_sde=False)
-                                    _std_val = float(_torch.exp(_log_std_attr.weight.data).mean().item())
+                                    _std_val = float(
+                                        _torch.exp(_log_std_attr.weight.data)
+                                        .mean()
+                                        .item()
+                                    )
                 except Exception:
                     _std_val = None
 
@@ -304,26 +426,35 @@ class TrialEvalCallback(EvalCallback):
                         trial_number=self.trial.number,
                         mean_reward=mean_reward_value,
                         timesteps=step_value,
-                        actor_loss=_actor_loss   if not np.isnan(_actor_loss)   else None,
-                        critic_loss=_critic_loss if not np.isnan(_critic_loss)  else None,
-                        ent_coef=_ent_coef       if not np.isnan(_ent_coef)     else None,
+                        actor_loss=_actor_loss if not np.isnan(_actor_loss) else None,
+                        critic_loss=_critic_loss
+                        if not np.isnan(_critic_loss)
+                        else None,
+                        ent_coef=_ent_coef if not np.isnan(_ent_coef) else None,
                         std=_std_val,
-                        sharpe=float(trade_sharpe)      if _has_trades else None,
+                        sharpe=float(trade_sharpe) if _has_trades else None,
                         pnl_per_trade=float(avg_return_pct) if _has_trades else None,
-                        avg_duration=float(avg_duration)    if _has_trades and avg_duration > 0 else None,
-                        n_trades=int(num_trades)            if _has_trades else None,
+                        avg_duration=float(avg_duration)
+                        if _has_trades and avg_duration > 0
+                        else None,
+                        n_trades=int(num_trades) if _has_trades else None,
                         misalign_rate=_eval_misalign_rate,
                         scalp_rate=_eval_scalp_rate,
                     )
-                    self._learning_monitor.print_health_dashboard(trial_number=self.trial.number)
+                    self._learning_monitor.print_health_dashboard(
+                        trial_number=self.trial.number
+                    )
                 except Exception as _mon_err:
                     import traceback as _tb
+
                     try:
                         import tqdm as _tqdm_mod
-                        _tqdm_mod.tqdm.write(f"  [LearningMonitor] Erro: {_mon_err}\n{_tb.format_exc()}")
+
+                        _tqdm_mod.tqdm.write(
+                            f"  [LearningMonitor] Erro: {_mon_err}\n{_tb.format_exc()}"
+                        )
                     except Exception:
                         print(f"  [LearningMonitor] Erro: {_mon_err}", flush=True)
-
 
             # ── REPORT AO OPTUNA PRUNER ──
             # Usa o `score` composto (Sharpe+Calmar+PF+Retorno) quando disponível —
@@ -332,12 +463,20 @@ class TrialEvalCallback(EvalCallback):
             # Se métricas financeiras não estiverem disponíveis ainda, usa mean_reward
             # normalizado como proxy (Henderson et al., 2018).
             if aggregated:
-                _pf_rep   = float(np.clip(aggregated.get("mean_profit_factor", 0.0), 0.0, 10.0))
-                _sh_rep   = float(np.clip(aggregated.get("mean_trade_sharpe", 0.0), -5.0, 5.0))
-                _ret_rep  = float(np.clip(aggregated.get("mean_avg_return_pct", 0.0), -1.0, 1.0))
-                _dd_rep   = max(0.001, float(aggregated.get("mean_max_drawdown_pct", 0.001)))
-                _calmar   = float(np.clip(_ret_rep / _dd_rep, -10.0, 10.0))
-                _nt_rep   = float(aggregated.get("num_trades", 0.0))
+                _pf_rep = float(
+                    np.clip(aggregated.get("mean_profit_factor", 0.0), 0.0, 10.0)
+                )
+                _sh_rep = float(
+                    np.clip(aggregated.get("mean_trade_sharpe", 0.0), -5.0, 5.0)
+                )
+                _ret_rep = float(
+                    np.clip(aggregated.get("mean_avg_return_pct", 0.0), -1.0, 1.0)
+                )
+                _dd_rep = max(
+                    0.001, float(aggregated.get("mean_max_drawdown_pct", 0.001))
+                )
+                _calmar = float(np.clip(_ret_rep / _dd_rep, -10.0, 10.0))
+                _nt_rep = float(aggregated.get("num_trades", 0.0))
                 _score_rep = (
                     0.40 * _sh_rep
                     + 0.30 * _calmar
@@ -355,7 +494,10 @@ class TrialEvalCallback(EvalCallback):
                 self._negative_mean_reward_streak += 1
             else:
                 self._negative_mean_reward_streak = 0
-            if step_value >= self.early_negative_prune_step and mean_reward_value <= self.mean_reward_floor:
+            if (
+                step_value >= self.early_negative_prune_step
+                and mean_reward_value <= self.mean_reward_floor
+            ):
                 self._raise_prune(
                     reason="early_negative_prune",
                     step=float(step_value),
@@ -381,13 +523,29 @@ class TrialEvalCallback(EvalCallback):
                 self._raise_prune(
                     reason="optuna_pruner",
                     step=float(step_value),
-                    log_message="[Optuna Prune] steps=%s pruning solicitado por Optuna pruner padrao" % step_value,
+                    log_message="[Optuna Prune] steps=%s pruning solicitado por Optuna pruner padrao"
+                    % step_value,
                 )
 
-            total_trades = float(aggregated.get('total_num_trades', aggregated.get('num_trades', num_trades))) if aggregated else float(num_trades)
-            total_episode_reward = float(aggregated.get('total_episode_reward', 0.0)) if aggregated else 0.0
-            episode_count = int(aggregated.get('num_episodes', 0)) if aggregated else 0
-            if total_trades >= self.trade_prune_threshold and episode_count >= self.min_episode_count_for_prune:
+            total_trades = (
+                float(
+                    aggregated.get(
+                        "total_num_trades", aggregated.get("num_trades", num_trades)
+                    )
+                )
+                if aggregated
+                else float(num_trades)
+            )
+            total_episode_reward = (
+                float(aggregated.get("total_episode_reward", 0.0))
+                if aggregated
+                else 0.0
+            )
+            episode_count = int(aggregated.get("num_episodes", 0)) if aggregated else 0
+            if (
+                total_trades >= self.trade_prune_threshold
+                and episode_count >= self.min_episode_count_for_prune
+            ):
                 self._safe_report(total_episode_reward, float(step_value) + 0.5)
                 if total_episode_reward <= self.episode_reward_floor:
                     self._raise_prune(
@@ -405,7 +563,8 @@ class TrialEvalCallback(EvalCallback):
                     self._raise_prune(
                         reason="optuna_pruner",
                         step=float(step_value),
-                        log_message="[Optuna Prune] steps=%s pruning solicitado por Optuna pruner padrao" % step_value,
+                        log_message="[Optuna Prune] steps=%s pruning solicitado por Optuna pruner padrao"
+                        % step_value,
                     )
 
         return True
@@ -431,9 +590,13 @@ class TrialEvalCallback(EvalCallback):
                             normalized[key] = value
                     summaries.append(normalized)
         return summaries
-    def _aggregate_episode_metrics(self, summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    def _aggregate_episode_metrics(
+        self, summaries: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         if not summaries:
             return {}
+
         def _collect(key: str) -> List[float]:
             return [float(item[key]) for item in summaries if key in item]
 
@@ -467,12 +630,15 @@ class TrialEvalCallback(EvalCallback):
             aggregated["mean_profit_factor"] = float(np.mean(profit_factors))
         if avg_returns:
             aggregated["mean_avg_return_pct"] = float(np.mean(avg_returns))
-            # [CIENTÍFICO] SORTINO RATIO
-            neg_ret = [r for r in avg_returns if r < 0]
-            if neg_ret and len(neg_ret) >= 2:
-                ds = float(np.std(neg_ret))
-                if ds > 1e-9:
-                    aggregated["sortino_ratio"] = float(np.clip(np.mean(avg_returns) / ds, -10, 10))
+            # [D-A1 FIX] Sortino com semi-desvio canônico: RMSE de min(r, 0) sobre todos retornos.
+            # np.std(neg_ret) usava desvio em torno da média dos negativos (não de 0), inflando.
+            _all_ret = np.array(avg_returns)
+            _downside = np.minimum(_all_ret, 0.0)
+            ds = float(np.sqrt(np.mean(_downside**2)))
+            if ds > 1e-9:
+                aggregated["sortino_ratio"] = float(
+                    np.clip(np.mean(avg_returns) / ds, -10, 10)
+                )
         if episode_rewards:
             aggregated["mean_episode_reward"] = float(np.mean(episode_rewards))
             aggregated["total_episode_reward"] = float(np.sum(episode_rewards))
@@ -481,7 +647,10 @@ class TrialEvalCallback(EvalCallback):
             mret = float(np.mean(total_return_pct))
             wdd = float(np.max(max_drawdown_pct))
             if wdd > 1e-9:
-                aggregated["calmar_ratio"] = float(np.clip(mret * 12 / wdd, -100, 100))
+                # [H2 FIX] Removido ×12 arbitrário que assumia episódios mensais.
+                # Episódios de trading têm duração variável — anualização deve ser
+                # feita no nível agregado com a duração real do episódio, não aqui.
+                aggregated["calmar_ratio"] = float(np.clip(mret / wdd, -100, 100))
         aggregated["num_episodes"] = len(summaries)
         return aggregated
 

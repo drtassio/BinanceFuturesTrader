@@ -13,18 +13,22 @@ pesos locais de RegimeConfig em outros módulos.
 """
 
 try:
-    from learning.regime_switch import RegimeConfig
+    from feature_engineering.crypto_regime_detector import RegimeConfig
     
-    # weight_funding mantido em 0.10 (sinal real mas ruidoso no crypto).
-    # weight_gmm=0.35 é valor de consenso entre 0.30 (sdp) e 0.40 (base_regime).
+    # [FIX] ADX elevado para corrigir Ranger=2.3% (root cause: HMM+GMM=70% suprimia ADX).
+    # Com ADX=0.45, Ranger esperado 12-15% (lateral market detection correta).
+    # weight_funding=0.0: funding é fator de risco, não voto de regime (F1 FIX).
     CANONICAL_REGIME_CONFIG = RegimeConfig(
         adx_period=9,
         adx_trend_threshold=20.0,
-        min_regime_duration=8,
-        weight_hmm=0.35,
-        weight_gmm=0.35,
-        weight_adx=0.20,
-        weight_funding=0.10,
+        min_regime_duration=5,
+        weight_hmm=0.30,
+        weight_gmm=0.25,
+        weight_adx=0.45,
+        weight_funding=0.0,
+        drawdown_window=20,       # Sincronizado
+        autocorr_window=15,       # Sincronizado
+        confidence_threshold=0.75,  # [M6 FIX] Threshold crypto-específico
     )
 
 except Exception:

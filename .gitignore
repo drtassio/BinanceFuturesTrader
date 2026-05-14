@@ -51,6 +51,9 @@ logs/*
 !logs/*.json
 tensorboard/
 
+# Claude Code agent workspace
+.claude/
+
 # Local configuration
 .vscode/
 .idea/

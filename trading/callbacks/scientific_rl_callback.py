@@ -237,14 +237,16 @@ class ScientificRLCallback(BaseCallback):
         """Calculate Sortino Ratio (downside deviation)."""
         if len(returns) < 2:
             return 0.0
-        excess_returns = returns - self.risk_free_rate / 252
-        downside = returns[returns < 0]
-        if len(downside) < 2:
+        target = self.risk_free_rate / 252
+        excess_returns = returns - target
+        # [D-A1 FIX] Semi-desvio canônico: RMSE de min(r - target, 0) sobre TODOS os retornos.
+        # np.std(returns[returns<0]) usava desvio em torno da média dos negativos (não do target),
+        # e descartava as observações acima do target, inflando o Sortino em até 59%.
+        downside = np.minimum(returns - target, 0.0)
+        downside_rmse = float(np.sqrt(np.mean(downside ** 2)))
+        if downside_rmse < 1e-8:
             return 0.0
-        downside_std = np.std(downside)
-        if downside_std < 1e-8:
-            return 0.0
-        return float(np.sqrt(252) * np.mean(excess_returns) / downside_std)
+        return float(np.sqrt(252) * np.mean(excess_returns) / downside_rmse)
     
     def _calculate_calmar(self) -> float:
         """Calculate Calmar Ratio (annual return / max drawdown)."""

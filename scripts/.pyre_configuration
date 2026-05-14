@@ -1,7 +1,0 @@
-{
-  "site_package_search_strategy": "all",
-  "source_directories": ["."],
-  "python_interpreter": "venv/Scripts/python.exe",
-  "python_version": "3.10",
-  "strict_self_type": false
-}

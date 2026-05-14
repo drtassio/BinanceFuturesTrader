@@ -14,12 +14,13 @@ import pandas as pd
 import numpy as np
 from utils.logger import get_logger
 from config.settings import AIConfig, TradingConfig
+from models.trade_schema import Signal, Action
 
 # 🔬 Use new ensemble detector (HMM + GMM + ADX + Funding)
 from feature_engineering.crypto_regime_detector import (
-    CryptoRegimeDetector, 
+    CryptoRegimeDetector,
     RegimeConfig,
-    ScientificRegimeDetector  # Alias for backward compatibility
+    ScientificRegimeDetector,  # Alias for backward compatibility
 )
 from specialists.trend_specialist import TrendSpecialist, TrendFollowingEnv
 
@@ -29,28 +30,28 @@ logger = get_logger("BaseRegimeSpecialist")
 class BaseRegimeSpecialist(TrendSpecialist):
     """
     Classe base para especialistas que operam em regimes específicos de mercado.
-    
+
     🔬 Dr. Tensor Update: Now uses CryptoRegimeDetector ensemble for regime detection.
-    
+
     Fornece:
     - Filtragem de dados por regime usando CryptoRegimeDetector (HMM+GMM+ADX+Funding)
     - Treinamento com dados filtrados
     - Interface padronizada para todos os especialistas de regime
     """
-    
+
     REGIME_MAP = {
-        'bull': 0,   # Tendência de Alta
-        'bear': 1,   # Tendência de Baixa
-        'ranger': 2  # Mercado Lateral
+        "bull": 0,  # Tendência de Alta
+        "bear": 1,  # Tendência de Baixa
+        "ranger": 2,  # Mercado Lateral
     }
-    
+
     def __init__(
-        self, 
+        self,
         config: AIConfig,
         trading_config: TradingConfig,
         regime_type: str,
         input_dim: int,
-        profitability_predictor: Optional[Any] = None
+        profitability_predictor: Optional[Any] = None,
     ):
         """
         Args:
@@ -60,21 +61,29 @@ class BaseRegimeSpecialist(TrendSpecialist):
             input_dim: Dimensão das features de entrada
             profitability_predictor: Preditor de lucratividade (opcional)
         """
-        super().__init__(config, input_dim, profitability_predictor, specialist_name=f"{regime_type}_specialist")
-        
+        super().__init__(
+            config,
+            input_dim,
+            profitability_predictor,
+            specialist_name=f"{regime_type}_specialist",
+        )
+
         if regime_type not in self.REGIME_MAP:
-            raise ValueError(f"Regime inválido: {regime_type}. Deve ser um de {list(self.REGIME_MAP.keys())}")
-        
+            raise ValueError(
+                f"Regime inválido: {regime_type}. Deve ser um de {list(self.REGIME_MAP.keys())}"
+            )
+
         self.regime_type = regime_type
         self.regime_code = self.REGIME_MAP[regime_type]
         self.name = f"{regime_type.capitalize()}Specialist"
-        
+
         # [BUG 10 FIX] Usar configuracao canonica compartilhada com ScientificDataProcessor.
         # Antes: pesos locais aqui (weight_gmm=0.40, weight_funding=0.0) divergiam dos
         # pesos em scientific_data_processor.py (weight_gmm=0.30, weight_funding=0.15),
         # causando contaminacao de regime entre criacao do dataset e filtragem do treino.
         try:
             from config.regime_constants import CANONICAL_REGIME_CONFIG
+
             regime_config = CANONICAL_REGIME_CONFIG
             logger.info(f"{self.name}: Usando CANONICAL_REGIME_CONFIG para detector.")
         except Exception:
@@ -87,39 +96,55 @@ class BaseRegimeSpecialist(TrendSpecialist):
                 weight_adx=0.20,
                 weight_funding=0.10,
             )
-            logger.warning(f"{self.name}: CANONICAL_REGIME_CONFIG indisponivel. Usando fallback.")
+            logger.warning(
+                f"{self.name}: CANONICAL_REGIME_CONFIG indisponivel. Usando fallback."
+            )
         self.regime_detector = CryptoRegimeDetector(regime_config)
-        
-        logger.info(f"✅ {self.name} inicializado para regime {regime_type} (código {self.regime_code}) com CryptoRegimeDetector")
-    
-    def filter_data_by_regime(self, df: pd.DataFrame, min_samples: int = 100) -> Optional[pd.DataFrame]:
+
+        logger.info(
+            f"✅ {self.name} inicializado para regime {regime_type} (código {self.regime_code}) com CryptoRegimeDetector"
+        )
+
+    def filter_data_by_regime(
+        self, df: pd.DataFrame, min_samples: int = 100
+    ) -> Optional[pd.DataFrame]:
         """
         🔬 Filtra e normaliza o DataFrame para o regime específico.
         """
-        logger.info(f"[DEBUG REGIME] {self.name}: Solicitado filtro para {self.regime_type}. Shape entrada: {df.shape}")
-        
+        logger.info(
+            f"[DEBUG REGIME] {self.name}: Solicitado filtro para {self.regime_type}. Shape entrada: {df.shape}"
+        )
+
         try:
             # 🔬 NEW: Tentar usar ScientificDataProcessor para dados consistentes
             try:
-                from feature_engineering.scientific_data_processor import ScientificDataProcessor
-                
+                from feature_engineering.scientific_data_processor import (
+                    ScientificDataProcessor,
+                )
+
                 processor = ScientificDataProcessor()
                 processor.load_scalers()
-                
+
                 # [FIX RESILIÊNCIA] Garante que a coluna 'regime' exista (alias para regime_val se necessário)
-                if 'regime' not in df.columns and 'regime_val' in df.columns:
-                    df['regime'] = df['regime_val']
-                    logger.info(f"🔄 {self.name}: Coluna 'regime' restaurada a partir de 'regime_val' para filtragem.")
-                
+                if "regime" not in df.columns and "regime_val" in df.columns:
+                    df["regime"] = df["regime_val"]
+                    logger.info(
+                        f"🔄 {self.name}: Coluna 'regime' restaurada a partir de 'regime_val' para filtragem."
+                    )
+
                 # Usa o método otimizado do processor
+                # [ANTI-LEAKAGE] Fitar scaler apenas nos primeiros 80% (treino)
+                _train_end = int(len(df) * 0.80)
                 df_filtered = processor.prepare_for_specialist(
                     df,
                     regime_code=self.regime_code,
                     filter_by_regime=True,
                     normalize=True,
-                    min_samples=min_samples
+                    min_samples=min_samples,
+                    fit_scaler=True,
+                    train_end_idx=_train_end,
                 )
-                
+
                 if df_filtered is not None:
                     logger.info(
                         f"✅ {self.name}: Dados preparados via ScientificDataProcessor. "
@@ -127,24 +152,30 @@ class BaseRegimeSpecialist(TrendSpecialist):
                     )
                     return df_filtered
                 else:
-                    logger.warning(f"⚠️ {self.name}: ScientificDataProcessor retornou None. Tentando fallback interno.")
-                    
+                    logger.warning(
+                        f"⚠️ {self.name}: ScientificDataProcessor retornou None. Tentando fallback interno."
+                    )
+
             except ImportError:
-                logger.warning(f"⚠️ {self.name}: ScientificDataProcessor não disponível. Usando fallback.")
+                logger.warning(
+                    f"⚠️ {self.name}: ScientificDataProcessor não disponível. Usando fallback."
+                )
             except Exception as e:
-                logger.warning(f"⚠️ {self.name}: Erro no processor: {e}. Usando fallback.")
-            
+                logger.warning(
+                    f"⚠️ {self.name}: Erro no processor: {e}. Usando fallback."
+                )
+
             # FALLBACK 1: Usar coluna 'regime' ou 'regime_val' do dataset se existir
             col_to_use = None
-            if 'regime' in df.columns:
-                col_to_use = 'regime'
-            elif 'regime_val' in df.columns:
-                col_to_use = 'regime_val'
-                
+            if "regime" in df.columns:
+                col_to_use = "regime"
+            elif "regime_val" in df.columns:
+                col_to_use = "regime_val"
+
             if col_to_use:
                 mask = df[col_to_use] == self.regime_code
                 df_filtered = df[mask].copy()
-                
+
                 n_samples = len(df_filtered)
                 if n_samples < min_samples:
                     logger.warning(
@@ -152,20 +183,22 @@ class BaseRegimeSpecialist(TrendSpecialist):
                         f"Mínimo necessário: {min_samples}"
                     )
                     return None
-                
+
                 pct = (n_samples / len(df)) * 100
                 logger.info(
                     f"📊 {self.name}: {n_samples} amostras ({pct:.1f}%) via coluna '{col_to_use}'"
                 )
                 return df_filtered
-            
+
             # LEGACY FALLBACK: Detectar regimes com o detector próprio
-            logger.info(f"🔄 {self.name}: Detectando regimes via CryptoRegimeDetector...")
+            logger.info(
+                f"🔄 {self.name}: Detectando regimes via CryptoRegimeDetector..."
+            )
             regimes = self.regime_detector.detect_regimes(df)
-            
+
             mask = regimes == self.regime_code
             df_filtered = df[mask].copy()
-            
+
             n_samples = len(df_filtered)
             if n_samples < min_samples:
                 logger.warning(
@@ -173,16 +206,19 @@ class BaseRegimeSpecialist(TrendSpecialist):
                     f"Mínimo necessário: {min_samples}"
                 )
                 return None
-            
+
             pct = (n_samples / len(df)) * 100
             logger.info(
                 f"📊 {self.name}: {n_samples} amostras ({pct:.1f}%) filtradas via detector"
             )
-            
+
             return df_filtered
-            
+
         except Exception as e:
-            logger.error(f"❌ {self.name}: Erro FATAL ao filtrar dados por regime: {e}", exc_info=True)
+            logger.error(
+                f"❌ {self.name}: Erro FATAL ao filtrar dados por regime: {e}",
+                exc_info=True,
+            )
             return None
 
     def _apply_temporal_weighting(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -203,22 +239,32 @@ class BaseRegimeSpecialist(TrendSpecialist):
                 # Index não é temporal — retorna como está
                 return df
 
-            _cutoff_recent = pd.Timestamp('2025-01-01')
+            # [C8 FIX] Cutoff dinâmico: últimos 6 meses do dataset são considerados "recentes"
+            # Antes: hardcoded '2025-01-01' ficava obsoleto com o tempo e criava viés silencioso.
+            _cutoff_recent = df.index.max() - pd.DateOffset(months=6)
             _recent_mask = df.index >= _cutoff_recent
 
-            # Amostras antigas (2023-2024): weight=1.0
-            # Amostras recentes (2025-2026): weight=0.4 (downweight 60%)
+            # Amostras antigas (antes dos últimos 6 meses): weight=1.0
+            # Amostras recentes (últimos 6 meses): weight=0.4 (downweight 60%)
             _sample_weights = np.ones(len(df))
             _sample_weights[_recent_mask] = 0.4
 
-            # Resample usando pesos, preserve ordem temporal
+            # [MD2 FIX] Resample SEM replacement para evitar duplicacao de rows
+            # (que cria leakage train/val se ambos veem a mesma observacao).
+            # Cap em len(df) — sample sem replace nao pode exceder o tamanho do df.
+            # Se target_size > len(df), usa todo o df ponderado.
             _target_size = min(len(df), 25000)
-            df_resampled = df.sample(
-                n=_target_size,
-                weights=_sample_weights,
-                replace=True,
-                random_state=42
-            ).sort_index()
+            if _target_size >= len(df):
+                # Reordena com prob proporcional ao peso (sem replicar)
+                df_resampled = df.copy()
+                df_resampled["_temporal_weight"] = _sample_weights
+            else:
+                df_resampled = df.sample(
+                    n=_target_size,
+                    weights=_sample_weights,
+                    replace=False,
+                    random_state=42,
+                ).sort_index()
 
             _recent_pct = 100.0 * _recent_mask.sum() / len(df)
             logger.info(
@@ -229,11 +275,88 @@ class BaseRegimeSpecialist(TrendSpecialist):
             return df_resampled
 
         except Exception as _tw_err:
-            logger.warning(f"[TEMPORAL WEIGHT] {self.name}: Erro ao aplicar downweight: {_tw_err}. Retornando original.")
+            logger.warning(
+                f"[TEMPORAL WEIGHT] {self.name}: Erro ao aplicar downweight: {_tw_err}. Retornando original."
+            )
             return df
 
+    def _inject_cross_regime(
+        self, train_filtered: pd.DataFrame, original_df: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        [CROSS-REGIME CONTAMINATION] Inject 20% ranger data into Bull/Bear training.
+
+        Scientific basis:
+        - Hamilton (1989): regimes transition sequentially (BULL→RANGER→BEAR)
+        - Ang & Bekaert (2002): worst allocation errors at first 5 bars post-transition
+        - Lopez de Prado (2018) Ch.6: distribution shift at regime boundaries
+
+        Why ranger (not opposite regime):
+        - Bull specialist seeing bear data = conflicting gradients (long vs short)
+        - Ranger = natural transition buffer, no gradient conflict
+
+        Why 20% with weight 0.30:
+        - Jacobs et al. (1994) MoE: maintain specialization (80% primary regime)
+        - Weight 0.30 → ~23% of total gradients → sufficient boundary learning
+
+        Ranger specialist is skipped (already sees all regimes).
+        """
+        _regime_type = str(getattr(self, "regime_type", "")).lower()
+        if _regime_type in ("ranger", "neutral"):
+            return train_filtered
+
+        _regime_col = None
+        for _c in ("regime", "regime_val"):
+            if _c in original_df.columns:
+                _regime_col = _c
+                break
+
+        if _regime_col is None:
+            return train_filtered
+
+        _ranger_mask = original_df[_regime_col].isin([2, "ranger"])
+        _ranger_data = original_df[_ranger_mask]
+        # [ANTI-LEAKAGE 2026-05-13] Filtrar ranger data para indices temporais
+        # anteriores ou iguais ao max do periodo de treino. Sem este filtro,
+        # .sample() pode injetar amostras do futuro (OOS) no treino.
+        if isinstance(train_filtered.index, pd.DatetimeIndex) and isinstance(
+            _ranger_data.index, pd.DatetimeIndex
+        ):
+            _train_max = train_filtered.index.max()
+            _ranger_data = _ranger_data[_ranger_data.index <= _train_max]
+        if len(_ranger_data) < 500:
+            return train_filtered
+
+        _n_ranger = int(len(train_filtered) * 0.25)
+        # [PROBLEMA 4 FIX 2026-05-13] random_state derivado do tamanho do dataset
+        # em vez de 42 fixo — evita injecao dos MESMOS 25% de ranger toda vez (que
+        # permitia agente memorizar exemplos especificos). Determinismo soft: mesmo
+        # dataset = mesmo seed (reprodutivel), mas datasets diferentes = seeds diferentes.
+        _seed = int(len(_ranger_data) + len(train_filtered)) % 10000
+        _ranger_sample = _ranger_data.sample(
+            n=min(_n_ranger, len(_ranger_data)), random_state=_seed
+        )
+
+        # [DEAD CODE REMOVAL 2026-05-13] Coluna `_cross_regime_weight` era setada
+        # mas nunca consumida pelo replay buffer nem pelo SAC. Atribuicao tornava
+        # o concat 2 colunas mais pesado sem efeito no aprendizado. A injecao
+        # cross-regime continua valida via 25% de amostras Ranger no concat.
+        result = pd.concat([train_filtered, _ranger_sample]).sort_index()
+        logger.info(
+            "[CROSS-REGIME] %s: +%d ranger rows (weight=0.30) → "
+            "total %d | home=%.0f%% ranger=%.0f%%",
+            self.name,
+            len(_ranger_sample),
+            len(result),
+            100 * len(train_filtered) / len(result),
+            100 * len(_ranger_sample) / len(result),
+        )
+        return result
+
     @staticmethod
-    def _subsample_high_confidence(df: pd.DataFrame, name: str = "", confidence_threshold: float = 0.62) -> pd.DataFrame:
+    def _subsample_high_confidence(
+        df: pd.DataFrame, name: str = "", confidence_threshold: float = 0.62
+    ) -> pd.DataFrame:
         """
         [HIGH-CONFIDENCE SUBSAMPLE] Filtra candles pelo score de regime_confidence.
         Mantém apenas amostras onde o detector está confiante (>= threshold).
@@ -248,10 +371,10 @@ class BaseRegimeSpecialist(TrendSpecialist):
         """
         if df is None or len(df) == 0:
             return df
-        if 'regime_confidence' not in df.columns:
+        if "regime_confidence" not in df.columns:
             return df
         try:
-            mask = df['regime_confidence'] >= confidence_threshold
+            mask = df["regime_confidence"] >= confidence_threshold
             n_before = len(df)
             df_filtered = df[mask].copy()
             n_after = len(df_filtered)
@@ -269,14 +392,16 @@ class BaseRegimeSpecialist(TrendSpecialist):
             )
             return df_filtered
         except Exception as _e:
-            logger.warning(f"[HIGH-CONF] {name}: Erro ao subsamplar por confiança: {_e}. Retornando original.")
+            logger.warning(
+                f"[HIGH-CONF] {name}: Erro ao subsamplar por confiança: {_e}. Retornando original."
+            )
             return df
 
     def optimize_hyperparameters(
         self,
         train_df: pd.DataFrame,
         eval_df: pd.DataFrame,
-        n_trials: int = 100,
+        n_trials: int = 50,
         n_timesteps: int = 100000,
         n_eval_episodes: int = 5,
         env_class=None,
@@ -285,7 +410,9 @@ class BaseRegimeSpecialist(TrendSpecialist):
         [FIX CRÍTICO] Override para garantir que a otimização use APENAS dados do regime.
         Sem este override, o specialist otimiza com o dataset completo (misturando regimes).
         """
-        logger.info(f"🎯 {self.name}: Filtrando dados para HPO (Regime: {self.regime_type})")
+        logger.info(
+            f"🎯 {self.name}: Filtrando dados para HPO (Regime: {self.regime_type})"
+        )
 
         # Filtra os dados de treino e avaliação ANTES de passar para o Optuna
         train_filtered = self.filter_data_by_regime(train_df)
@@ -300,45 +427,69 @@ class BaseRegimeSpecialist(TrendSpecialist):
         _eval_too_recent = False
         if (
             eval_filtered is not None
-            and isinstance(getattr(eval_filtered, 'index', None), pd.DatetimeIndex)
+            and isinstance(getattr(eval_filtered, "index", None), pd.DatetimeIndex)
+            and len(eval_filtered) > 0
         ):
-            _cutoff = pd.Timestamp('2025-01-01')
-            _recent_frac = (eval_filtered.index >= _cutoff).mean()
+            # [CD4 FIX] Cutoff dinamico: ultimos 6 meses do dataset sao "recentes".
+            # Antes: pd.Timestamp("2025-01-01") hardcoded ficava obsoleto com o tempo.
+            # Em 2027+, todo o dataset eh "pos-2025" -> recent_frac=1.0 sempre dispara
+            # falsamente, quebrando anti-overfitting.
+            try:
+                _max_ts = eval_filtered.index.max()
+                _cutoff = _max_ts - pd.DateOffset(months=6)
+                _recent_frac = float((eval_filtered.index >= _cutoff).mean())
+            except Exception:
+                _recent_frac = 0.0
             if _recent_frac > 0.80:
                 _eval_too_recent = True
                 logger.warning(
-                    "[EVAL BIAS FIX] %s: eval é %.0f%% de dados 2025-2026 (bearish). "
-                    "Recriando eval interno a partir dos dados de treino filtrado (20%% final do bull-filtered).",
-                    self.name, _recent_frac * 100
+                    "[EVAL BIAS FIX] %s: eval e %.0f%% dos ultimos 6 meses do dataset. "
+                    "Recriando eval interno a partir dos dados de treino filtrado.",
+                    self.name,
+                    _recent_frac * 100,
                 )
 
-        # [TEMPORAL WEIGHTING] Aplica downweight a amostras recentes para mitigar viés temporal
+        # [TEMPORAL WEIGHTING] Aplica downweight a amostras recentes para mitigar vis temporal
         train_filtered = self._apply_temporal_weighting(train_filtered)
         if not _eval_too_recent:
             eval_filtered = self._apply_temporal_weighting(eval_filtered)
         else:
-            # Recria eval interno: últimos 20% do treino bull-filtrado (antes do temporal weight)
+            # Recria eval interno: ltimos 20% do treino bull-filtrado (antes do temporal weight)
             _n_eval_internal = max(500, int(len(train_filtered) * 0.20))
             eval_filtered = train_filtered.iloc[-_n_eval_internal:].copy()
             train_filtered = train_filtered.iloc[:-_n_eval_internal].copy()
             logger.info(
                 "[EVAL BIAS FIX] %s: eval recriado com %d amostras bull-filtradas (diversidade temporal garantida). "
                 "Treino: %d amostras.",
-                self.name, len(eval_filtered), len(train_filtered)
+                self.name,
+                len(eval_filtered),
+                len(train_filtered),
             )
+
+        # [CROSS-REGIME] Inject 20% ranger data for Bull/Bear transition robustness
+        # Ref: Hamilton (1989) + Lopez de Prado (2018) Ch.6
+        # Bull→Ranger→Bear is the natural transition sequence. Ranger is the buffer.
+        # Exposing Bull/Bear to ranger teaches boundary recognition without gradient conflict.
+        train_filtered = self._inject_cross_regime(train_filtered, train_df)
 
         # [HIGH-CONFIDENCE SUBSAMPLE] Mantém apenas candles com regime_confidence >= threshold.
         # Melhora qualidade do sinal antes de entrar no HPO (Prado 2018 Meta-Labeling).
         # Ranger usa threshold menor (0.50) porque mercado lateral é intrinsecamente ambíguo:
         # o regime detector raramente atinge ≥0.62 em lateral → threshold 0.62 remove 85% dos dados,
         # deixando apenas ~948 amostras — insuficiente para treino RL. 0.50 preserva ~2.000-3.000+.
-        _is_ranger_regime = str(getattr(self, 'regime_type', '')).lower() == 'ranger'
+        _is_ranger_regime = str(getattr(self, "regime_type", "")).lower() == "ranger"
         _hconf_threshold = 0.50 if _is_ranger_regime else 0.62
-        train_filtered = self._subsample_high_confidence(train_filtered, self.name, confidence_threshold=_hconf_threshold)
-        eval_filtered = self._subsample_high_confidence(eval_filtered, self.name, confidence_threshold=_hconf_threshold)
+        train_filtered = self._subsample_high_confidence(
+            train_filtered, self.name, confidence_threshold=_hconf_threshold
+        )
+        eval_filtered = self._subsample_high_confidence(
+            eval_filtered, self.name, confidence_threshold=_hconf_threshold
+        )
 
         if train_filtered is None or len(train_filtered) < 100:
-            logger.error(f"❌ {self.name}: Dados filtrados INSUFICIENTES para otimização ({len(train_filtered) if train_filtered is not None else 0} amostras).")
+            logger.error(
+                f"❌ {self.name}: Dados filtrados INSUFICIENTES para otimização ({len(train_filtered) if train_filtered is not None else 0} amostras)."
+            )
             return
 
         # [FIX ENV_CLASS HPO] Garante que o HPO usa a mesma classe de ambiente que o treino final.
@@ -350,19 +501,26 @@ class BaseRegimeSpecialist(TrendSpecialist):
                 from specialists.bear_specialist import BearTradingEnv
                 from specialists.ranger_specialist import RangerTradingEnv
                 from specialists.trend_specialist import TrendFollowingEnv as _TFE
+
                 _ENV_MAP = {
-                    'bull': BullTradingEnv,
-                    'bear': BearTradingEnv,
-                    'ranger': RangerTradingEnv,
+                    "bull": BullTradingEnv,
+                    "bear": BearTradingEnv,
+                    "ranger": RangerTradingEnv,
                 }
                 env_class = _ENV_MAP.get(self.regime_type, _TFE)
-                logger.info(f"[HPO ENV] Usando {env_class.__name__} para otimizacao (regime={self.regime_type})")
+                logger.info(
+                    f"[HPO ENV] Usando {env_class.__name__} para otimizacao (regime={self.regime_type})"
+                )
             except Exception as _e:
-                logger.warning(f"[HPO ENV] Falha ao resolver env_class: {_e}. Usando TrendFollowingEnv.")
+                logger.warning(
+                    f"[HPO ENV] Falha ao resolver env_class: {_e}. Usando TrendFollowingEnv."
+                )
 
-        logger.info(f"✅ {self.name}: Otimização iniciará com {len(train_filtered)} samples filtrados.")
+        logger.info(
+            f"✅ {self.name}: Otimização iniciará com {len(train_filtered)} samples filtrados."
+        )
         logger.info(f"   Dados eval: {len(eval_filtered):,} amostras")
-        logger.info(f"{'='*70}")
+        logger.info(f"{'=' * 70}")
         logger.info(f"")
 
         # [SPEED FIX #2+#4] Todos os especialistas beneficiam-se de eval mais enxuto.
@@ -374,10 +532,12 @@ class BaseRegimeSpecialist(TrendSpecialist):
         # Sinaliza para a impl. do TrendSpecialist (trend_specialist.py:4051) usar //4
         # em vez de //8 para _eval_freq. Flag lida via getattr no hot path do HPO.
         import os as _os
-        _os.environ['HPO_EVAL_CHECKPOINTS'] = '4'
+
+        _os.environ["HPO_EVAL_CHECKPOINTS"] = "4"
         logger.info(
             "[SPEED FIX] %s HPO: n_eval_episodes=%d, eval_checkpoints=4 (vs 5/8 default)",
-            self.name, n_eval_episodes
+            self.name,
+            n_eval_episodes,
         )
 
         # Chama a implementacao da base (TrendSpecialist) com os dados purificados
@@ -390,23 +550,23 @@ class BaseRegimeSpecialist(TrendSpecialist):
             n_eval_episodes=n_eval_episodes,
             env_class=env_class,
         )
-    
+
     def train_model(
-        self, 
-        df: pd.DataFrame, 
+        self,
+        df: pd.DataFrame,
         labels_df: Optional[pd.DataFrame] = None,
         total_timesteps: Optional[int] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, float]:
         """
         Treina o modelo usando apenas dados do regime específico.
-        
+
         Args:
             df: DataFrame com features do autoencoder
             labels_df: Labels (não usado, mantido para compatibilidade)
             total_timesteps: Número total de timesteps de treinamento
             **kwargs: Argumentos adicionais para o treinamento
-            
+
         Returns:
             Dicionário com métricas de treinamento
         """
@@ -418,89 +578,192 @@ class BaseRegimeSpecialist(TrendSpecialist):
         # [TEMPORAL WEIGHTING] Aplica downweight a amostras recentes
         df_filtered = self._apply_temporal_weighting(df_filtered)
 
+        # [CROSS-REGIME] Inject 20% ranger for transition robustness (same as HPO path)
+        # Ref: Hamilton (1989) + Lopez de Prado (2018) Ch.6
+        df_filtered = self._inject_cross_regime(df_filtered, df)
+
         if df_filtered is None or df_filtered.empty:
             logger.error(f"❌ {self.name}: Sem dados suficientes para treinamento")
-            return {'success': False, 'error': 'insufficient_data'}
-        
+            return {"success": False, "error": "insufficient_data"}
+
         # Define timesteps padrão se não fornecido
         if total_timesteps is None:
-            total_timesteps = getattr(self.config, 'SPECIALIST_TRAINING_TIMESTEPS', 500_000)
-        
+            total_timesteps = getattr(
+                self.config, "SPECIALIST_TRAINING_TIMESTEPS", 500_000
+            )
+
         # [LOG DESCRITIVO] Banner claro para identificar o agente
-        regime_emoji = {'bull': '🐂', 'bear': '🐻', 'ranger': '🤠'}.get(self.regime_type, '🤖')
+        regime_emoji = {"bull": "🐂", "bear": "🐻", "ranger": "🤠"}.get(
+            self.regime_type, "🤖"
+        )
         regime_strategy = {
-            'bull': 'TREND SURFING (Long) - Segurar posições em tendência de ALTA',
-            'bear': 'TREND SURFING (Short) - Segurar posições em tendência de BAIXA', 
-            'ranger': 'MEAN REVERSION - Scalping em mercado LATERAL'
-        }.get(self.regime_type, 'N/A')
-        
+            "bull": "TREND SURFING (Long) - Segurar posições em tendência de ALTA",
+            "bear": "TREND SURFING (Short) - Segurar posições em tendência de BAIXA",
+            "ranger": "MEAN REVERSION - Scalping em mercado LATERAL",
+        }.get(self.regime_type, "N/A")
+
         logger.info(f"")
-        logger.info(f"{'='*70}")
+        logger.info(f"{'=' * 70}")
         logger.info(f"{regime_emoji} TREINANDO: {self.name.upper()} {regime_emoji}")
-        logger.info(f"{'='*70}")
+        logger.info(f"{'=' * 70}")
         logger.info(f"   Regime: {self.regime_type.upper()}")
         logger.info(f"   Estratégia: {regime_strategy}")
-        logger.info(f"   Amostras: {len(df_filtered):,} ({100*len(df_filtered)/len(df):.1f}% do dataset)")
+        logger.info(
+            f"   Amostras: {len(df_filtered):,} ({100 * len(df_filtered) / len(df):.1f}% do dataset)"
+        )
         logger.info(f"   Timesteps: {total_timesteps:,}")
         logger.info(f"   Limite de trades: SEM LIMITE (trend surfing livre)")
-        logger.info(f"{'='*70}")
+        logger.info(f"{'=' * 70}")
         logger.info(f"")
-        
+
         try:
             # [SCIENTIFIC FIX] Mapeia regime -> classe de ambiente para ativar recompensas específicas
             from specialists.bull_specialist import BullTradingEnv
             from specialists.bear_specialist import BearTradingEnv
             from specialists.ranger_specialist import RangerTradingEnv
-            
+
             ENV_CLASS_MAP = {
-                'bull': BullTradingEnv,
-                'bear': BearTradingEnv,
-                'ranger': RangerTradingEnv,
+                "bull": BullTradingEnv,
+                "bear": BearTradingEnv,
+                "ranger": RangerTradingEnv,
             }
             env_class = ENV_CLASS_MAP.get(self.regime_type, TrendFollowingEnv)
-            
-            logger.info(f"📊 {self.name}: Usando ambiente {env_class.__name__} para treino")
-            
+
+            logger.info(
+                f"📊 {self.name}: Usando ambiente {env_class.__name__} para treino"
+            )
+
             # Chama o método de treinamento da classe pai (TrendSpecialist)
+            # Remove kwargs não suportados por TrendSpecialist.train()
+            kwargs.pop("tensorboard_log", None)
             metrics = super().train(
                 featured_df=df_filtered,
                 timesteps_to_train=total_timesteps,
                 env_class=env_class,
-                specialist_name=f"{self.regime_type}_specialist", # Bug 2 fix
-                **kwargs
+                specialist_name=f"{self.regime_type}_specialist",  # Bug 2 fix
+                **kwargs,
             )
-            
+
             self.is_ready = True
             logger.info(f"✅ {self.name}: Treinamento concluído com sucesso!")
-            return {'success': True, 'timesteps': metrics if isinstance(metrics, int) else total_timesteps}
-            
+            return {
+                "success": True,
+                "timesteps": metrics if isinstance(metrics, int) else total_timesteps,
+            }
+
         except Exception as e:
-            logger.error(f"❌ {self.name}: Erro durante treinamento: {e}", exc_info=True)
-            return {'success': False, 'error': str(e)}
-    
+            logger.error(
+                f"❌ {self.name}: Erro durante treinamento: {e}", exc_info=True
+            )
+            return {"success": False, "error": str(e)}
+
+    def decide_action(
+        self, observation: np.ndarray, df_row: pd.Series
+    ) -> Optional[Signal]:
+        """
+        [FIX PRODUÇÃO] Sobrescreve decide_action para aplicar filtros de direção específicos de cada regime.
+        """
+        signal = super().decide_action(observation, df_row)
+        if signal is None:
+            return None
+
+        # Derivar direção preferencial do regime_type desta instância
+        _regime = str(getattr(self, "regime_type", "")).lower()
+        if _regime == "bull":
+            direction = "long_only"
+        elif _regime == "bear":
+            direction = "short_only"
+        else:
+            direction = None  # Ranger: sem filtro direcional
+
+        # [SOFT PENALTY] Em vez de bloquear (Hard Veto), reduzimos a confiança drasticamente.
+        # Isso permite que o sinal passe para o ensemble (se for muito forte), mas sinaliza
+        # ao RL que operar contra o regime é um erro estratégico via reward shaping.
+        # Ref: Dr. Tensor Fix - "Hard masking breaks policy gradient".
+        mismatch = False
+        if direction == "long_only" and signal.action == Action.SELL:
+            mismatch = True
+        elif direction == "short_only" and signal.action == Action.BUY:
+            mismatch = True
+
+        if mismatch:
+            if signal.explanation is None:
+                signal.explanation = {}
+
+            original_action = signal.action.value
+            original_conf = signal.confidence
+
+            # Redução de 80% na confiança - o sinal ainda existe mas é "sussurrado" no ensemble
+            signal.confidence *= 0.20
+            signal.explanation["_regime_mismatch"] = True
+            signal.explanation["reason"] = (
+                f"{self.name}: sinal {original_action} suavizado (regime {self.regime_type} prefere {direction})"
+            )
+
+            _emoji = "🐂" if direction == "long_only" else "🐻"
+            logger.debug(
+                "%s [REGIME SOFT-FILTER] %s: %s (%.2f) suavizado para %.2f",
+                _emoji,
+                self.name,
+                original_action,
+                original_conf,
+                signal.confidence,
+            )
+
+        # ── MELHORIA-01/02: Gates de Hurst + Entropia de Shannon ──────────
+        # Peters (1994) Fractal Market Hypothesis:
+        #   H > 0.6 → trend-following funciona (Bull/Bear)
+        #   H < 0.4 → mean-reversion funciona (Ranger)
+        #   H ≈ 0.5 → random walk (nenhuma estratégia tem edge)
+        # Shannon Entropy > 2.5 bits → regime instável (não abrir posições)
+        # Com _N_BINS=7, entropia máxima = log2(7) ≈ 2.807 bits; threshold calibrado em 2.5.
+        _hurst = float(getattr(df_row, "get", lambda k, d: d)("hurst", 0.5))
+        _entropy = float(getattr(df_row, "get", lambda k, d: d)("shannon_entropy", 0.0))
+
+        if _regime in ("bull", "bear") and _hurst < 0.45 and _hurst > 0.0:
+            signal.confidence *= 0.25
+            signal.explanation = signal.explanation or {}
+            signal.explanation["hurst_gate"] = (
+                f"H={_hurst:.3f} < 0.45: persistência insuficiente para trend-following"
+            )
+        elif _regime == "ranger" and _hurst > 0.6:
+            signal.confidence *= 0.25
+            signal.explanation = signal.explanation or {}
+            signal.explanation["hurst_gate"] = (
+                f"H={_hurst:.3f} > 0.60: tendência forte — range-trading sem edge"
+            )
+        if _entropy > 2.5:
+            signal.confidence *= 0.10
+            signal.explanation = signal.explanation or {}
+            signal.explanation["entropy_gate"] = (
+                f"H_shannon={_entropy:.2f} > 2.5: regime instável — não abrir posição"
+            )
+
+        return signal
+
     def get_regime_confidence(self, df: pd.DataFrame) -> float:
         """
         Retorna a confiança de que os dados atuais pertencem ao regime deste especialista.
-        
+
         Args:
             df: DataFrame com dados recentes
-            
+
         Returns:
             Confiança entre 0.0 e 1.0
         """
         try:
             if len(df) < 100:
                 return 0.0
-            
+
             # Detecta regimes nas últimas N barras (Janela de 100 para convergência do HMM)
             regimes = self.regime_detector.detect_regimes(df.tail(100))
-            
+
             # Calcula proporção do regime específico
             regime_count = np.sum(regimes == self.regime_code)
             confidence = regime_count / len(regimes)
-            
+
             return float(confidence)
-            
+
         except Exception as e:
             logger.warning(f"⚠️ {self.name}: Erro ao calcular confiança de regime: {e}")
             return 0.0

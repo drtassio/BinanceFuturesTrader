@@ -138,22 +138,33 @@ class CurriculumEngine:
 
         stage = self.get_current_stage()
         history = self.stage_performance_history[current_stage_idx]
-        
-        evaluation_frequency = max(20, int(stage.get('episodes', 100) / 10)) 
-        
-        if len(history) < evaluation_frequency:
-            return 
 
-        recent_eval_window = min(len(history), 50) 
+        # ── evaluation_frequency calibrado para ciclos de treino ────────────────
+        # Antes: max(20, episodes/10) → p/ 50 000 episodes dava 5 000 chamadas
+        # Agora: usa 'min_training_runs' do estágio (padrão 5), mínimo 3
+        # Reflete que update_progress() é chamado 1x por especialista por treino
+        # (não 1x por passo RL como era a intenção original do código).
+        evaluation_frequency = max(3, int(stage.get('min_training_runs', 5)))
+
+        if len(history) < evaluation_frequency:
+            logger.debug(
+                f"📚 [CURRÍCULO] Aguardando mínimo de {evaluation_frequency} ciclos "
+                f"para avaliar '{stage['name']}'. Atual: {len(history)}."
+            )
+            return
+
+        recent_eval_window = min(len(history), 50)
         recent_performance = pd.DataFrame(history[-recent_eval_window:])
-        
+
         if recent_performance.empty:
             logger.warning(f"⚠️ [ALERTE CURRÍCULO] Nenhum dado de performance recente para avaliar o estágio {stage['name']}.")
             return
 
-        avg_performance = recent_performance.mean(numeric_only=True).to_dict() 
-        logger.info(f"📊 [CURRÍCULO] Avaliação de performance recente para estágio '{stage['name']}' (últimos {recent_eval_window} episódios): {avg_performance}")
-
+        avg_performance = recent_performance.mean(numeric_only=True).to_dict()
+        logger.info(
+            f"📊 [CURRÍCULO] Avaliação — estágio '{stage['name']}' "
+            f"(últimos {recent_eval_window} ciclos): {avg_performance}"
+        )
 
         # Verifica se os critérios de sucesso foram atingidos
         criteria = stage.get('success_criteria', {})
@@ -162,34 +173,52 @@ class CurriculumEngine:
 
         for metric, threshold in criteria.items():
             current_metric_val = avg_performance.get(metric)
-            
+
             if current_metric_val is None:
                 all_criteria_met = False
                 reasons_not_met.append(f"Métrica '{metric}' não encontrada nas métricas de performance.")
-                continue 
+                continue
 
-            if 'drawdown' in metric: 
+            if 'drawdown' in metric:
                 if current_metric_val > threshold:
                     all_criteria_met = False
                     reasons_not_met.append(f"❌ {metric} ({current_metric_val:.2%}) > limite ({threshold:.2%})")
-            else: # Outras métricas são 'maior ou igual' (e.g., sharpe_ratio)
+            else:
                 if current_metric_val < threshold:
                     all_criteria_met = False
                     reasons_not_met.append(f"❌ {metric} ({current_metric_val:.2f}) < limite ({threshold:.2f})")
-        
+
         if all_criteria_met:
             logger.info(f"🎉 [CURRÍCULO] Critérios de sucesso para o estágio '{stage['name']}' ATINGIDOS!")
             self._advance_stage()
-        # [FIX PLATEAU] Verifica plateau independentemente dos critérios
-        elif not all_criteria_met and self.detect_plateau(patience=30):
+
+        # [FIX PLATEAU] Plateau só faz sentido com histórico suficiente
+        elif self.detect_plateau(patience=min(30, max(10, len(history) // 2))):
             logger.warning(
-                f"🔄 [CURRÍCULO] Plateau detectado sem atingir critérios. "
+                f"🔄 [CURRÍCULO] Plateau detectado no estágio '{stage['name']}'. "
                 f"Retrocedendo 1 estágio para reforçar aprendizado base."
             )
             if self.current_stage_index > 0:
                 self.trigger_retraining(performance_degradation_level=0.3)
+
         else:
-            logger.info(f"⏳ [CURRÍCULO] Critérios de sucesso para o estágio '{stage['name']}' AINDA NÃO ATINGIDOS. Razões: {'; '.join(reasons_not_met)}. Continuando treinamento neste estágio.")
+            # ── Válvula de segurança: avança forçado após max_training_runs ────
+            # Garante que o currículo sempre progride mesmo se o proxy de Sharpe
+            # não atingir o threshold (ex.: mercado bear, métricas ruidosas).
+            max_runs = stage.get('max_training_runs', evaluation_frequency * 4)
+            if len(history) >= max_runs:
+                logger.warning(
+                    f"⏫ [CURRÍCULO] Limite de {max_runs} ciclos de treino atingido "
+                    f"no estágio '{stage['name']}' sem critérios atingidos. "
+                    f"Avançando forçadamente para o próximo estágio."
+                )
+                self._advance_stage()
+            else:
+                logger.info(
+                    f"⏳ [CURRÍCULO] Critérios de '{stage['name']}' ainda não atingidos "
+                    f"({'; '.join(reasons_not_met)}). "
+                    f"Ciclo {len(history)}/{max_runs} — continuando treinamento."
+                )
 
     def _advance_stage(self):
         """

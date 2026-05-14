@@ -416,16 +416,21 @@ class Backtester:
 
         return {
             "trade_id": f"sim_trade_{uuid.uuid4().hex[:12]}",
-            "timestamp": data_row.name, 
+            "timestamp": data_row.name,
+            # [FIX] entry_time é o campo que train_from_trade_log() do ProfitabilityPredictor busca
+            "entry_time": data_row.name,
+            "exit_time": None,       # preenchido ao fechar posição
+            "exit_price": None,      # preenchido ao fechar posição
             "symbol": signal.symbol,
-            "action": signal.action.value, 
+            "action": signal.action.value,
             "quantity": quantity,
             "price": execution_price,
             "fee": fee,
             "slippage_pct": slippage_pct,
-            "leverage": signal.leverage, # Incluir alavancagem no log do trade
-            "notional_value": trade_value_notional, # Incluir valor nocional
-            "pnl": 0.0 # PnL realizado (será preenchido no fechamento da posição)
+            "leverage": signal.leverage,
+            "notional_value": trade_value_notional,
+            "profit_probability": signal.explanation.get("profit_probability", 0.5),
+            "pnl": 0.0,  # PnL realizado (preenchido ao fechar posição)
         }
 
     def _calculate_performance_metrics(self, equity_curve_series: pd.Series, trade_log: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -484,8 +489,11 @@ class Backtester:
         
         sharpe_ratio = (returns.mean() / (returns.std() + np.finfo(float).eps)) * np.sqrt(periods_per_year)
         
-        downside_returns = returns[returns < 0]
-        sortino_ratio = (returns.mean() / (downside_returns.std() + np.finfo(float).eps)) * np.sqrt(periods_per_year) if not downside_returns.empty else np.inf
+        # [D-A1 FIX] Semi-desvio canônico: RMSE de min(r, 0) sobre todos os retornos.
+        # downside_returns.std() usava desvio em torno da média dos negativos (não de 0).
+        _downside_sq = np.minimum(returns.values, 0.0) ** 2
+        _downside_rmse = float(np.sqrt(_downside_sq.mean())) if len(_downside_sq) > 0 else 0.0
+        sortino_ratio = (returns.mean() / (_downside_rmse + np.finfo(float).eps)) * np.sqrt(periods_per_year) if _downside_rmse > 1e-9 else np.inf
         
         annualized_return = returns.mean() * periods_per_year
         

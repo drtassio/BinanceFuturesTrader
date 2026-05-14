@@ -144,6 +144,29 @@ class LearningMonitor:
         self._trial_numbers:     Deque[int]   = deque(maxlen=50)
         self._trial_timesteps:   Deque[int]   = deque(maxlen=50)
 
+        # ── [D11] SAC Convergence Speed ────────────────────────────────────
+        # Rastreia em quantos episódios o reward supera threshold pela 1ª vez.
+        # Convergência rápida com melhores features indica embeddings úteis.
+        self._convergence_reward_threshold: float = float(
+            getattr(cfg, 'CONVERGENCE_REWARD_THRESHOLD', 50.0)
+        )
+        self._convergence_episode: Optional[int] = None   # episódio em que convergiu
+        self._reward_slope_window: Deque[float] = deque(maxlen=20)
+
+        # ── [D12] Critic Loss Variance ─────────────────────────────────────
+        # Alta variância do critic loss = observation space ruidoso / embeddings instáveis.
+        # Thresholds: WARNING > 50x média, CRITICAL > 200x média (heurística empírica).
+        self._critic_loss_var_warning  = float(getattr(cfg, 'CRITIC_VAR_WARNING',  50.0))
+        self._critic_loss_var_critical = float(getattr(cfg, 'CRITIC_VAR_CRITICAL', 200.0))
+        self._critic_losses_recent: Deque[float] = deque(maxlen=200)
+
+        # ── [D13] Policy Entropy Evolution ─────────────────────────────────
+        # Rastreia trajetória de entropia ao longo do treino.
+        # Declínio muito rápido = convergência prematura (exploração insuficiente).
+        # Declínio muito lento = política não está especializando.
+        self._entropy_history: Deque[Tuple[int, float]] = deque(maxlen=500)
+        self._entropy_decay_rate: float = 0.0   # estimado por regressão linear
+
         # Estado
         self._peak_reward: float = -np.inf
         self._total_episodes: int = 0
@@ -216,8 +239,10 @@ class LearningMonitor:
                 self._actor_losses.append(actor_loss)
             if np.isfinite(critic_loss):
                 self._critic_losses.append(critic_loss)
+                self._critic_losses_recent.append(critic_loss)  # [D12]
             if np.isfinite(ent_coef):
                 self._ent_coefs.append(ent_coef)
+                self._entropy_history.append((self._total_steps, ent_coef))  # [D13]
             if std is not None and np.isfinite(std):
                 self._stds.append(std)
 
@@ -248,6 +273,23 @@ class LearningMonitor:
             self._n_trades_history.append(n_trades)
             if np.isfinite(scalp_rate):
                 self._scalp_rates.append(scalp_rate)
+
+            # [D11] SAC Convergence Speed — registra 1º episódio acima do threshold
+            if (
+                self._convergence_episode is None
+                and np.isfinite(mean_reward)
+                and mean_reward >= self._convergence_reward_threshold
+            ):
+                self._convergence_episode = self._total_episodes
+                logger.info(
+                    "[D11] SAC convergiu no episódio %d (reward=%.2f >= threshold=%.2f)",
+                    self._convergence_episode, mean_reward,
+                    self._convergence_reward_threshold,
+                )
+
+            # [D11] Slope de reward nos últimos 20 episódios (velocidade de aprendizado)
+            if np.isfinite(mean_reward):
+                self._reward_slope_window.append(mean_reward)
 
         # Avalia circuit breaker apos cada episodio
         self._evaluate_circuit_breaker()
@@ -466,7 +508,12 @@ class LearningMonitor:
         # Se o pico está dentro dos últimos 3 evals, o agente ainda está subindo — não é colapso
         if max(data[-3:]) >= self._peak_reward * 0.98:
             return DiagnosticStatus.OK, f"Reward recente={recent_reward:.2f} | pico={self._peak_reward:.2f} (em alta)"
-        if self._peak_reward > 0:
+        # [D-C5 FIX] Com peak_reward ≤ 0, o denominador original forçava drop_ratio = 0.0,
+        # tornando o circuit breaker matematicamente impossível de disparar durante toda a
+        # fase inicial do treino (quando rewards são negativos). Exemplo: pico -100, recente -190
+        # → queda de 90% mas drop_ratio = 0.0 → sem alarme.
+        # Correção: medir piora relativa ao pico usando |peak_reward| como denominador.
+        if abs(self._peak_reward) > 1e-9:
             drop_ratio = (self._peak_reward - recent_reward) / abs(self._peak_reward)
         else:
             drop_ratio = 0.0
@@ -651,6 +698,131 @@ class LearningMonitor:
         return DiagnosticStatus.OK, f"Taxa scalp={recent_rate*100:.1f}%"
 
     # ------------------------------------------------------------------
+    # D11 — SAC Convergence Speed
+    # ------------------------------------------------------------------
+
+    def _diag_convergence_speed(self) -> Tuple[str, str, dict]:
+        """
+        [D11] Velocidade de convergência do SAC.
+        Mede slope de reward nos últimos 20 episódios.
+        Convergência rápida com bons embeddings = slope alto e estável.
+        """
+        data: dict = {
+            "convergence_episode": self._convergence_episode,
+            "reward_slope": None,
+        }
+        window = list(self._reward_slope_window)
+        if len(window) < 5:
+            return DiagnosticStatus.OK, "Dados insuficientes para slope", data
+
+        x = np.arange(len(window), dtype=float)
+        slope = float(np.polyfit(x, window, 1)[0])
+        data["reward_slope"] = round(slope, 4)
+
+        if slope < -2.0:
+            return (
+                DiagnosticStatus.CRITICAL,
+                f"[D11] Reward em queda acelerada (slope={slope:.3f}) — possível degradação pós-mudança de features",
+                data,
+            )
+        if slope < 0.0 and self._total_episodes > 30:
+            return (
+                DiagnosticStatus.WARNING,
+                f"[D11] Reward com tendência negativa (slope={slope:.3f}) nos últimos {len(window)} ep",
+                data,
+            )
+        return DiagnosticStatus.OK, f"[D11] Slope={slope:.3f} ({len(window)} ep)", data
+
+    # ------------------------------------------------------------------
+    # D12 — Critic Loss Variance
+    # ------------------------------------------------------------------
+
+    def _diag_critic_variance(self) -> Tuple[str, str, dict]:
+        """
+        [D12] Variância do critic loss.
+        Alta variância = observation space ruidoso ou embeddings instáveis.
+        Razão var/mean² (coef. de variação²) > threshold = sinal de ruído.
+        """
+        data: dict = {"critic_cv2": None, "critic_std": None}
+        losses = list(self._critic_losses_recent)
+        if len(losses) < 20:
+            return DiagnosticStatus.OK, "Dados insuficientes para variance", data
+
+        arr = np.array(losses)
+        mean_l = float(arr.mean())
+        std_l  = float(arr.std())
+        if mean_l == 0:
+            return DiagnosticStatus.OK, "Critic mean=0", data
+
+        cv2 = (std_l / abs(mean_l)) ** 2   # coeficiente de variação ao quadrado
+        data["critic_cv2"] = round(cv2, 4)
+        data["critic_std"] = round(std_l, 4)
+
+        if cv2 > self._critic_loss_var_critical:
+            return (
+                DiagnosticStatus.CRITICAL,
+                f"[D12] Critic CV²={cv2:.1f} >> {self._critic_loss_var_critical} — "
+                f"observation space muito ruidoso (verificar embeddings CVAE)",
+                data,
+            )
+        if cv2 > self._critic_loss_var_warning:
+            return (
+                DiagnosticStatus.WARNING,
+                f"[D12] Critic CV²={cv2:.1f} > {self._critic_loss_var_warning} — "
+                f"variância elevada (monitorar temporal_smoothness do CVAE)",
+                data,
+            )
+        return DiagnosticStatus.OK, f"[D12] Critic CV²={cv2:.3f} (OK)", data
+
+    # ------------------------------------------------------------------
+    # D13 — Policy Entropy Evolution
+    # ------------------------------------------------------------------
+
+    def _diag_entropy_evolution(self) -> Tuple[str, str, dict]:
+        """
+        [D13] Evolução da entropia da política ao longo do treino.
+        Declínio muito rápido = convergência prematura (exploração insuficiente).
+        Declínio muito lento = política não especializando.
+        Estimado via slope linear de ent_coef nos últimos 200 steps.
+        """
+        data: dict = {"entropy_slope_per_1k": None, "current_entropy": None}
+        history = list(self._entropy_history)  # lista de (step, ent_coef)
+        if len(history) < 50:
+            return DiagnosticStatus.OK, "Dados insuficientes para entropy trend", data
+
+        steps   = np.array([h[0] for h in history], dtype=float)
+        entropies = np.array([h[1] for h in history], dtype=float)
+
+        # Normaliza steps para escala 1k para slope legível
+        slope_per_1k = float(np.polyfit(steps / 1000.0, entropies, 1)[0])
+        current_ent  = float(entropies[-1])
+
+        data["entropy_slope_per_1k"] = round(slope_per_1k, 6)
+        data["current_entropy"] = round(current_ent, 6)
+
+        # Declínio rápido demais: slope < -0.05 por 1k steps no início do treino
+        if slope_per_1k < -0.10 and self._total_steps < 50_000:
+            return (
+                DiagnosticStatus.WARNING,
+                f"[D13] Entropia caindo muito rápido (slope={slope_per_1k:.4f}/1k) — "
+                f"risco de convergência prematura (considerar aumento de ent_coef inicial)",
+                data,
+            )
+        # Entropia estagnada após treino longo: política não especializa
+        if abs(slope_per_1k) < 1e-5 and self._total_steps > 100_000 and current_ent > 0.5:
+            return (
+                DiagnosticStatus.WARNING,
+                f"[D13] Entropia estagnada em {current_ent:.4f} após {self._total_steps} steps — "
+                f"política pode não estar especializando (verificar reward signal)",
+                data,
+            )
+        return (
+            DiagnosticStatus.OK,
+            f"[D13] Entropy={current_ent:.4f} slope={slope_per_1k:.5f}/1k",
+            data,
+        )
+
+    # ------------------------------------------------------------------
     # Relatorio
     # ------------------------------------------------------------------
 
@@ -670,10 +842,14 @@ class LearningMonitor:
             d8_status,  d8_msg  = self._diag_profitability()
             d9_status,  d9_msg  = self._diag_trial_degradation()
             d10_status, d10_msg = self._diag_scalping_rate()
+            d11_status, d11_msg, d11_data = self._diag_convergence_speed()
+            d12_status, d12_msg, d12_data = self._diag_critic_variance()
+            d13_status, d13_msg, d13_data = self._diag_entropy_evolution()
 
             # Status global = pior status entre os diagnosticos
             all_statuses = [d1_status, d2_status, d3_status, d4_status,
-                            d5_status, d6_status, d8_status, d9_status, d10_status]
+                            d5_status, d6_status, d8_status, d9_status, d10_status,
+                            d11_status, d12_status, d13_status]
             if DiagnosticStatus.CRITICAL in all_statuses:
                 global_status = DiagnosticStatus.CRITICAL
             elif DiagnosticStatus.WARNING in all_statuses:
@@ -739,6 +915,9 @@ class LearningMonitor:
                     "D8_profitability":     {"status": d8_status,  "message": d8_msg},
                     "D9_trial_degradation": {"status": d9_status,  "message": d9_msg},
                     "D10_scalping_rate":    {"status": d10_status, "message": d10_msg},
+                    "D11_convergence_speed": {"status": d11_status, "message": d11_msg, **d11_data},
+                    "D12_critic_variance":   {"status": d12_status, "message": d12_msg, **d12_data},
+                    "D13_entropy_evolution": {"status": d13_status, "message": d13_msg, **d13_data},
                 },
             }
 

@@ -121,8 +121,11 @@ class SoftGatingNetwork(nn.Module):
             nn.Tanh()  # Output in [-1, 1]: negative = bearish momentum, positive = bullish
         )
         
-        # Tracking for load balancing loss
-        self.register_buffer('expert_usage', torch.zeros(num_experts))
+        # Tracking for load balancing loss (Switch Transformer Eq.4)
+        # expert_prob_sum: Σ p_i across tokens → P_i = expert_prob_sum / usage_count
+        # expert_dispatch_count: count tokens where expert i is argmax → f_i = count / usage_count
+        self.register_buffer('expert_prob_sum', torch.zeros(num_experts))
+        self.register_buffer('expert_dispatch_count', torch.zeros(num_experts))
         self.register_buffer('usage_count', torch.tensor(0.0))
         
         # Initialize weights
@@ -185,11 +188,15 @@ class SoftGatingNetwork(nn.Module):
         # Compute regime momentum
         momentum = self.momentum_head(attended_features)
         
-        # Track expert usage for load balancing
+        # Track expert usage for load balancing (Switch Transformer Eq.4)
         if self.training:
             with torch.no_grad():
-                self.expert_usage += probabilities.sum(dim=0)
-                self.usage_count += probabilities.shape[0]
+                n = probabilities.shape[0]
+                self.expert_prob_sum += probabilities.sum(dim=0)
+                top_expert = probabilities.argmax(dim=-1)
+                for i in range(self.num_experts):
+                    self.expert_dispatch_count[i] += (top_expert == i).sum().float()
+                self.usage_count += n
         
         result = {
             'probabilities': probabilities,
@@ -234,26 +241,31 @@ class SoftGatingNetwork(nn.Module):
     
     def compute_load_balancing_loss(self, reset: bool = True) -> torch.Tensor:
         """
-        Compute load balancing auxiliary loss to encourage equal expert usage.
-        
-        Reference: Shazeer et al. (2017) - Importance loss for MoE
+        Compute load balancing auxiliary loss (Switch Transformer Eq.4).
+
+        L_aux = N * Σ_i (f_i * P_i)
+        where:
+          f_i = fraction of tokens dispatched to expert i (via argmax)
+          P_i = mean routing probability for expert i
+          N   = number of experts (scaling constant)
+
+        f_i e P_i são acumulados em buffers SEPARADOS no forward().
+        Chamar com reset=True uma vez por EPOCH (não por batch).
+
+        Reference: Fedus et al. (2022) "Switch Transformers", Eq.4
         """
         if self.usage_count < 1:
-            return torch.tensor(0.0, device=self.expert_usage.device)
-            
-        # Compute usage fractions
-        usage_fractions = self.expert_usage / self.usage_count
-        
-        # Target: uniform distribution
-        target = torch.ones_like(usage_fractions) / self.num_experts
-        
-        # L2 loss between actual and target usage
-        loss = F.mse_loss(usage_fractions, target)
-        
+            return torch.tensor(0.0, device=self.expert_prob_sum.device)
+
+        P_i = self.expert_prob_sum / self.usage_count
+        f_i = self.expert_dispatch_count / self.usage_count
+        loss = self.num_experts * torch.dot(f_i, P_i)
+
         if reset:
-            self.expert_usage.zero_()
+            self.expert_prob_sum.zero_()
+            self.expert_dispatch_count.zero_()
             self.usage_count.zero_()
-            
+
         return loss
     
     def get_feature_importance(self, latent_features: torch.Tensor) -> np.ndarray:

@@ -35,18 +35,18 @@ logger = get_logger("RangerSpecialist")
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTES DE REGIME LATERAL
 # ─────────────────────────────────────────────────────────────────────────────
-_ADX_RANGE_MAX      = 22.0   # ADX abaixo disso = mercado lateral confirmado
-_ADX_TREND_WARN     = 28.0   # ADX acima disso = tendência emergindo
-_ADX_TREND_STRONG   = 35.0   # ADX acima disso = tendência forte (penalidade máxima)
-_BBW_SQUEEZE        = 0.018  # BB Width abaixo disso = squeeze de volatilidade
-_BBW_NORMAL         = 0.035  # BB Width acima disso = range normal
-_ZSCORE_OVERSOLD    = -1.8   # Z-score de entrada compra (calibrado para crypto)
-_ZSCORE_OVERBOUGHT  =  1.8   # Z-score de entrada venda
-_RSI_OVERSOLD       =  32    # RSI sobrevendido (mais conservador que 30 padrão)
-_RSI_OVERBOUGHT     =  68    # RSI sobrecomprado
-_MR_HALFLIFE        = 15     # Half-life típico de reversão em crypto (candles 15m)
-_DIST_EMA_IDEAL     = 0.40   # Dist ATR ideal ao fechar (reversão quase completa)
-_DIST_EMA_GOOD      = 0.80   # Dist ATR boa ao fechar
+_ADX_RANGE_MAX = 22.0  # ADX abaixo disso = mercado lateral confirmado
+_ADX_TREND_WARN = 28.0  # ADX acima disso = tendência emergindo
+_ADX_TREND_STRONG = 35.0  # ADX acima disso = tendência forte (penalidade máxima)
+_BBW_SQUEEZE = 0.018  # BB Width abaixo disso = squeeze de volatilidade
+_BBW_NORMAL = 0.035  # BB Width acima disso = range normal
+_ZSCORE_OVERSOLD = -1.8  # Z-score de entrada compra (calibrado para crypto)
+_ZSCORE_OVERBOUGHT = 1.8  # Z-score de entrada venda
+_RSI_OVERSOLD = 32  # RSI sobrevendido (mais conservador que 30 padrão)
+_RSI_OVERBOUGHT = 68  # RSI sobrecomprado
+_MR_HALFLIFE = 15  # Half-life típico de reversão em crypto (candles 15m)
+_DIST_EMA_IDEAL = 0.40  # Dist ATR ideal ao fechar (reversão quase completa)
+_DIST_EMA_GOOD = 0.80  # Dist ATR boa ao fechar
 
 
 class RangerSpecialist(BaseRegimeSpecialist):
@@ -71,32 +71,38 @@ class RangerSpecialist(BaseRegimeSpecialist):
         config: AIConfig,
         trading_config: TradingConfig,
         input_dim: int,
-        profitability_predictor: Optional[Any] = None
+        profitability_predictor: Optional[Any] = None,
     ):
         super().__init__(
             config=config,
             trading_config=trading_config,
-            regime_type='ranger',
+            regime_type="ranger",
             input_dim=input_dim,
-            profitability_predictor=profitability_predictor
+            profitability_predictor=profitability_predictor,
         )
 
         # Parâmetros de mean reversion (sinais matemáticos)
-        self.bb_window           = 20          # Janela Bollinger Band
-        self.bb_std              = 2.0         # Desvios padrão para as bandas
-        self.rsi_period          = 14          # Período RSI (Wilder, 1978)
-        self.z_score_threshold   = abs(_ZSCORE_OVERSOLD)
-        self.rsi_overbought      = _RSI_OVERBOUGHT
-        self.rsi_oversold        = _RSI_OVERSOLD
+        self.bb_window = 20  # Janela Bollinger Band
+        self.bb_std = 2.0  # Desvios padrão para as bandas
+        self.rsi_period = 14  # Período RSI (Wilder, 1978)
+        self.z_score_threshold = abs(_ZSCORE_OVERSOLD)
+        self.rsi_overbought = _RSI_OVERBOUGHT
+        self.rsi_oversold = _RSI_OVERSOLD
 
         # Hiperparâmetros de modelo específicos do Ranger
         self.model_hyperparams = getattr(self, "model_hyperparams", {})
-        self.model_hyperparams.update({
-            "mean_reversion_strength": 1.5,
-            "min_confidence": 0.55,
-            "position_bias": "bidirectional",
-            "take_profit_sensitivity": 1.2,
-        })
+        self.model_hyperparams.update(
+            {
+                "mean_reversion_strength": 1.5,
+                "min_confidence": 0.55,
+                "position_bias": "bidirectional",
+                "take_profit_sensitivity": 1.2,
+            }
+        )
+
+        # [FIX PRODUÇÃO] Ranger opera em ambas as direções (Mean Reversion)
+        self._specialist_direction = "both"
+        logger.info("🤠 Ranger Specialist configurado para operações bidirecionais")
 
         logger.info(
             "🤠 RangerSpecialist v2.0 — Mean Reversion com ADX/BBW/Z-score/OU half-life"
@@ -119,20 +125,24 @@ class RangerSpecialist(BaseRegimeSpecialist):
           range_quality_score : Score [0-1] de qualidade do range atual
         """
         defaults = {
-            'z_score': 0.0, 'rsi': 50.0, 'price_position_in_range': 0.5,
-            'adx': 25.0, 'bb_width': 0.02, 'range_quality_score': 0.5,
+            "z_score": 0.0,
+            "rsi": 50.0,
+            "price_position_in_range": 0.5,
+            "adx": 25.0,
+            "bb_width": 0.02,
+            "range_quality_score": 0.5,
         }
         if len(df) < self.bb_window:
             return defaults
 
         try:
-            close = df['close']
-            high  = df.get('high', close)
-            low   = df.get('low', close)
+            close = df["close"]
+            high = df.get("high", close)
+            low = df.get("low", close)
 
             # 1. Bollinger Z-Score
-            sma    = close.rolling(self.bb_window).mean()
-            std    = close.rolling(self.bb_window).std()
+            sma = close.rolling(self.bb_window).mean()
+            std = close.rolling(self.bb_window).std()
             z_score = float((close - sma).iloc[-1] / (std.iloc[-1] + 1e-9))
 
             # BB Width (proxy de squeeze)
@@ -144,19 +154,19 @@ class RangerSpecialist(BaseRegimeSpecialist):
 
             # 2. RSI (Wilder, 1978)
             delta = close.diff()
-            gain  = delta.where(delta > 0, 0.0).rolling(self.rsi_period).mean()
-            loss  = (-delta.where(delta < 0, 0.0)).rolling(self.rsi_period).mean()
-            rs    = gain.iloc[-1] / (loss.iloc[-1] + 1e-9)
-            rsi   = float(100.0 - 100.0 / (1.0 + rs))
+            gain = delta.where(delta > 0, 0.0).rolling(self.rsi_period).mean()
+            loss = (-delta.where(delta < 0, 0.0)).rolling(self.rsi_period).mean()
+            rs = gain.iloc[-1] / (loss.iloc[-1] + 1e-9)
+            rsi = float(100.0 - 100.0 / (1.0 + rs))
 
             # 3. Posição no range
             r_high = close.rolling(self.bb_window).max().iloc[-1]
-            r_low  = close.rolling(self.bb_window).min().iloc[-1]
+            r_low = close.rolling(self.bb_window).min().iloc[-1]
             price_pos = float((close.iloc[-1] - r_low) / (r_high - r_low + 1e-9))
 
             # 4. ADX (se já calculado no DF, usar; senão estimar)
-            if 'adx' in df.columns:
-                adx_val = float(df['adx'].iloc[-1])
+            if "adx" in df.columns:
+                adx_val = float(df["adx"].iloc[-1])
             else:
                 # Aproximação rápida: desvio padrão de retornos anualizados
                 returns_std = float(close.pct_change().rolling(14).std().iloc[-1])
@@ -165,20 +175,24 @@ class RangerSpecialist(BaseRegimeSpecialist):
                 adx_val = 25.0
 
             # 5. Range Quality Score — combina ADX + BBW + RSI extremidade
-            adx_score = max(0.0, 1.0 - adx_val / 40.0)             # 1.0 se ADX=0, 0.0 se ADX≥40
-            bbw_score = max(0.0, 1.0 - bb_width / _BBW_NORMAL)     # 1.0 se squeeze, 0 se amplo
-            rsi_score = abs(rsi - 50.0) / 50.0                      # 1.0 se RSI extremo
+            adx_score = max(0.0, 1.0 - adx_val / 40.0)  # 1.0 se ADX=0, 0.0 se ADX≥40
+            bbw_score = max(
+                0.0, 1.0 - bb_width / _BBW_NORMAL
+            )  # 1.0 se squeeze, 0 se amplo
+            rsi_score = abs(rsi - 50.0) / 50.0  # 1.0 se RSI extremo
             range_quality = float(
                 0.45 * adx_score + 0.35 * bbw_score + 0.20 * rsi_score
             )
 
             return {
-                'z_score': z_score if not np.isnan(z_score) else 0.0,
-                'rsi': rsi if not np.isnan(rsi) else 50.0,
-                'price_position_in_range': price_pos if not np.isnan(price_pos) else 0.5,
-                'adx': adx_val,
-                'bb_width': bb_width if not np.isnan(bb_width) else 0.02,
-                'range_quality_score': range_quality,
+                "z_score": z_score if not np.isnan(z_score) else 0.0,
+                "rsi": rsi if not np.isnan(rsi) else 50.0,
+                "price_position_in_range": price_pos
+                if not np.isnan(price_pos)
+                else 0.5,
+                "adx": adx_val,
+                "bb_width": bb_width if not np.isnan(bb_width) else 0.02,
+                "range_quality_score": range_quality,
             }
 
         except Exception as exc:
@@ -189,7 +203,9 @@ class RangerSpecialist(BaseRegimeSpecialist):
     # AÇÃO (inferência — não afeta SAC durante treino)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_action(self, state: np.ndarray, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    def get_action(
+        self, state: np.ndarray, context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """
         Ação baseada em sinais de mean reversion matemáticos.
 
@@ -199,52 +215,77 @@ class RangerSpecialist(BaseRegimeSpecialist):
         action_dict = super().get_action(state, context)
 
         context = context or {}
-        if 'df' in context:
-            mr_signal = self.compute_mean_reversion_signal(context['df'])
+        if "df" in context:
+            mr_signal = self.compute_mean_reversion_signal(context["df"])
             context.update(mr_signal)
 
-        z_score       = context.get('z_score', 0.0)
-        rsi           = context.get('rsi', 50.0)
-        price_pos     = context.get('price_position_in_range', 0.5)
-        adx_val       = context.get('adx', 25.0)
-        range_quality = context.get('range_quality_score', 0.5)
+        z_score = context.get("z_score", 0.0)
+        rsi = context.get("rsi", 50.0)
+        price_pos = context.get("price_position_in_range", 0.5)
+        adx_val = context.get("adx", 25.0)
+        range_quality = context.get("range_quality_score", 0.5)
 
         # FILTRO ADX: não operar em mercado tendencioso
         if adx_val > _ADX_TREND_WARN:
-            action_dict['confidence'] = action_dict.get('confidence', 0.5) * 0.5
-            logger.debug("🤠 Ranger: ADX=%.1f > %.0f — reduzindo confiança (mercado em tendência)", adx_val, _ADX_TREND_WARN)
+            action_dict["confidence"] = action_dict.get("confidence", 0.5) * 0.5
+            logger.debug(
+                "🤠 Ranger: ADX=%.1f > %.0f — reduzindo confiança (mercado em tendência)",
+                adx_val,
+                _ADX_TREND_WARN,
+            )
             return action_dict
 
         # Sinais de reversão com dupla confirmação
-        oversold   = z_score < _ZSCORE_OVERSOLD  and rsi < _RSI_OVERSOLD
+        oversold = z_score < _ZSCORE_OVERSOLD and rsi < _RSI_OVERSOLD
         overbought = z_score > _ZSCORE_OVERBOUGHT and rsi > _RSI_OVERBOUGHT
 
         if oversold:
-            action_dict['side'] = 1   # Long
-            signal_strength = min(1.0, (
-                abs(z_score) / 3.5 +
-                (_RSI_OVERSOLD - rsi) / 35.0 +
-                range_quality
-            ) / 3.0)
-            action_dict['confidence'] = max(0.6, min(1.0, signal_strength))
-            logger.debug("🤠 Ranger LONG: Z=%.2f RSI=%.1f ADX=%.1f RQ=%.2f", z_score, rsi, adx_val, range_quality)
+            action_dict["side"] = 1  # Long
+            signal_strength = min(
+                1.0,
+                (abs(z_score) / 3.5 + (_RSI_OVERSOLD - rsi) / 35.0 + range_quality)
+                / 3.0,
+            )
+            action_dict["confidence"] = max(0.6, min(1.0, signal_strength))
+            logger.debug(
+                "🤠 Ranger LONG: Z=%.2f RSI=%.1f ADX=%.1f RQ=%.2f",
+                z_score,
+                rsi,
+                adx_val,
+                range_quality,
+            )
 
         elif overbought:
-            action_dict['side'] = -1  # Short
-            signal_strength = min(1.0, (
-                abs(z_score) / 3.5 +
-                (rsi - _RSI_OVERBOUGHT) / 35.0 +
-                range_quality
-            ) / 3.0)
-            action_dict['confidence'] = max(0.6, min(1.0, signal_strength))
-            logger.debug("🤠 Ranger SHORT: Z=%.2f RSI=%.1f ADX=%.1f RQ=%.2f", z_score, rsi, adx_val, range_quality)
+            action_dict["side"] = -1  # Short
+            signal_strength = min(
+                1.0,
+                (abs(z_score) / 3.5 + (rsi - _RSI_OVERBOUGHT) / 35.0 + range_quality)
+                / 3.0,
+            )
+            action_dict["confidence"] = max(0.6, min(1.0, signal_strength))
+            logger.debug(
+                "🤠 Ranger SHORT: Z=%.2f RSI=%.1f ADX=%.1f RQ=%.2f",
+                z_score,
+                rsi,
+                adx_val,
+                range_quality,
+            )
 
         else:
-            # Ajuste por posição extrema no range (sem reversão confirmada)
-            if price_pos < 0.15 and action_dict.get('side') == 'buy':
-                action_dict['confidence'] = min(1.0, action_dict.get('confidence', 0.5) * 1.15)
-            elif price_pos > 0.85 and action_dict.get('side') == 'sell':
-                action_dict['confidence'] = min(1.0, action_dict.get('confidence', 0.5) * 1.15)
+            # [BUG 4 FIX 2026-05-13] Suporte para side como int (1/-1) ou string ("buy"/"sell").
+            # Bug anterior: linhas 243/259 setam side=1/-1 (int) mas este bloco comparava
+            # com "buy"/"sell" (string) — dead code. Agora aceita ambos os formatos.
+            _side_val = action_dict.get("side")
+            _is_buy = _side_val in (1, "buy", "long")
+            _is_sell = _side_val in (-1, "sell", "short")
+            if price_pos < 0.15 and _is_buy:
+                action_dict["confidence"] = min(
+                    1.0, action_dict.get("confidence", 0.5) * 1.15
+                )
+            elif price_pos > 0.85 and _is_sell:
+                action_dict["confidence"] = min(
+                    1.0, action_dict.get("confidence", 0.5) * 1.15
+                )
 
         return action_dict
 
@@ -296,6 +337,7 @@ class RangerSpecialist(BaseRegimeSpecialist):
 # AMBIENTE RL — RangerTradingEnv
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class RangerTradingEnv(TrendFollowingEnv):
     """
     Ambiente RL especializado para o Ranger (mercado lateral / mean reversion).
@@ -317,15 +359,15 @@ class RangerTradingEnv(TrendFollowingEnv):
         super().__init__(*args, **kwargs)
 
         # Half-life de Ornstein-Uhlenbeck para crypto range (candles 15m)
-        self.mean_reversion_halflife  = _MR_HALFLIFE
-        self.max_duration_multiplier  = 2.5   # Forçar saída em 2.5x half-life
+        self.mean_reversion_halflife = _MR_HALFLIFE
+        self.max_duration_multiplier = 2.5  # Forçar saída em 2.5x half-life
 
         # Colunas de indicadores pré-calculados no DataFrame
-        self.adx_col_ranger   = 'adx'        # Calculado em native_indicators.py
-        self.bbw_col_ranger   = 'bb_width'   # Calculado em native_indicators.py
-        self.bb_upper_col     = 'bb_upper'
-        self.bb_lower_col     = 'bb_lower'
-        self.bb_middle_col    = 'bb_middle'
+        self.adx_col_ranger = "adx"  # Calculado em native_indicators.py
+        self.bbw_col_ranger = "bb_width"  # Calculado em native_indicators.py
+        self.bb_upper_col = "bb_upper"
+        self.bb_lower_col = "bb_lower"
+        self.bb_middle_col = "bb_middle"
 
         # [FIX RANGER GATE] Permite Long E Short — direção neutra é condição ideal
         # Quando tp_prior_dir ≈ 0 (lateral), o gate do parent fecha tudo.
@@ -339,8 +381,7 @@ class RangerTradingEnv(TrendFollowingEnv):
     def _get_row_safe(self, step_offset: int = 0) -> pd.Series:
         """Retorna linha do DataFrame com bounds checking."""
         idx = min(
-            max(0, self.start_idx + self.current_step + step_offset),
-            len(self.df) - 1
+            max(0, self.start_idx + self.current_step + step_offset), len(self.df) - 1
         )
         return self.df.iloc[idx]
 
@@ -405,49 +446,34 @@ class RangerTradingEnv(TrendFollowingEnv):
         │ 5. Eficiência OU (duração)  │ Premia saída dentro do half-life      │
         └─────────────────────────────┴───────────────────────────────────────┘
 
-        Fee deduction formula:
-            roundtrip_fee_pct = 2 × TAKER_FEE × current_leverage
-            net_return_pct    = trade_return_pct − roundtrip_fee_pct
-            pnl_base          = net_return_pct × 20.0
-
-        Rationale: trade_return_pct já inclui alavancagem (pnl/margem),
-        as taxas incidem sobre o notional = margem × leverage. Logo a
-        deducão de fee_pct precisa ser escalada por leverage também.
+        Fee deduction formula (simplificada — [FIX C4] double counting removido):
+            As taxas são tratadas pelo portfolio.update_from_trade() (entry+exit fee)
+            e pelo Component 11 do compute_scientific_reward uniformemente para todos
+            os especialistas. Removida dedução duplicada aqui que fazia o Ranger
+            pagar taxa duas vezes (reward + portfolio) vs Trend (só portfolio).
         """
         try:
-            exit_row  = self._get_row_safe()
+            exit_row = self._get_row_safe()
             entry_row = self._get_entry_row(duration_steps)
 
-            exit_price  = float(exit_row.get('close', 0.0))
-            entry_price = float(entry_row.get('close', exit_price))
+            exit_price = float(exit_row.get("close", 0.0))
+            entry_price = float(entry_row.get("close", exit_price))
             if exit_price <= 0:
                 exit_price = entry_price if entry_price > 0 else 1.0
 
-            # ── 1. PnL BASE (taxa-consciente) ────────────────────────────────
-            # trade_return_pct = pnl_bruto / margem = retorno_preço × leverage (BRUTO)
-            # Taxas são cobradas sobre o notional: TAKER_FEE × notional por lado.
-            # Como % da margem:  fee_pct = TAKER_FEE × leverage  (por lado)
-            # Round-trip (entrada + saída): 2 × TAKER_FEE × leverage
-            #
-            # Exemplo com TAKER_FEE=0.001, leverage=5:
-            #   roundtrip_fee_pct = 2 × 0.001 × 5 = 0.010  (1% da margem)
-            #   Trade bruto de +0.8% (margin) → net = −0.2% → pnl_base negativo ✓
-            #   Trade bruto de +1.5% (margin) → net = +0.5% → pnl_base positivo ✓
-            #
-            # Isso evita que o agente aprenda a fazer micro-trades rentáveis no gross
-            # mas perdedores no líquido, que é o maior risco em mercados laterais.
-            fee_rate          = getattr(self.trading_config, 'TAKER_FEE', 0.001)
-            leverage          = float(getattr(self, 'current_leverage', 5.0))
-            roundtrip_fee_pct = 2.0 * fee_rate * leverage
-            net_return_pct    = float(trade_return_pct) - roundtrip_fee_pct
-            pnl_base          = net_return_pct * 20.0
-            # (trades que não cobrem as taxas → reward negativo mesmo com gross > 0)
+            # ── 1. PnL BASE (gross, consistente com Trend) ──────────────────
+            # trade_return_pct = pnl_bruto / margem = retorno_preço × leverage
+            # Taxas são cobradas separadamente via portfolio e Component 11.
+            # Usamos o retorno bruto aqui, mesmo que o Trend (30.0 × sqrt(d/5)).
+            # O multiplicador 20.0 é conservador para mean-reversion (vs 30.0 Trend).
+            net_return_pct = float(trade_return_pct)
+            pnl_base = net_return_pct * 20.0
 
             # ── 2. FILTRO ADX (baseado no estado no MOMENTO DA ENTRADA) ──────
             # Se o agente entrou quando o ADX estava alto → penalizar
             # (ensina a SÓ operar em mercado realmente lateral)
             adx_entry = self._get_adx(entry_row)
-            adx_exit  = self._get_adx(exit_row)
+            adx_exit = self._get_adx(exit_row)
 
             adx_penalty = 0.0
             if adx_entry > _ADX_TREND_STRONG:
@@ -455,7 +481,10 @@ class RangerTradingEnv(TrendFollowingEnv):
                 adx_penalty = -2.5
             elif adx_entry > _ADX_TREND_WARN:
                 # Tendência emergindo: penalidade proporcional
-                adx_penalty = -1.5 * ((adx_entry - _ADX_TREND_WARN) / (_ADX_TREND_STRONG - _ADX_TREND_WARN))
+                adx_penalty = -1.5 * (
+                    (adx_entry - _ADX_TREND_WARN)
+                    / (_ADX_TREND_STRONG - _ADX_TREND_WARN)
+                )
             elif adx_entry < _ADX_RANGE_MAX:
                 # Mercado lateral confirmado na entrada: pequeno bônus
                 adx_penalty = +0.4 * (1.0 - adx_entry / _ADX_RANGE_MAX)
@@ -479,9 +508,11 @@ class RangerTradingEnv(TrendFollowingEnv):
 
             # ── 4. MR CONVERGÊNCIA (estado na SAÍDA) ─────────────────────────
             # A essência do mean reversion: o preço RETORNOU à média?
-            ema_val    = self._get_ema_trend_value(exit_row)
-            atr_exit   = self._get_atr_safe(exit_row, exit_price)
-            dist_exit  = abs(exit_price - ema_val) / (atr_exit + 1e-9) if ema_val > 0 else 1.5
+            ema_val = self._get_ema_trend_value(exit_row)
+            atr_exit = self._get_atr_safe(exit_row, exit_price)
+            dist_exit = (
+                abs(exit_price - ema_val) / (atr_exit + 1e-9) if ema_val > 0 else 1.5
+            )
 
             mr_convergence = 0.0
             if pnl_realized > 0:
@@ -490,29 +521,33 @@ class RangerTradingEnv(TrendFollowingEnv):
                     mr_convergence = 3.0 * (1.0 - dist_exit / _DIST_EMA_IDEAL)
                 elif dist_exit < _DIST_EMA_GOOD:
                     # Boa reversão: fechou razoavelmente próximo
-                    mr_convergence = 1.2 * (1.0 - (dist_exit - _DIST_EMA_IDEAL) / (_DIST_EMA_GOOD - _DIST_EMA_IDEAL))
+                    mr_convergence = 1.2 * (
+                        1.0
+                        - (dist_exit - _DIST_EMA_IDEAL)
+                        / (_DIST_EMA_GOOD - _DIST_EMA_IDEAL)
+                    )
                 # else: fechou lucrativo mas longe da EMA → sem bônus extra (trade de momentum, não MR)
             else:
                 # Perdeu E a EMA não foi alcançada → nunca houve reversão real
                 if dist_exit > 1.5:
-                    mr_convergence = -2.5   # Máxima penalidade: morreu longe da média
+                    mr_convergence = -2.5  # Máxima penalidade: morreu longe da média
                 elif dist_exit > 1.0:
-                    mr_convergence = -1.0   # Penalidade moderada
+                    mr_convergence = -1.0  # Penalidade moderada
 
             # ── 5. EFICIÊNCIA ORNSTEIN-UHLENBECK (duração) ───────────────────
             # Mean reversion tem half-life: premia saídas rápidas, penaliza overholding
             # Referência: Chan (2013), Tabela 3.1 — Optimal exit for OU process
             hl = self.mean_reversion_halflife  # 15 candles
             if duration_steps <= hl:
-                dur_efficiency = 1.00     # Ótimo: saiu dentro do half-life
+                dur_efficiency = 1.00  # Ótimo: saiu dentro do half-life
             elif duration_steps <= int(1.5 * hl):
-                dur_efficiency = 0.75     # Bom: dentro de 1.5x half-life
+                dur_efficiency = 0.75  # Bom: dentro de 1.5x half-life
             elif duration_steps <= 2 * hl:
-                dur_efficiency = 0.50     # Aceitável: dentro de 2x half-life
+                dur_efficiency = 0.50  # Aceitável: dentro de 2x half-life
             elif duration_steps <= 3 * hl:
-                dur_efficiency = 0.25     # Lento: 3x half-life
+                dur_efficiency = 0.25  # Lento: 3x half-life
             else:
-                dur_efficiency = -0.20    # Overheld: prejudica generalização
+                dur_efficiency = -0.20  # Overheld: prejudica generalização
 
             # PnL escalado pela eficiência de duração
             duration_scaled_pnl = pnl_base * max(0.1, dur_efficiency)
@@ -522,14 +557,22 @@ class RangerTradingEnv(TrendFollowingEnv):
             total = duration_scaled_pnl + adx_penalty + bb_bonus + mr_convergence
 
             logger.debug(
-                "🤠 Ranger reward: gross=%.3f%% fee=%.3f%% net=%.3f%% | "
+                "🤠 Ranger reward: gross=%.3f%% fee=via_portfolio net=%.3f%% | "
                 "pnl_base=%.3f adx_pen=%.2f bb_bon=%.2f mr_conv=%.2f dur_eff=%.2f → total=%.3f",
-                float(trade_return_pct) * 100, roundtrip_fee_pct * 100, net_return_pct * 100,
-                duration_scaled_pnl, adx_penalty, bb_bonus, mr_convergence,
-                dur_efficiency, total,
+                float(trade_return_pct) * 100,
+                net_return_pct * 100,
+                duration_scaled_pnl,
+                adx_penalty,
+                bb_bonus,
+                mr_convergence,
+                dur_efficiency,
+                total,
             )
 
-            return float(np.clip(total, -25.0, 25.0))
+            # [BUG-07 FIX] Unificado para [-10, 10] — mesmo range do scientific_corrections.py:780.
+            # O clip anterior [-25, 25] gerava rewards 2.5x maiores que o Trend/Bear, distorcendo
+            # a política do SAC ensemble: o agente aprendia a super-valorizar o Ranger regime.
+            return float(np.clip(total, -10.0, 10.0))
 
         except Exception as exc:
             logger.warning("⚠️ Erro no reward Ranger: %s", exc)
@@ -567,8 +610,8 @@ class RangerTradingEnv(TrendFollowingEnv):
             # ── Critério 3: EMA alcançada ────────────────────────────────────
             ema_val = self._get_ema_trend_value(exit_row)
             if ema_val > 0:
-                price    = float(exit_row.get('close', 0.0))
-                atr_val  = self._get_atr_safe(exit_row, price)
+                price = float(exit_row.get("close", 0.0))
+                atr_val = self._get_atr_safe(exit_row, price)
                 dist_ema = abs(price - ema_val) / (atr_val + 1e-9)
                 if dist_ema < 0.30 and current_pnl_pct > 0.0:
                     # Preço voltou à EMA e está lucrativo → reversão completa
@@ -576,7 +619,7 @@ class RangerTradingEnv(TrendFollowingEnv):
 
             # ── Critério 4: Ultrapassou 2x half-life ────────────────────────
             if (
-                hasattr(self, 'steps_in_position')
+                hasattr(self, "steps_in_position")
                 and self.steps_in_position > 2 * self.mean_reversion_halflife
                 and current_pnl_pct > 0.002
             ):

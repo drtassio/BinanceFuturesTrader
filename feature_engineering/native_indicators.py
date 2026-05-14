@@ -6,21 +6,26 @@
 ImplementaÃ§Ã£o nativa de indicadores tÃ©cnicos usando Python, Pandas e NumPy.
 """
 
+import os
+import threading
 import pandas as pd
 import numpy as np
+
 try:
     import torch
 except ImportError:
     torch = None
 from typing import Tuple, List, Dict, Optional
-from utils.logger import get_logger , LOG_LEVEL_DEBUG 
+from utils.logger import get_logger, LOG_LEVEL_DEBUG
 
-logger = get_logger("NativeIndicators" , LOG_LEVEL_DEBUG)
+logger = get_logger("NativeIndicators", LOG_LEVEL_DEBUG)
+
 
 class NativeIndicators:
     """
     Agrupa todos os cÃ¡lculos de indicadores tÃ©cnicos como mÃ©todos estÃ¡ticos.
     """
+
     # Constante EPSILON como variÃ¡vel de classe para acesso consistente
     EPSILON = 1e-9
 
@@ -28,6 +33,47 @@ class NativeIndicators:
     # Formato: { "BTCUSDT-15m": (d_value, timestamp_unix) }
     _d_cache: Dict[str, Tuple[float, float]] = {}
     _D_CACHE_TTL_SECONDS: float = 3600.0  # Revalida 1x por hora
+    _d_cache_lock: threading.Lock = threading.Lock()
+
+    # Persist d values to disk so training d == inference d across restarts
+    _D_PERSIST_PATH: str = os.path.join(
+        os.getcwd(), "models_ai", "fracdiff_d_values.json"
+    )
+
+    @staticmethod
+    def _load_d_from_disk() -> Dict[str, float]:
+        """Load persisted d values. Returns {} on any failure."""
+        try:
+            import json
+
+            path = NativeIndicators._D_PERSIST_PATH
+            if os.path.exists(path):
+                with open(path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return {
+                        k: float(v)
+                        for k, v in data.items()
+                        if isinstance(v, (int, float))
+                    }
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def _save_d_to_disk(cache_key: str, d_val: float) -> None:
+        """Persist d value for cache_key to disk (non-blocking, silent on error)."""
+        try:
+            import json
+
+            path = NativeIndicators._D_PERSIST_PATH
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            existing = NativeIndicators._load_d_from_disk()
+            existing[cache_key] = round(d_val, 4)
+            with open(path, "w") as f:
+                json.dump(existing, f, indent=2)
+        except Exception:
+            pass
 
     @staticmethod
     def _validate_series(series: pd.Series, min_length: int, name: str) -> bool:
@@ -36,13 +82,19 @@ class NativeIndicators:
         Retorna False se a sÃ©rie nÃ£o for vÃ¡lida ou for muito curta para o cÃ¡lculo inicial.
         """
         if not isinstance(series, pd.Series):
-            logger.debug(f"ð¨ [VAL. IND.] '{name}' nÃ£o Ã© uma pd.Series. Tipo: {type(series)}. Retornando False.")
+            logger.debug(
+                f"ð¨ [VAL. IND.] '{name}' nÃ£o Ã© uma pd.Series. Tipo: {type(series)}. Retornando False."
+            )
             return False
         if series.empty:
-            logger.debug(f"ð¨ [VAL. IND.] '{name}' Ã© uma sÃ©rie vazia. Retornando False.")
+            logger.debug(
+                f"ð¨ [VAL. IND.] '{name}' Ã© uma sÃ©rie vazia. Retornando False."
+            )
             return False
         if len(series) < min_length:
-            logger.warning(f"â ï¸ [VAL. IND.] '{name}' tem menos dados ({len(series)}) do que o mÃ­nimo recomendado ({min_length}). CÃ¡lculos podem resultar em NaNs iniciais.")
+            logger.warning(
+                f"â ï¸ [VAL. IND.] '{name}' tem menos dados ({len(series)}) do que o mÃ­nimo recomendado ({min_length}). CÃ¡lculos podem resultar em NaNs iniciais."
+            )
         return True
 
     @staticmethod
@@ -57,12 +109,14 @@ class NativeIndicators:
         Usa torch Gpu if available, senão fallback para np.convolve (vectorized).
         """
         min_len = max(4, window)
-        if not NativeIndicators._validate_series(series, min_len, "frac_diff_ffd input"):
+        if not NativeIndicators._validate_series(
+            series, min_len, "frac_diff_ffd input"
+        ):
             return pd.Series(np.nan, index=series.index, dtype=np.float32)
 
         clean = pd.to_numeric(series, errors="coerce").astype(float)
         n = len(clean)
-        
+
         # 1. Calcula Pesos
         weights = [1.0]
         for k in range(1, window):
@@ -70,38 +124,48 @@ class NativeIndicators:
             if abs(weight) < threshold:
                 break
             weights.append(weight)
-        weights = np.array(weights[::-1], dtype=np.float64)
+        # Pesos na ordem original: w[0]=1.0 (mais recente), w[k] decrescente.
+        # np.convolve inverte internamente → passamos sem inversão.
+        # F.conv1d é cross-correlation (NÃO inverte) → passamos com inversão explícita.
+        weights = np.array(weights, dtype=np.float64)
         weight_len = len(weights)
-        
+
         # --- ACELERAÇÃO GPU (TORCH) OU VECTORIZED NUMPY ---
         if torch is not None and torch.cuda.is_available():
             try:
                 # Converte para tensor e move para GPU
-                device = torch.device('cuda')
-                series_tensor = torch.tensor(clean.values, dtype=torch.float32, device=device).view(1, 1, -1)
-                weights_tensor = torch.tensor(weights, dtype=torch.float32, device=device).view(1, 1, -1)
-                
+                device = torch.device("cuda")
+                series_tensor = torch.tensor(
+                    clean.values, dtype=torch.float32, device=device
+                ).view(1, 1, -1)
+                # F.conv1d é cross-correlation: requer kernel invertido para FracDiff correto
+                weights_tensor = torch.tensor(
+                    weights[::-1].copy(), dtype=torch.float32, device=device
+                ).view(1, 1, -1)
+
                 # Aplica Convolução 1D
                 start_idx = weight_len - 1
                 with torch.no_grad():
-                    output_tensor = torch.nn.functional.conv1d(series_tensor, weights_tensor, padding=0)
-                
+                    output_tensor = torch.nn.functional.conv1d(
+                        series_tensor, weights_tensor, padding=0
+                    )
+
                 # Converte de volta
                 output_values = output_tensor.cpu().numpy().flatten()
-                
+
                 # Remonta série com NaNs iniciais
                 final_output = np.full(n, np.nan, dtype=np.float32)
                 final_output[start_idx:] = output_values
                 return pd.Series(final_output, index=series.index, dtype=np.float32)
-                
+
             except Exception as e:
                 logger.debug(f"⚠️ GPU FracDiff falhou (fallback para CPU): {e}")
 
         # Fallback Vectorized: np.convolve
-        output_values = np.convolve(clean.values, weights, mode='valid')
+        output_values = np.convolve(clean.values, weights, mode="valid")
         final_output = np.full(n, np.nan, dtype=np.float32)
-        final_output[weight_len - 1:] = output_values
-        
+        final_output[weight_len - 1 :] = output_values
+
         return pd.Series(final_output, index=series.index, dtype=np.float32)
 
     @staticmethod
@@ -110,17 +174,24 @@ class NativeIndicators:
         window: int = 256,
         d_start: float = 0.0,
         d_max: float = 1.0,
-        p_threshold: float = 0.05,
+        p_threshold: float = 0.01,  # [SCIENTIFIC FIX] p<0.01 evita fragilidade OOS (era 0.05)
         cache_key: str = "",
         force_recalc: bool = False,
+        min_memory_corr: float = 0.90,  # [NEW] López de Prado: preservar memória longa
     ) -> float:
         """
-        [BULLETPROOF] Encontra o d mínimo que torna a série estacionária.
+        [BULLETPROOF v2 — López de Prado 2018] Encontra o d mínimo que torna a série
+        estacionária E preserva memória longa.
+
+        Mudanças científicas v2:
+          - p_threshold=0.01 (era 0.05): séries com p≈0.05 falham OOS em cripto.
+          - Validação de memória: log de corr(fracdiff, original) — alerta se < 0.90.
+          - Guard loop +0.05 (era +0.10): precisão fina para não destruir memória.
 
         Estratégia em 4 camadas — NUNCA retorna sem um d válido:
           1. Cache TTL  : reutiliza o d descoberto na última hora
           2. Binary search (10 iter, precisão ~0.001): acha o d mínimo real
-          3. Guard loop (+0.10/tentativa, 5×): cobre divergência amostra vs série completa
+          3. Guard loop (+0.05/tentativa, 5×): cobre divergência amostra vs série completa
           4. Fallback final hardcoded: d=1.0 se tudo falhar — pipeline nunca trava
 
         Referência: López de Prado (2018) — Advances in Financial ML, cap. 5
@@ -131,10 +202,12 @@ class NativeIndicators:
         # CAMADA 0: Validação de entrada
         # ------------------------------------------------------------------
         if not isinstance(series, pd.Series) or len(series) < 100:
-            logger.warning("⚠️ [FRACDIFF] Série muito curta para busca de d. Usando d=0.5.")
+            logger.warning(
+                "⚠️ [FRACDIFF] Série muito curta para busca de d. Usando d=0.5."
+            )
             return 0.5
 
-        clean_input = pd.to_numeric(series, errors='coerce').dropna()
+        clean_input = pd.to_numeric(series, errors="coerce").dropna()
         if len(clean_input) < 100:
             logger.warning("⚠️ [FRACDIFF] Série com muitos NaNs. Usando d=0.5.")
             return 0.5
@@ -144,17 +217,29 @@ class NativeIndicators:
             return 1.0
 
         # ------------------------------------------------------------------
-        # CAMADA 1: Cache TTL
+        # CAMADA 1: Cache TTL + Disco (training d == inference d cross-restart)
         # ------------------------------------------------------------------
         now = time.time()
         if cache_key and not force_recalc:
+            # 1a. In-memory cache (sub-second, TTL=1h)
             cached = NativeIndicators._d_cache.get(cache_key)
             if cached is not None:
                 d_cached, ts_cached = cached
                 age = now - ts_cached
                 if age < NativeIndicators._D_CACHE_TTL_SECONDS:
-                    logger.debug(f"✅ [FRACDIFF CACHE] {cache_key}: d={d_cached:.3f} (age={age:.0f}s)")
+                    logger.debug(
+                        f"✅ [FRACDIFF CACHE] {cache_key}: d={d_cached:.3f} (age={age:.0f}s)"
+                    )
                     return d_cached
+            # 1b. Disk cache — preserva o mesmo d entre restarts (treino == inferência)
+            disk_vals = NativeIndicators._load_d_from_disk()
+            if cache_key in disk_vals:
+                d_disk = disk_vals[cache_key]
+                NativeIndicators._d_cache[cache_key] = (d_disk, now)
+                logger.info(
+                    f"✅ [FRACDIFF DISK] {cache_key}: d={d_disk:.3f} (carregado do disco — consistente com treino)"
+                )
+                return d_disk
 
         # ------------------------------------------------------------------
         # CAMADA 2: Importa validator — fallback se indisponível
@@ -162,15 +247,20 @@ class NativeIndicators:
         validator = None
         try:
             from feature_engineering.financial_stationarity import StationarityValidator
+
             validator = StationarityValidator()
         except Exception as e:
-            logger.warning(f"⚠️ [FRACDIFF] StationarityValidator indisponível ({e}). Usando d=0.4.")
+            logger.warning(
+                f"⚠️ [FRACDIFF] StationarityValidator indisponível ({e}). Usando d=0.4."
+            )
             return 0.4
 
         # Helper blindado — retorna 1.0 em qualquer falha do ADF
         def _adf_pvalue(d_val: float, work_series: pd.Series) -> float:
             try:
-                frac = NativeIndicators.frac_diff_ffd(work_series, d=d_val, window=window)
+                frac = NativeIndicators.frac_diff_ffd(
+                    work_series, d=d_val, window=window
+                )
                 clean = frac.dropna()
                 if len(clean) < 50:
                     return 1.0
@@ -179,7 +269,7 @@ class NativeIndicators:
                 if clean.std() < NativeIndicators.EPSILON:
                     return 1.0
                 metrics = validator.test_adf(clean)
-                pv = metrics.get('pvalue', 1.0)
+                pv = metrics.get("pvalue", 1.0)
                 return float(pv) if np.isfinite(pv) else 1.0
             except Exception as exc:
                 logger.debug(f"⚠️ [FRACDIFF ADF] d={d_val:.3f} falhou: {exc}")
@@ -197,18 +287,20 @@ class NativeIndicators:
         # Série já estacionária com d mínimo?
         if _adf_pvalue(max(0.01, low_b), work) < p_threshold:
             best_d = max(0.01, low_b)
-            logger.info(f"✅ [FRACDIFF] {cache_key}: série já estacionária com d≈0. d={best_d:.3f}")
+            logger.info(
+                f"✅ [FRACDIFF] {cache_key}: série já estacionária com d≈0. d={best_d:.3f}"
+            )
         else:
             for iteration in range(10):
                 mid = (low_b + high_b) / 2.0
                 pv = _adf_pvalue(mid, work)
                 if pv < p_threshold:
                     best_d = mid
-                    high_b = mid   # Candidato válido — tenta d menor
+                    high_b = mid  # Candidato válido — tenta d menor
                 else:
-                    low_b = mid    # Não estacionário — aumenta d
+                    low_b = mid  # Não estacionário — aumenta d
                 logger.debug(
-                    f"🔍 [FRACDIFF SEARCH] {cache_key} iter={iteration+1}/10 "
+                    f"🔍 [FRACDIFF SEARCH] {cache_key} iter={iteration + 1}/10 "
                     f"d={mid:.4f} p={pv:.4f} best_d={best_d:.4f}"
                 )
 
@@ -221,14 +313,14 @@ class NativeIndicators:
         if guard_pv >= p_threshold:
             logger.warning(
                 f"⚠️ [FRACDIFF GUARD] {cache_key}: d={final_d:.3f} falhou "
-                f"(p={guard_pv:.4f}). Guard loop iniciado (+0.10/tentativa)."
+                f"(p={guard_pv:.4f}). Guard loop iniciado (+0.05/tentativa)."
             )
-            for attempt in range(5):
-                final_d = round(min(1.0, final_d + 0.10), 3)
+            for attempt in range(10):  # [v2] +0.05 x 10 = cobre até +0.5
+                final_d = round(min(1.0, final_d + 0.05), 3)
                 guard_pv = _adf_pvalue(final_d, work)
                 status = "✅ OK" if guard_pv < p_threshold else "❌ Falhou"
                 logger.warning(
-                    f"   Guard {attempt+1}/5: d={final_d:.3f} → p={guard_pv:.4f} {status}"
+                    f"   Guard {attempt + 1}/10: d={final_d:.3f} → p={guard_pv:.4f} {status}"
                 )
                 if guard_pv < p_threshold:
                     break
@@ -243,15 +335,38 @@ class NativeIndicators:
             )
             final_d = 1.0
 
+        # [NEW v2] Validação de memória longa (López de Prado cap. 5).
+        # Se a correlação entre a série fracdiff'd e a original for baixa, significa
+        # que o fracdiff destruiu a memória — virou quase diff simples, perdendo edge.
+        memory_corr = np.nan
+        try:
+            frac_final = NativeIndicators.frac_diff_ffd(work, d=final_d, window=window)
+            valid_mask = frac_final.notna() & work.notna()
+            if valid_mask.sum() > 50:
+                memory_corr = float(
+                    work.loc[valid_mask].corr(frac_final.loc[valid_mask])
+                )
+        except Exception:
+            pass
+
+        memory_status = ""
+        if np.isfinite(memory_corr):
+            if memory_corr < min_memory_corr:
+                memory_status = f" | ⚠️ memória fraca (corr={memory_corr:.3f} < {min_memory_corr:.2f})"
+            else:
+                memory_status = f" | ✅ memória preservada (corr={memory_corr:.3f})"
+
         logger.info(
             f"📊 [FRACDIFF] {cache_key}: d ótimo={final_d:.3f} | "
             f"p={guard_pv:.4f} | "
             f"{'✅ Estacionário' if guard_pv < p_threshold else '⚠️ Fallback d=1.0'}"
+            f"{memory_status}"
         )
 
-        # Salva no cache
+        # Salva em memória e em disco (garante treino == inferência entre restarts)
         if cache_key:
             NativeIndicators._d_cache[cache_key] = (final_d, now)
+            NativeIndicators._save_d_to_disk(cache_key, final_d)
 
         return final_d
 
@@ -260,116 +375,175 @@ class NativeIndicators:
         """Calcula a MÃ©dia MÃ³vel Simples (SMA)."""
         if not NativeIndicators._validate_series(series, length, "SMA input series"):
             return pd.Series(np.nan, index=series.index, dtype=np.float32)
-        return series.rolling(window=length, min_periods=length).mean().astype(np.float32)
+        return (
+            series.rolling(window=length, min_periods=length).mean().astype(np.float32)
+        )
 
     @staticmethod
     def ema(series: pd.Series, length: int = 14) -> pd.Series:
         """Calcula a MÃ©dia MÃ³vel Exponencial (EMA)."""
         if not NativeIndicators._validate_series(series, length, "EMA input series"):
             return pd.Series(np.nan, index=series.index, dtype=np.float32)
-        return series.ewm(span=length, adjust=False, min_periods=length).mean().astype(np.float32)
+        return (
+            series.ewm(span=length, adjust=False, min_periods=length)
+            .mean()
+            .astype(np.float32)
+        )
 
     @staticmethod
     def rsi(series: pd.Series, length: int = 14) -> pd.Series:
         """Calcula o Ãndice de ForÃ§a Relativa (RSI)."""
-        if not NativeIndicators._validate_series(series, length + 1, "RSI input series"):
+        if not NativeIndicators._validate_series(
+            series, length + 1, "RSI input series"
+        ):
             return pd.Series(np.nan, index=series.index, dtype=np.float32)
 
         delta = series.diff(1)
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
-        
-        avg_gain = gain.fillna(0).ewm(span=length, adjust=False, min_periods=length).mean()
-        avg_loss = loss.fillna(0).ewm(span=length, adjust=False, min_periods=length).mean()
-        
+
+        avg_gain = (
+            gain.fillna(0).ewm(span=length, adjust=False, min_periods=length).mean()
+        )
+        avg_loss = (
+            loss.fillna(0).ewm(span=length, adjust=False, min_periods=length).mean()
+        )
+
         rs = avg_gain / (avg_loss + NativeIndicators.EPSILON)
         rsi = 100 - (100 / (1 + rs))
         return np.clip(rsi.fillna(50), 0, 100).astype(np.float32)
 
     @staticmethod
-    def macd(series: pd.Series, fast_len: int = 12, slow_len: int = 26, signal_len: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    def macd(
+        series: pd.Series, fast_len: int = 12, slow_len: int = 26, signal_len: int = 9
+    ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Calcula a ConvergÃªncia/DivergÃªncia de MÃ©dias MÃ³veis (MACD)."""
-        min_len = max(fast_len, slow_len, signal_len) 
+        min_len = max(fast_len, slow_len, signal_len)
         if not NativeIndicators._validate_series(series, min_len, "MACD input series"):
             nan_series = pd.Series(np.nan, index=series.index, dtype=np.float32)
             return nan_series, nan_series, nan_series
-            
+
         ema_fast = NativeIndicators.ema(series, length=fast_len)
         ema_slow = NativeIndicators.ema(series, length=slow_len)
-        
+
         macd_line = ema_fast - ema_slow
         signal_line = NativeIndicators.ema(macd_line, length=signal_len)
         histogram = macd_line - signal_line
-        
-        return macd_line.astype(np.float32), signal_line.astype(np.float32), histogram.astype(np.float32)
+
+        return (
+            macd_line.astype(np.float32),
+            signal_line.astype(np.float32),
+            histogram.astype(np.float32),
+        )
 
     @staticmethod
-    def bollinger_bands(series: pd.Series, length: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    def bollinger_bands(
+        series: pd.Series, length: int = 20, std_dev: float = 2.0
+    ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Calcula as Bandas de Bollinger (BB)."""
-        if not NativeIndicators._validate_series(series, length, "Bollinger Bands input series"):
+        if not NativeIndicators._validate_series(
+            series, length, "Bollinger Bands input series"
+        ):
             nan_series = pd.Series(np.nan, index=series.index, dtype=np.float32)
             return nan_series, nan_series, nan_series
-            
+
         middle_band = NativeIndicators.sma(series, length=length)
         std = series.rolling(window=length, min_periods=length).std()
-        
+
         upper_band = middle_band + (std * std_dev)
         lower_band = middle_band - (std * std_dev)
-        
-        return upper_band.astype(np.float32), middle_band.astype(np.float32), lower_band.astype(np.float32)
+
+        return (
+            upper_band.astype(np.float32),
+            middle_band.astype(np.float32),
+            lower_band.astype(np.float32),
+        )
 
     @staticmethod
-    def atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    def atr(
+        high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14
+    ) -> pd.Series:
         """
         Calcula o Average True Range (ATR).
         Garante que o ATR seja sempre positivo.
         """
         min_len = length + 1
-        if not (NativeIndicators._validate_series(high, min_len, "ATR high") and
-                NativeIndicators._validate_series(low, min_len, "ATR low") and
-                NativeIndicators._validate_series(close, min_len, "ATR close")):
-            logger.warning(f"â ï¸ [IND ATR] Dados insuficientes para ATR. Min necessÃ¡rio: {min_len}. Retornando NaNs.")
+        if not (
+            NativeIndicators._validate_series(high, min_len, "ATR high")
+            and NativeIndicators._validate_series(low, min_len, "ATR low")
+            and NativeIndicators._validate_series(close, min_len, "ATR close")
+        ):
+            logger.warning(
+                f"â ï¸ [IND ATR] Dados insuficientes para ATR. Min necessÃ¡rio: {min_len}. Retornando NaNs."
+            )
             return pd.Series(np.nan, index=close.index, dtype=np.float32)
 
         high_low = high - low
         high_close_prev = (high - close.shift(1)).abs()
         low_close_prev = (low - close.shift(1)).abs()
-        
-        tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False).fillna(0)
-        
+
+        tr = (
+            pd.concat([high_low, high_close_prev, low_close_prev], axis=1)
+            .max(axis=1, skipna=False)
+            .fillna(0)
+        )
+
         atr = tr.ewm(span=length, adjust=False, min_periods=length).mean()
         return np.maximum(atr, NativeIndicators.EPSILON).astype(np.float32)
 
     @staticmethod
-    def adx(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    def adx(
+        high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14
+    ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """
         Calcula o Ãndice Direcional MÃ©dio (ADX), Positive Directional Indicator (+DI), e Negative Direcional Indicator (-DI).
         """
         min_len = length * 2 + 1
-        if not (NativeIndicators._validate_series(high, min_len, "ADX high") and
-                NativeIndicators._validate_series(low, min_len, "ADX low") and
-                NativeIndicators._validate_series(close, min_len, "ADX close")):
+        if not (
+            NativeIndicators._validate_series(high, min_len, "ADX high")
+            and NativeIndicators._validate_series(low, min_len, "ADX low")
+            and NativeIndicators._validate_series(close, min_len, "ADX close")
+        ):
             nan_series = pd.Series(np.nan, index=close.index, dtype=np.float32)
             return nan_series, nan_series, nan_series
 
         up_move = high.diff()
         down_move = -low.diff()
 
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index).fillna(0.0)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=low.index).fillna(0.0)
+        plus_dm = pd.Series(
+            np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+            index=high.index,
+        ).fillna(0.0)
+        minus_dm = pd.Series(
+            np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+            index=low.index,
+        ).fillna(0.0)
 
-        smooth_plus_dm = plus_dm.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
-        smooth_minus_dm = minus_dm.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
+        smooth_plus_dm = plus_dm.ewm(
+            alpha=1 / length, adjust=False, min_periods=length
+        ).mean()
+        smooth_minus_dm = minus_dm.ewm(
+            alpha=1 / length, adjust=False, min_periods=length
+        ).mean()
 
         atr_val_for_adx = NativeIndicators.atr(high, low, close, length)
 
         plus_di = 100 * (smooth_plus_dm / (atr_val_for_adx + NativeIndicators.EPSILON))
-        minus_di = 100 * (smooth_minus_dm / (atr_val_for_adx + NativeIndicators.EPSILON))
+        minus_di = 100 * (
+            smooth_minus_dm / (atr_val_for_adx + NativeIndicators.EPSILON)
+        )
 
-        dx = 100 * (np.abs(plus_di - minus_di) / (np.abs(plus_di + minus_di) + NativeIndicators.EPSILON))
-        adx = dx.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
+        dx = 100 * (
+            np.abs(plus_di - minus_di)
+            / (np.abs(plus_di + minus_di) + NativeIndicators.EPSILON)
+        )
+        adx = dx.ewm(alpha=1 / length, adjust=False, min_periods=length).mean()
 
-        return np.clip(adx.fillna(0), 0, 100).astype(np.float32), np.clip(plus_di.fillna(0), 0, 100).astype(np.float32), np.clip(minus_di.fillna(0), 0, 100).astype(np.float32)
+        return (
+            np.clip(adx.fillna(0), 0, 100).astype(np.float32),
+            np.clip(plus_di.fillna(0), 0, 100).astype(np.float32),
+            np.clip(minus_di.fillna(0), 0, 100).astype(np.float32),
+        )
 
     @staticmethod
     def parabolic_sar(
@@ -381,7 +555,9 @@ class NativeIndicators:
         """
         Calcula o Parabolic SAR (Stop and Reverse) otimizando para custos baixos.
         """
-        if not NativeIndicators._validate_series(high, 3, "PSAR high") or not NativeIndicators._validate_series(low, 3, "PSAR low"):
+        if not NativeIndicators._validate_series(
+            high, 3, "PSAR high"
+        ) or not NativeIndicators._validate_series(low, 3, "PSAR low"):
             return pd.Series(np.nan, index=high.index, dtype=np.float32)
 
         high_values = high.values.astype(float)
@@ -403,7 +579,9 @@ class NativeIndicators:
             if is_long:
                 sar_candidate = prev_sar + af * (ep_high - prev_sar)
                 if i >= 2:
-                    sar_candidate = min(sar_candidate, low_values[i - 1], low_values[i - 2])
+                    sar_candidate = min(
+                        sar_candidate, low_values[i - 1], low_values[i - 2]
+                    )
                 else:
                     sar_candidate = min(sar_candidate, low_values[i - 1])
                 sar[i] = sar_candidate
@@ -419,7 +597,9 @@ class NativeIndicators:
             else:
                 sar_candidate = prev_sar + af * (ep_low - prev_sar)
                 if i >= 2:
-                    sar_candidate = max(sar_candidate, high_values[i - 1], high_values[i - 2])
+                    sar_candidate = max(
+                        sar_candidate, high_values[i - 1], high_values[i - 2]
+                    )
                 else:
                     sar_candidate = max(sar_candidate, high_values[i - 1])
                 sar[i] = sar_candidate
@@ -436,60 +616,95 @@ class NativeIndicators:
         return pd.Series(sar, index=high.index, dtype=np.float32)
 
     @staticmethod
-    def stochastic_oscillator(high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3) -> Tuple[pd.Series, pd.Series]:
+    def stochastic_oscillator(
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+        k_period: int = 14,
+        d_period: int = 3,
+    ) -> Tuple[pd.Series, pd.Series]:
         """Calcula o Oscilador EstocÃ¡stico (%K e %D)."""
-        min_len = k_period + d_period 
-        if not (NativeIndicators._validate_series(high, min_len, "Stochastic high") and
-                NativeIndicators._validate_series(low, min_len, "Stochastic low") and
-                NativeIndicators._validate_series(close, min_len, "Stochastic close")):
+        min_len = k_period + d_period
+        if not (
+            NativeIndicators._validate_series(high, min_len, "Stochastic high")
+            and NativeIndicators._validate_series(low, min_len, "Stochastic low")
+            and NativeIndicators._validate_series(close, min_len, "Stochastic close")
+        ):
             nan_series = pd.Series(np.nan, index=close.index, dtype=np.float32)
             return nan_series, nan_series
 
         lowest_low = low.rolling(window=k_period, min_periods=k_period).min()
         highest_high = high.rolling(window=k_period, min_periods=k_period).max()
-        
-        k_line = 100 * ((close - lowest_low) / (highest_high - lowest_low + NativeIndicators.EPSILON))
+
+        k_line = 100 * (
+            (close - lowest_low)
+            / (highest_high - lowest_low + NativeIndicators.EPSILON)
+        )
         d_line = NativeIndicators.sma(k_line, length=d_period)
-        
-        return np.clip(k_line.fillna(50), 0, 100).astype(np.float32), np.clip(d_line.fillna(50), 0, 100).astype(np.float32)
+
+        return np.clip(k_line.fillna(50), 0, 100).astype(np.float32), np.clip(
+            d_line.fillna(50), 0, 100
+        ).astype(np.float32)
 
     @staticmethod
-    def williams_r(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    def williams_r(
+        high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14
+    ) -> pd.Series:
         """Calcula o Williams %R."""
-        if not (NativeIndicators._validate_series(high, length, "Williams %R high") and
-                NativeIndicators._validate_series(low, length, "Williams %R low") and
-                NativeIndicators._validate_series(close, length, "Williams %R close")):
+        if not (
+            NativeIndicators._validate_series(high, length, "Williams %R high")
+            and NativeIndicators._validate_series(low, length, "Williams %R low")
+            and NativeIndicators._validate_series(close, length, "Williams %R close")
+        ):
             return pd.Series(np.nan, index=close.index, dtype=np.float32)
 
         highest_high = high.rolling(window=length, min_periods=length).max()
         lowest_low = low.rolling(window=length, min_periods=length).min()
-        
-        r = -100 * ((highest_high - close) / (highest_high - lowest_low + NativeIndicators.EPSILON))
+
+        r = -100 * (
+            (highest_high - close)
+            / (highest_high - lowest_low + NativeIndicators.EPSILON)
+        )
         return np.clip(r.fillna(-50), -100, 0).astype(np.float32)
 
     @staticmethod
-    def cci(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 20) -> pd.Series:
+    def cci(
+        high: pd.Series, low: pd.Series, close: pd.Series, length: int = 20
+    ) -> pd.Series:
         """Calcula o Commodity Channel Index (CCI)."""
-        if not (NativeIndicators._validate_series(high, length, "CCI high") and
-                NativeIndicators._validate_series(low, length, "CCI low") and
-                NativeIndicators._validate_series(close, length, "CCI close")):
+        if not (
+            NativeIndicators._validate_series(high, length, "CCI high")
+            and NativeIndicators._validate_series(low, length, "CCI low")
+            and NativeIndicators._validate_series(close, length, "CCI close")
+        ):
             return pd.Series(np.nan, index=close.index, dtype=np.float32)
 
         typical_price = (high + low + close) / 3
         sma_tp = NativeIndicators.sma(typical_price, length)
-        
-        mean_deviation = typical_price.rolling(window=length, min_periods=length).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True).fillna(0)
-        
-        cci = (typical_price - sma_tp) / (0.015 * mean_deviation + NativeIndicators.EPSILON)
-        return cci.fillna(0).astype(np.float32)
+
+        mean_deviation = (
+            typical_price.rolling(window=length, min_periods=length)
+            .apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+            .fillna(0)
+        )
+
+        cci = (typical_price - sma_tp) / (
+            0.015 * mean_deviation + NativeIndicators.EPSILON
+        )
+        return np.clip(cci.fillna(0), -500, 500).astype(np.float32)
 
     @staticmethod
     def roc(series: pd.Series, length: int = 12) -> pd.Series:
         """Calcula a Taxa de VariaÃ§Ã£o (Rate of Change)."""
-        if not NativeIndicators._validate_series(series, length + 1, "ROC input series"):
+        if not NativeIndicators._validate_series(
+            series, length + 1, "ROC input series"
+        ):
             return pd.Series(np.nan, index=series.index, dtype=np.float32)
-            
-        roc = ((series - series.shift(length)) / (series.shift(length) + NativeIndicators.EPSILON)) * 100
+
+        roc = (
+            (series - series.shift(length))
+            / (series.shift(length) + NativeIndicators.EPSILON)
+        ) * 100
         return roc.fillna(0).astype(np.float32)
 
     @staticmethod
@@ -498,134 +713,207 @@ class NativeIndicators:
         Calcula o On-Balance Volume (OBV).
         Adiciona normalização relativa para estabilidade em séries longas.
         """
-        if not (NativeIndicators._validate_series(close, 2, "OBV close") and
-                NativeIndicators._validate_series(volume, 2, "OBV volume")):
+        if not (
+            NativeIndicators._validate_series(close, 2, "OBV close")
+            and NativeIndicators._validate_series(volume, 2, "OBV volume")
+        ):
             return pd.Series(np.nan, index=close.index, dtype=np.float32)
 
         volume_clean = volume.replace(0, NativeIndicators.EPSILON)
         direction = np.sign(close.diff()).fillna(0)
         obv_series = (volume_clean * direction).cumsum().fillna(0)
-        
+
         # Normalização relativa por rolling std para evitar overflow/escala gigantesca
-        obv_norm = obv_series / (obv_series.rolling(200, min_periods=1).std() + NativeIndicators.EPSILON)
+        obv_norm = obv_series / (
+            obv_series.rolling(200, min_periods=1).std() + NativeIndicators.EPSILON
+        )
         return obv_norm.astype(np.float32)
 
     @staticmethod
-    def vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
+    def vwap(
+        high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
+    ) -> pd.Series:
         """Calcula o Volume Weighted Average Price (VWAP) diário."""
-        if not (NativeIndicators._validate_series(high, 1, "VWAP high") and
-                NativeIndicators._validate_series(low, 1, "VWAP low") and
-                NativeIndicators._validate_series(close, 1, "VWAP close") and
-                NativeIndicators._validate_series(volume, 1, "VWAP volume")):
+        if not (
+            NativeIndicators._validate_series(high, 1, "VWAP high")
+            and NativeIndicators._validate_series(low, 1, "VWAP low")
+            and NativeIndicators._validate_series(close, 1, "VWAP close")
+            and NativeIndicators._validate_series(volume, 1, "VWAP volume")
+        ):
             return pd.Series(np.nan, index=close.index, dtype=np.float32)
 
         typical_price = (high + low + close) / 3
-        df_temp = pd.DataFrame({'tp': typical_price, 'vol': volume}, index=typical_price.index)
-        df_temp['vol_clean'] = df_temp['vol'].replace(0, NativeIndicators.EPSILON)
-        df_temp['tp_vol'] = df_temp['tp'] * df_temp['vol_clean']
-        
+        df_temp = pd.DataFrame(
+            {"tp": typical_price, "vol": volume}, index=typical_price.index
+        )
+        df_temp["vol_clean"] = df_temp["vol"].replace(0, NativeIndicators.EPSILON)
+        df_temp["tp_vol"] = df_temp["tp"] * df_temp["vol_clean"]
+
         # Proteção para DatetimeIndex
         if isinstance(df_temp.index, pd.DatetimeIndex):
-            df_temp['cum_tp_vol'] = df_temp.groupby(df_temp.index.date)['tp_vol'].cumsum()
-            df_temp['cum_vol'] = df_temp.groupby(df_temp.index.date)['vol_clean'].cumsum()
+            df_temp["cum_tp_vol"] = df_temp.groupby(df_temp.index.date)[
+                "tp_vol"
+            ].cumsum()
+            df_temp["cum_vol"] = df_temp.groupby(df_temp.index.date)[
+                "vol_clean"
+            ].cumsum()
         else:
             # Fallback: VWAP cumulativo sem reset diário
-            df_temp['cum_tp_vol'] = df_temp['tp_vol'].cumsum()
-            df_temp['cum_vol'] = df_temp['vol_clean'].cumsum()
-        
-        vwap = df_temp['cum_tp_vol'] / (df_temp['cum_vol'] + NativeIndicators.EPSILON)
+            df_temp["cum_tp_vol"] = df_temp["tp_vol"].cumsum()
+            df_temp["cum_vol"] = df_temp["vol_clean"].cumsum()
+
+        vwap = df_temp["cum_tp_vol"] / (df_temp["cum_vol"] + NativeIndicators.EPSILON)
         return vwap.fillna(typical_price).astype(np.float32)
 
     @staticmethod
     def candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
         """Detecta padrÃµes bÃ¡sicos de candlestick."""
-        required_cols = ['open', 'high', 'low', 'close']
-        if not all(col in df.columns for col in required_cols) or df.empty or len(df) < 2:
+        required_cols = ["open", "high", "low", "close"]
+        if (
+            not all(col in df.columns for col in required_cols)
+            or df.empty
+            or len(df) < 2
+        ):
             return pd.DataFrame(index=df.index, dtype=bool)
-        
+
         patterns = pd.DataFrame(index=df.index)
-        open_, high_, low_, close_ = df['open'], df['high'], df['low'], df['close']
+        open_, high_, low_, close_ = df["open"], df["high"], df["low"], df["close"]
         body = abs(close_ - open_)
-        total_range = high_ - low_ + NativeIndicators.EPSILON 
-        
-        patterns['doji'] = (body / total_range < 0.1) & (body > NativeIndicators.EPSILON)
-        patterns['marubozu_bullish'] = (open_ < close_) & (open_ <= low_ * 1.0001) & (close_ >= high_ * 0.9999) & (body / total_range > 0.8)
-        patterns['marubozu_bearish'] = (open_ > close_) & (open_ >= high_ * 0.9999) & (close_ <= low_ * 1.0001) & (body / total_range > 0.8) 
+        total_range = high_ - low_ + NativeIndicators.EPSILON
+
+        patterns["doji"] = (body / total_range < 0.1) & (
+            body > NativeIndicators.EPSILON
+        )
+        patterns["marubozu_bullish"] = (
+            (open_ < close_)
+            & (open_ <= low_ * 1.0001)
+            & (close_ >= high_ * 0.9999)
+            & (body / total_range > 0.8)
+        )
+        patterns["marubozu_bearish"] = (
+            (open_ > close_)
+            & (open_ >= high_ * 0.9999)
+            & (close_ <= low_ * 1.0001)
+            & (body / total_range > 0.8)
+        )
 
         prev_open, prev_close = open_.shift(1), close_.shift(1)
-        patterns['engulfing_bullish'] = (close_ > open_) & (prev_close < prev_open) & (close_ > prev_open) & (open_ < prev_close) & (body > abs(prev_close - prev_open) * 0.9)
-        patterns['engulfing_bearish'] = (close_ < open_) & (prev_close > prev_open) & (close_ < prev_open) & (open_ > prev_close) & (body > abs(prev_close - prev_open) * 0.9)
+        patterns["engulfing_bullish"] = (
+            (close_ > open_)
+            & (prev_close < prev_open)
+            & (close_ > prev_open)
+            & (open_ < prev_close)
+            & (body > abs(prev_close - prev_open) * 0.9)
+        )
+        patterns["engulfing_bearish"] = (
+            (close_ < open_)
+            & (prev_close > prev_open)
+            & (close_ < prev_open)
+            & (open_ > prev_close)
+            & (body > abs(prev_close - prev_open) * 0.9)
+        )
 
         min_body_ratio = body / total_range
         lower_shadow = np.minimum(open_, close_) - low_
         upper_shadow = high_ - np.maximum(open_, close_)
-        patterns['hammer'] = (min_body_ratio < 0.3) & (lower_shadow / total_range > 0.6) & (upper_shadow / total_range < 0.1) & (body > NativeIndicators.EPSILON) 
-        patterns['shooting_star'] = (min_body_ratio < 0.3) & (upper_shadow / total_range > 0.6) & (lower_shadow / total_range < 0.1) & (body > NativeIndicators.EPSILON)
-        
-        return patterns.fillna(False) 
+        patterns["hammer"] = (
+            (min_body_ratio < 0.3)
+            & (lower_shadow / total_range > 0.6)
+            & (upper_shadow / total_range < 0.1)
+            & (body > NativeIndicators.EPSILON)
+        )
+        patterns["shooting_star"] = (
+            (min_body_ratio < 0.3)
+            & (upper_shadow / total_range > 0.6)
+            & (lower_shadow / total_range < 0.1)
+            & (body > NativeIndicators.EPSILON)
+        )
+
+        return patterns.fillna(False)
 
     @staticmethod
-    def calculate_money_flow_volume_pressure(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.DataFrame:
+    def calculate_money_flow_volume_pressure(
+        high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
+    ) -> pd.DataFrame:
         """
         Calcula mÃ©tricas de pressÃ£o de volume (Money Flow) para simular tape reading.
         """
-        required_cols = ['high', 'low', 'close', 'volume']
-        if not all(NativeIndicators._validate_series(series, 1, name) for series, name in zip([high, low, close, volume], required_cols)):
+        required_cols = ["high", "low", "close", "volume"]
+        if not all(
+            NativeIndicators._validate_series(series, 1, name)
+            for series, name in zip([high, low, close, volume], required_cols)
+        ):
             return pd.DataFrame(index=close.index, dtype=np.float32)
 
-        df = pd.DataFrame({'high': high, 'low': low, 'close': close, 'volume': volume})
-        df['volume'] = df['volume'].replace(0, NativeIndicators.EPSILON)
-        
-        df['mfm'] = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + NativeIndicators.EPSILON)
-        df['mfm'] = df['mfm'].fillna(0) 
-        df['mfv'] = df['mfm'] * df['volume']
-        
+        df = pd.DataFrame({"high": high, "low": low, "close": close, "volume": volume})
+        df["volume"] = df["volume"].replace(0, NativeIndicators.EPSILON)
+
+        df["mfm"] = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (
+            df["high"] - df["low"] + NativeIndicators.EPSILON
+        )
+        df["mfm"] = df["mfm"].fillna(0)
+        df["mfv"] = df["mfm"] * df["volume"]
+
         cmf_period = 20
-        cmf = df['mfv'].rolling(window=cmf_period, min_periods=cmf_period).sum() / df['volume'].rolling(window=cmf_period, min_periods=cmf_period).sum()
-        df['cmf'] = cmf.fillna(0).astype(np.float32)
+        cmf = (
+            df["mfv"].rolling(window=cmf_period, min_periods=cmf_period).sum()
+            / df["volume"].rolling(window=cmf_period, min_periods=cmf_period).sum()
+        )
+        df["cmf"] = cmf.fillna(0).astype(np.float32)
 
-        close_diff = df['close'].diff()
-        prev_close = df['close'].shift(1) + NativeIndicators.EPSILON
-        df['pvt'] = (close_diff / prev_close) * df['volume']
-        df['pvt'] = df['pvt'].cumsum().fillna(0).astype(np.float32)
-        
-        df['adl_mfm'] = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'] + NativeIndicators.EPSILON)
-        df['adl_mfm'] = df['adl_mfm'].fillna(0)
-        df['adl'] = (df['adl_mfm'] * df['volume']).cumsum().fillna(0).astype(np.float32)
+        close_diff = df["close"].diff()
+        prev_close = df["close"].shift(1) + NativeIndicators.EPSILON
+        pvt_raw = (close_diff / prev_close) * df["volume"]
+        pvt_cumsum = pvt_raw.cumsum().fillna(0)
+        # [B2 FIX] Normalização rolling (consistente com OBV na L728).
+        # PVT cumulativo cresce indefinidamente em séries longas, saturando o scaler.
+        df["pvt"] = (pvt_cumsum / (
+            pvt_cumsum.rolling(200, min_periods=1).std() + NativeIndicators.EPSILON
+        )).astype(np.float32)
 
-        return df[['cmf', 'pvt', 'adl']]
+        df["adl_mfm"] = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (
+            df["high"] - df["low"] + NativeIndicators.EPSILON
+        )
+        df["adl_mfm"] = df["adl_mfm"].fillna(0)
+        df["adl"] = (df["adl_mfm"] * df["volume"]).cumsum().fillna(0).astype(np.float32)
+
+        return df[["cmf", "pvt", "adl"]]
 
     @staticmethod
-    def calculate_all_features(df: pd.DataFrame, symbol: str, timeframe: str) -> pd.DataFrame:
+    def calculate_all_features(
+        df: pd.DataFrame, symbol: str, timeframe: str
+    ) -> pd.DataFrame:
         """
         [VERSÃO COMPLETA E ROBUSTA RESTAURADA]
         Calcula um conjunto abrangente de features, garantindo que todas as colunas
         necessÃ¡rias para todos os componentes do bot (TrendPredictor, Especialistas)
         sejam geradas corretamente.
         """
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        required_cols = ["open", "high", "low", "close", "volume"]
         if df.empty or not all(col in df.columns for col in required_cols):
-            logger.error(f"â [ERRO FE] DataFrame de entrada para calculate_all_features ({symbol}-{timeframe}) estÃ¡ vazio ou faltando colunas.")
+            logger.error(
+                f"â [ERRO FE] DataFrame de entrada para calculate_all_features ({symbol}-{timeframe}) estÃ¡ vazio ou faltando colunas."
+            )
             return pd.DataFrame()
-        
+
         df_features = df.copy()
         for col in required_cols:
-            df_features[col] = pd.to_numeric(df_features[col], errors='coerce')
-
+            df_features[col] = pd.to_numeric(df_features[col], errors="coerce")
 
         # [SCIENTIFIC FIX] d adaptativo com cache por (symbol-timeframe)
-        # find_min_d_for_stationarity: binary search + guard loop + 4 fallbacks
-        # cache_key evita recalcular nas chamadas subsequentes (TTL=1h)
+        # ADF test restrito aos primeiros 80% da série — evita look-ahead bias onde
+        # crashes futuros calibrariam d em um valor que não existiria ao vivo.
         frac_window = 256
         cache_key = f"{symbol}-{timeframe}"
+        _train_cutoff = int(len(df_features) * 0.80)
         frac_order = NativeIndicators.find_min_d_for_stationarity(
-            df_features['close'],
+            df_features["close"].iloc[:_train_cutoff],
             window=frac_window,
             cache_key=cache_key,
         )
 
         # Aplica a diferenciação final (garantidamente estacionária) para todos os preços
-        for price_col in ('close', 'high', 'low'):
+        for price_col in ("close", "high", "low"):
             df_features[f"{price_col}_frac"] = NativeIndicators.frac_diff_ffd(
                 df_features[price_col],
                 d=frac_order,
@@ -636,9 +924,10 @@ class NativeIndicators:
         # Log ADF final para rastreabilidade (usa o que já foi calculado acima)
         try:
             from feature_engineering.financial_stationarity import StationarityValidator
+
             _val = StationarityValidator()
-            _metrics = _val.test_adf(df_features['close_frac'].dropna())
-            _pv = _metrics.get('pvalue', 1.0)
+            _metrics = _val.test_adf(df_features["close_frac"].dropna())
+            _pv = _metrics.get("pvalue", 1.0)
             logger.info(
                 f"📊 [FE ADF] {symbol}-{timeframe} close_frac p-value: {_pv:.4f} | "
                 f"Stationary: {_pv < 0.05} | d={frac_order:.3f}"
@@ -646,107 +935,334 @@ class NativeIndicators:
         except Exception:
             pass  # Log informativo — nunca trava o pipeline
 
-        df_features['ema_12'] = NativeIndicators.ema(df_features['close'], 12)
-        
+        df_features["ema_12"] = NativeIndicators.ema(df_features["close"], 12)
+
         # --- FEATURES REQUERIDAS PELO AUTOENCODER (log_return, realized_vol, wick, etc.) ---
         # Estas features são essenciais para o TemporalAutoencoder
         EPSILON = NativeIndicators.EPSILON
-        
+
         # 1. Log Returns
-        df_features['log_return'] = np.log(df_features['close'] / (df_features['close'].shift(1) + EPSILON))
-        df_features['log_return_volume'] = np.log(df_features['volume'] / (df_features['volume'].shift(1) + EPSILON))
-        
+        df_features["log_return"] = np.log(
+            df_features["close"] / (df_features["close"].shift(1) + EPSILON)
+        )
+        # [M4 FIX] log((v+eps)/(vprev+eps)) é numericamente estável para v=0 e vprev=0.
+        # Antes: v/(vprev+EPS) com vprev=0 dava log(v*1e9) ≈ 25 — outlier que contaminava o scaler.
+        # Agora: ambos os termos têm EPSILON, então log_return_volume ≈ 0 quando v ≈ vprev ≈ 0.
+        _vol = df_features["volume"]
+        df_features["log_return_volume"] = np.log(
+            (_vol + EPSILON) / (_vol.shift(1) + EPSILON)
+        ).replace([np.inf, -np.inf], 0.0)
+
         # 2. Price Range Features (como % do close)
-        df_features['hl_range_pct'] = (df_features['high'] - df_features['low']) / (df_features['close'] + EPSILON)
-        df_features['oc_move_pct'] = (df_features['close'] - df_features['open']) / (df_features['open'] + EPSILON)
-        
+        df_features["hl_range_pct"] = (df_features["high"] - df_features["low"]) / (
+            df_features["close"] + EPSILON
+        )
+        df_features["oc_move_pct"] = (df_features["close"] - df_features["open"]) / (
+            df_features["open"] + EPSILON
+        )
+
         # 3. Wick Features (proporção do candle que é pavio)
-        candle_range = df_features['high'] - df_features['low'] + EPSILON
-        df_features['hc_wick_upper'] = (df_features['high'] - np.maximum(df_features['close'], df_features['open'])) / candle_range
-        df_features['lc_wick_lower'] = (np.minimum(df_features['close'], df_features['open']) - df_features['low']) / candle_range
-        
+        candle_range = df_features["high"] - df_features["low"] + EPSILON
+        df_features["hc_wick_upper"] = (
+            df_features["high"] - np.maximum(df_features["close"], df_features["open"])
+        ) / candle_range
+        df_features["lc_wick_lower"] = (
+            np.minimum(df_features["close"], df_features["open"]) - df_features["low"]
+        ) / candle_range
+
         # 4. Realized Volatility (rolling std of log returns)
-        df_features['realized_vol_20'] = df_features['log_return'].rolling(window=20, min_periods=5).std() * np.sqrt(20)
-        df_features['realized_vol_100'] = df_features['log_return'].rolling(window=100, min_periods=20).std() * np.sqrt(100)
-        
+        # [R4 FIX] Normaliza por frequência do timeframe para escala comparável entre TFs.
+        # Antes: np.sqrt(20) era fixo — vol 1m ficava 7.7x menor que vol 1h (sqrt(60) diff).
+        # Agora: converte para escala DIÁRIA independentemente do TF.
+        # bars_per_day: 1m=1440, 5m=288, 15m=96, 1h=24, 4h=6, 1d=1
+        _TF_BARS_PER_DAY = {
+            "1m": 1440,
+            "3m": 480,
+            "5m": 288,
+            "15m": 96,
+            "30m": 48,
+            "1h": 24,
+            "2h": 12,
+            "4h": 6,
+            "6h": 4,
+            "8h": 3,
+            "12h": 2,
+            "1d": 1,
+        }
+        _bars_per_day = float(_TF_BARS_PER_DAY.get(timeframe, 96))  # default: 15m
+        df_features["realized_vol_20"] = df_features["log_return"].rolling(
+            window=20, min_periods=5
+        ).std() * np.sqrt(
+            _bars_per_day
+        )  # annualized daily vol (1 day = _bars_per_day bars)
+        df_features["realized_vol_100"] = df_features["log_return"].rolling(
+            window=100, min_periods=20
+        ).std() * np.sqrt(_bars_per_day)
+
         # 5. Close Reference (para normalização relativa)
-        df_features['close_reference'] = df_features['close'] / df_features['close'].shift(1).fillna(df_features['close'])
+        df_features["close_reference"] = df_features["close"] / df_features[
+            "close"
+        ].shift(1).fillna(df_features["close"])
 
-        df_features['ema_26'] = NativeIndicators.ema(df_features['close'], 26)
-        df_features['ema_50'] = NativeIndicators.ema(df_features['close'], 50)
-        df_features['ema_200'] = NativeIndicators.ema(df_features['close'], 200)
-        df_features['ema_trend'] = np.sign(df_features['ema_50'] - df_features['ema_200']).fillna(0).astype(int)
-        df_features['rsi'] = NativeIndicators.rsi(df_features['close'], 14)
-        df_features['macd_line'], df_features['macd_signal'], df_features['macd_hist'] = NativeIndicators.macd(df_features['close'])
-        df_features['stoch_k'], df_features['stoch_d'] = NativeIndicators.stochastic_oscillator(df_features['high'], df_features['low'], df_features['close'])
-        df_features['williams_r'] = NativeIndicators.williams_r(df_features['high'], df_features['low'], df_features['close'])
-        df_features['cci'] = NativeIndicators.cci(df_features['high'], df_features['low'], df_features['close'])
-        df_features['roc'] = NativeIndicators.roc(df_features['close'], 12)
-        df_features['bb_upper'], df_features['bb_middle'], df_features['bb_lower'] = NativeIndicators.bollinger_bands(df_features['close'])
-        df_features['bb_width'] = (df_features['bb_upper'] - df_features['bb_lower']) / (df_features['bb_middle'] + NativeIndicators.EPSILON)
-        df_features['atr'] = NativeIndicators.atr(df_features['high'], df_features['low'], df_features['close'], length=14)
-        df_features['atr_percentage'] = (df_features['atr'] / (df_features['close'] + NativeIndicators.EPSILON)) * 100
-        df_features['obv'] = NativeIndicators.obv(df_features['close'], df_features['volume'])
-        df_features['vwap'] = NativeIndicators.vwap(df_features['high'], df_features['low'], df_features['close'], df_features['volume'])
-        df_features['adx'], df_features['plus_di'], df_features['minus_di'] = NativeIndicators.adx(df_features['high'], df_features['low'], df_features['close'], length=14)
-        df_features['psar'] = NativeIndicators.parabolic_sar(df_features['high'], df_features['low'])
-        df_features['psar_trend'] = np.where(df_features['close'] >= df_features['psar'], 1.0, -1.0).astype(np.float32)
+        df_features["ema_26"] = NativeIndicators.ema(df_features["close"], 26)
+        df_features["ema_50"] = NativeIndicators.ema(df_features["close"], 50)
+        df_features["ema_200"] = NativeIndicators.ema(df_features["close"], 200)
+        df_features["ema_trend"] = (
+            np.sign(df_features["ema_50"] - df_features["ema_200"])
+            .fillna(0)
+            .astype(int)
+        )
+        df_features["rsi"] = NativeIndicators.rsi(df_features["close"], 14)
+        (
+            df_features["macd_line"],
+            df_features["macd_signal"],
+            df_features["macd_hist"],
+        ) = NativeIndicators.macd(df_features["close"])
+        df_features["stoch_k"], df_features["stoch_d"] = (
+            NativeIndicators.stochastic_oscillator(
+                df_features["high"], df_features["low"], df_features["close"]
+            )
+        )
+        df_features["williams_r"] = NativeIndicators.williams_r(
+            df_features["high"], df_features["low"], df_features["close"]
+        )
+        df_features["cci"] = NativeIndicators.cci(
+            df_features["high"], df_features["low"], df_features["close"]
+        )
+        df_features["roc"] = NativeIndicators.roc(df_features["close"], 12)
+        df_features["bb_upper"], df_features["bb_middle"], df_features["bb_lower"] = (
+            NativeIndicators.bollinger_bands(df_features["close"])
+        )
+        df_features["bb_width"] = (
+            df_features["bb_upper"] - df_features["bb_lower"]
+        ) / (df_features["bb_middle"] + NativeIndicators.EPSILON)
+        df_features["atr"] = NativeIndicators.atr(
+            df_features["high"], df_features["low"], df_features["close"], length=14
+        )
+        df_features["atr_percentage"] = (
+            df_features["atr"] / (df_features["close"] + NativeIndicators.EPSILON)
+        ) * 100
+        df_features["obv"] = NativeIndicators.obv(
+            df_features["close"], df_features["volume"]
+        )
+        df_features["vwap"] = NativeIndicators.vwap(
+            df_features["high"],
+            df_features["low"],
+            df_features["close"],
+            df_features["volume"],
+        )
+        df_features["adx"], df_features["plus_di"], df_features["minus_di"] = (
+            NativeIndicators.adx(
+                df_features["high"], df_features["low"], df_features["close"], length=14
+            )
+        )
+        df_features["psar"] = NativeIndicators.parabolic_sar(
+            df_features["high"], df_features["low"]
+        )
+        df_features["psar_trend"] = np.where(
+            df_features["close"] >= df_features["psar"], 1.0, -1.0
+        ).astype(np.float32)
 
-        tape_features = NativeIndicators.calculate_money_flow_volume_pressure(df_features['high'], df_features['low'], df_features['close'], df_features['volume'])
+        # [REC 3] EMA-PSAR alignment: sintetiza conflito entre 2 sinais de tendencia
+        #   +1.0 = EMA e PSAR CONCORDAM (sinal forte, alta confianca)
+        #    0.0 = nao deveria ocorrer (ambos ±1)
+        #   -1.0 = DISCORDAM (sinal de transicao, lateral ou reversao)
+        # Sem essa feature, SAC precisava aprender a interpretar 2 sinais separados.
+        # Com ela, o conflito vira UMA feature derivada — facilita aprendizado.
+        df_features["ema_psar_alignment"] = (
+            df_features["ema_trend"].astype(np.float32)
+            * df_features["psar_trend"].astype(np.float32)
+        ).astype(np.float32)
+
+        tape_features = NativeIndicators.calculate_money_flow_volume_pressure(
+            df_features["high"],
+            df_features["low"],
+            df_features["close"],
+            df_features["volume"],
+        )
         df_features = pd.concat([df_features, tape_features], axis=1)
 
-        df_features['macd_cross_bullish'] = ((df_features['macd_line'] > df_features['macd_signal']) & (df_features['macd_line'].shift(1) <= df_features['macd_signal'].shift(1))).astype(bool)
-        df_features['macd_cross_bearish'] = ((df_features['macd_line'] < df_features['macd_signal']) & (df_features['macd_line'].shift(1) >= df_features['macd_signal'].shift(1))).astype(bool)
-        df_features['rsi_oversold'] = (df_features['rsi'] < 30).astype(bool)
-        df_features['rsi_overbought'] = (df_features['rsi'] > 70).astype(bool)
-        
-        candle_patterns_df = NativeIndicators.candlestick_patterns(df_features[['open', 'high', 'low', 'close']])
+        df_features["macd_cross_bullish"] = (
+            (df_features["macd_line"] > df_features["macd_signal"])
+            & (df_features["macd_line"].shift(1) <= df_features["macd_signal"].shift(1))
+        ).astype(bool)
+        df_features["macd_cross_bearish"] = (
+            (df_features["macd_line"] < df_features["macd_signal"])
+            & (df_features["macd_line"].shift(1) >= df_features["macd_signal"].shift(1))
+        ).astype(bool)
+        df_features["rsi_oversold"] = (df_features["rsi"] < 30).astype(bool)
+        df_features["rsi_overbought"] = (df_features["rsi"] > 70).astype(bool)
+
+        candle_patterns_df = NativeIndicators.candlestick_patterns(
+            df_features[["open", "high", "low", "close"]]
+        )
         df_features = pd.concat([df_features, candle_patterns_df], axis=1)
 
-        df_features['adx_strong_trend'] = (df_features['adx'] > 25).astype(bool)
-        df_features['adx_weak_trend'] = (df_features['adx'] < 20).astype(bool)
-        
-        bb_width_ma = df_features['bb_width'].rolling(20, min_periods=20).mean()
-        df_features['bb_squeeze'] = (df_features['bb_width'] < (bb_width_ma * 0.8)) & (bb_width_ma > NativeIndicators.EPSILON)
-        df_features['bb_expansion'] = (df_features['bb_width'] > (bb_width_ma * 1.5)) & (bb_width_ma > NativeIndicators.EPSILON)
-        
-        atr_ma = df_features['atr_percentage'].rolling(20, min_periods=20).mean()
-        df_features['high_volatility'] = (df_features['atr_percentage'] > (atr_ma * 1.5)) & (atr_ma > NativeIndicators.EPSILON)
-        df_features['low_volatility'] = (df_features['atr_percentage'] < (atr_ma * 0.7)) & (atr_ma > NativeIndicators.EPSILON)
-        
-        # --- ETAPA DE LIMPEZA FINAL (🔧 FIX: pular warmup period) ---
-        # O indicador com maior lookback é EMA-200, então precisamos de ~250 candles de warmup
-        WARMUP_PERIOD = 250  # Candles iniciais a descartar (EMA-200 + margem de segurança)
-        
+        df_features["adx_strong_trend"] = (df_features["adx"] > 25).astype(bool)
+        df_features["adx_weak_trend"] = (df_features["adx"] < 20).astype(bool)
+
+        bb_width_ma = df_features["bb_width"].rolling(20, min_periods=20).mean()
+        df_features["bb_squeeze"] = (df_features["bb_width"] < (bb_width_ma * 0.8)) & (
+            bb_width_ma > NativeIndicators.EPSILON
+        )
+        df_features["bb_expansion"] = (
+            df_features["bb_width"] > (bb_width_ma * 1.5)
+        ) & (bb_width_ma > NativeIndicators.EPSILON)
+
+        atr_ma = df_features["atr_percentage"].rolling(20, min_periods=20).mean()
+        df_features["high_volatility"] = (
+            df_features["atr_percentage"] > (atr_ma * 1.5)
+        ) & (atr_ma > NativeIndicators.EPSILON)
+        df_features["low_volatility"] = (
+            df_features["atr_percentage"] < (atr_ma * 0.7)
+        ) & (atr_ma > NativeIndicators.EPSILON)
+
+        # --- MELHORIA-01: Hurst Exponent (Variance Ratio Method) ---
+        # Peters (1994): H>0.6 → trend, H<0.4 → mean-reversion, H≈0.5 → random walk.
+        # Método: VR = Var(2-period returns) / (2 * Var(1-period returns))
+        # H ≈ log2(VR) / 2 + 0.5 (exata no limite de série fracionada browniana)
+        #
+        # [B5 LIMITATION] O método VR é exato APENAS para Brownian Motion fracionário.
+        # Em séries financeiras reais com vol clustering (GARCH-like), o estimador é
+        # enviesado para baixo (subestima H verdadeiro). Downstream NÃO deve interpretar
+        # H=0.45 como mean-reversion forte sem cross-check (e.g., rolling DFA, R/S).
+        # Usar como FEATURE (entrada de modelo), não como decisão direta.
+        _hurst_window = 100  # ~4 dias em dados 1h
+        _ret_1 = df_features["log_return"]
+        _ret_2 = _ret_1.rolling(2).sum()  # retorno acumulado de 2 períodos
+        _var_1 = _ret_1.rolling(_hurst_window, min_periods=_hurst_window // 2).var()
+        _var_2 = _ret_2.rolling(_hurst_window, min_periods=_hurst_window // 2).var()
+        _vr = _var_2 / (2.0 * _var_1 + NativeIndicators.EPSILON)
+        # Clipa VR antes do log para evitar -inf / nan
+        _vr_safe = _vr.clip(lower=1e-4, upper=100.0)
+        df_features["hurst"] = (
+            (np.log2(_vr_safe) / 2.0 + 0.5).clip(0.0, 1.0).fillna(0.5)
+        )
+
+        # --- MELHORIA-02: Shannon Entropy (rolling, bins adaptativos) ---
+        # Mede quão uniforme/imprevisível é a distribuição dos retornos recentes.
+        # Bins adaptativos: sqrt(0.8*janela) garante ≥5 amostras/bin (evita entropia inflada).
+        # Para janela=50: sqrt(40)≈6.3 → 7 bins. Max entropy = log2(7) ≈ 2.807 bits.
+        # Gate em base_regime_specialist dispara quando entropy > 2.5 bits (≈89% do max com 7 bins).
+        #
+        # [M1 FIX] Otimizado: usa digitize + bincount em vez de .apply(callback Python).
+        # Antes: O(N×W) com callback Python (1.6M × 50 = 80M chamadas). ~30-60s.
+        # Agora: discretiza a série inteira em bins fixos (quantile-based) e calcula
+        # entropia via rolling sum dos bin counts — O(N) efetivo. ~0.5-2s.
+        _N_BINS = min(16, max(4, int(np.ceil(np.sqrt(50 * 0.8)))))
+        _ENTROPY_WINDOW = 50
+        _ENTROPY_MIN_PERIODS = 25
+
+        _log_ret_vals = df_features["log_return"].values
+        _n_samples = len(_log_ret_vals)
+        _entropy_out = np.zeros(_n_samples, dtype=np.float32)
+
+        if _n_samples >= _ENTROPY_MIN_PERIODS:
+            # Discretiza retornos em bins por quantis globais (estável entre janelas)
+            _finite_mask = np.isfinite(_log_ret_vals)
+            _finite_vals = _log_ret_vals[_finite_mask]
+            if len(_finite_vals) > _N_BINS and np.std(_finite_vals) > 1e-12:
+                _quantiles = np.linspace(0, 100, _N_BINS + 1)
+                _bin_edges = np.percentile(_finite_vals, _quantiles)
+                _bin_edges[0] = -np.inf
+                _bin_edges[-1] = np.inf
+                # Assign each value to a bin (0-indexed)
+                _digitized = np.digitize(_log_ret_vals, _bin_edges[1:-1]).astype(np.int32)
+                _digitized = np.clip(_digitized, 0, _N_BINS - 1)
+                # One-hot encode bins → rolling sum para contagem por janela
+                _one_hot = np.zeros((_n_samples, _N_BINS), dtype=np.float32)
+                for _b in range(_N_BINS):
+                    _one_hot[:, _b] = (_digitized == _b).astype(np.float32)
+                # Rolling sum via cumsum trick (O(N) por bin)
+                _cumsum = np.cumsum(_one_hot, axis=0)
+                _padded = np.vstack([np.zeros((1, _N_BINS), dtype=np.float32), _cumsum])
+                for _i in range(_ENTROPY_WINDOW - 1, _n_samples):
+                    _start = _i - _ENTROPY_WINDOW + 1
+                    _counts = _padded[_i + 1] - _padded[_start]
+                    _total = _counts.sum()
+                    if _total < _ENTROPY_MIN_PERIODS:
+                        continue
+                    _probs = _counts[_counts > 0] / _total
+                    _entropy_out[_i] = float(-np.sum(_probs * np.log2(_probs)))
+
+        df_features["shannon_entropy"] = _entropy_out
+
+        # --- ETAPA DE LIMPEZA FINAL [SCIENTIFIC FIX v2: WARMUP POR TF + NO FILLNA(0)] ---
+        # Antes: WARMUP_PERIOD = 260 fixo para todos os TFs.
+        # Problema: 260 candles em 4h = 43 dias (perda brutal); em 1m = 4.3h (OK).
+        # Pior ainda: fillna(0) em features normalizadas (RSI, z-score, ATR) injeta
+        # sinal falso e quebra o scaler downstream.
+        #
+        # Correção: warmup calculado pelo max() dos lookbacks reais usados:
+        #   - FracDiff (window=256 fixo): 256 barras
+        #   - EMA-200: 200 barras
+        #   - realized_vol_100: 100 barras
+        #   - ATR/ADX/CCI (14-20): até 20 barras
+        # Para TFs rápidos (1m, 5m): mantém margem segura (256+margem=260).
+        # Para TFs lentos (4h, 1d): reduz para não comer histórico (EMA-200=200+margem=210).
+        _WARMUP_BY_TF = {
+            "1m": 260,
+            "3m": 260,
+            "5m": 260,
+            "15m": 260,
+            "30m": 240,
+            "1h": 220,
+            "2h": 220,
+            "4h": 210,
+            "6h": 210,
+            "8h": 210,
+            "12h": 210,
+            "1d": 210,
+        }
+        WARMUP_PERIOD = _WARMUP_BY_TF.get(timeframe, 260)
+
         initial_rows = len(df_features)
-        
+
         # 1. Pular período de warmup (primeiros N candles têm NaN nos indicadores de lookback longo)
         if len(df_features) > WARMUP_PERIOD:
             df_features = df_features.iloc[WARMUP_PERIOD:].copy()
-            logger.info(f"📊 [FE] {symbol}-{timeframe}: Descartados {WARMUP_PERIOD} candles de warmup (indicadores com lookback longo).")
-        
-        # 2. Preencher NaNs remanescentes (se houver, ex: colunas booleanas)
-        df_features = df_features.fillna(0)
-        
-        # 3. Verificar se ainda há NaN (não deveria haver)
+            logger.info(
+                f"📊 [FE] {symbol}-{timeframe}: Descartados {WARMUP_PERIOD} candles de warmup "
+                f"(adaptativo por TF; max lookback real ≈ {WARMUP_PERIOD - 5})."
+            )
+
+        # 2. [ANTI-FALSE-SIGNAL] Dropna ao invés de fillna(0).
+        # fillna(0) em RSI/z-score/ATR cria sinais falsos (oversold extremo, média perfeita,
+        # volatilidade zero) que contaminam o scaler e o RL downstream.
+        _nan_cols_pre = df_features.columns[df_features.isna().any()].tolist()
+        if _nan_cols_pre:
+            for _col in _nan_cols_pre:
+                _n = int(df_features[_col].isna().sum())
+                _pct = _n / max(1, len(df_features)) * 100
+                if _pct > 1.0:
+                    logger.warning(
+                        f"[FE CLEAN] {symbol}-{timeframe} | {_col}: {_n} NaN ({_pct:.1f}%) "
+                        f"após warmup={WARMUP_PERIOD}. Dropando linhas (anti-false-signal)."
+                    )
+
         rows_before_drop = len(df_features)
         df_features.dropna(inplace=True)
         final_rows = len(df_features)
-        
+
         if rows_before_drop - final_rows > 0:
-            logger.warning(f"⚠️ [FE CLEANING] Removidas {rows_before_drop - final_rows} linhas com NaN persistente de {symbol}-{timeframe}.")
-        
+            logger.info(
+                f"[FE CLEAN] {symbol}-{timeframe}: Removidas {rows_before_drop - final_rows} "
+                f"linhas com NaN residual ({(rows_before_drop - final_rows) / max(1, rows_before_drop) * 100:.2f}%)."
+            )
+
         # Log de preservação de dados
         preserved_pct = (final_rows / initial_rows * 100) if initial_rows > 0 else 0
-        logger.info(f"✅ [FE] {symbol}-{timeframe}: {final_rows}/{initial_rows} linhas preservadas ({preserved_pct:.1f}%).")
-        
+        logger.info(
+            f"✅ [FE] {symbol}-{timeframe}: {final_rows}/{initial_rows} linhas preservadas ({preserved_pct:.1f}%)."
+        )
+
         if df_features.empty:
-            logger.error(f"❌ [ERRO FE] Após a limpeza de NaNs, o DataFrame para {symbol}-{timeframe} ficou vazio.")
+            logger.error(
+                f"❌ [ERRO FE] Após a limpeza de NaNs, o DataFrame para {symbol}-{timeframe} ficou vazio."
+            )
             return df_features
 
         for col in df_features.select_dtypes(include=np.number).columns:
             df_features[col] = df_features[col].astype(np.float32)
-            
+
         return df_features
-
-

@@ -49,6 +49,8 @@ class BearSpecialist(BaseRegimeSpecialist):
             "position_bias": "short_only",     # Apenas Short
         })
         
+        # [FIX PRODUÇÃO] Marca direção exclusiva para filtro no decide_action
+        self._specialist_direction = 'short_only'
         logger.info("🐻 Bear Specialist configurado para operações Short only")
 
     def get_action(self, state: np.ndarray, context: Dict[str, Any] = None) -> Dict[str, Any]:

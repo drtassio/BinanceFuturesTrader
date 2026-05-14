@@ -5,14 +5,13 @@
 """
 Pacote dos Agentes Especialistas (Specialist Agents).
 
-Na arquitetura de Aprendizado por Reforço Hierárquico (HRL), os especialistas
-são modelos de RL de nível inferior, cada um treinado para se destacar em um
-regime de mercado específico (ex: tendência, lateralização, alta volatilidade).
+Na arquitetura Mixture of Experts (MoE), os especialistas são modelos de RL
+de nível inferior, cada um treinado para se destacar em um regime de mercado
+específico (Bull, Bear, Ranger).
 
-Eles recebem um sinal de alto nível do `HRLMaster` e são responsáveis por
-refinar a decisão, determinando os pontos ótimos de entrada/saída, o tamanho
-preciso da posição e as táticas de gerenciamento de trade dentro de seu
-domínio de especialidade.
+Eles são orquestrados pela `SoftGatingNetwork` e pelo `MixtureOfExpertsRouter`,
+que determinam os pesos de cada especialista baseados nas latentes do
+Autoencoder para produzir a decisão final.
 
 Componentes:
 - TrendSpecialist: Otimizado para mercados em clara tendência de alta ou baixa.

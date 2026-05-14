@@ -134,47 +134,10 @@ def setup_ui_logging(log_deque: Deque[str], level: int = LOG_LEVEL_INFO):
 
 def setup_phase_logger(phase_name: str, logger_name: Optional[str] = None) -> str:
     """
-    Configura um arquivo de log dedicado para a fase indicada, com console em INFO e arquivo em DEBUG.
+    [DESATIVADO] Configura um arquivo de log dedicado para a fase indicada.
+    Funcionalidade desativada conforme pedido do usuário para reduzir I/O de logs.
     """
-    with _lock:
-        target_logger = logging.getLogger(logger_name) if logger_name else logging.getLogger()
-        target_logger.setLevel(LOG_LEVEL_DEBUG)
-
-        log_dir = os.path.join(os.getcwd(), 'logs', 'detailed_phases')
-        os.makedirs(log_dir, exist_ok=True)
-
-        existing_handler = _phase_file_handlers.pop(target_logger.name, None)
-        if existing_handler is not None:
-            target_logger.removeHandler(existing_handler)
-            try:
-                existing_handler.close()
-            except Exception:
-                pass
-
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        log_filename = os.path.join(log_dir, f'{phase_name}_{timestamp}.log')
-
-        file_handler = logging.FileHandler(log_filename, encoding='utf-8')
-        file_handler.setLevel(LOG_LEVEL_DEBUG)
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(file_formatter)
-        target_logger.addHandler(file_handler)
-        _phase_file_handlers[target_logger.name] = file_handler
-
-        if not any(isinstance(h, logging.StreamHandler) for h in target_logger.handlers):
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setLevel(LOG_LEVEL_INFO)
-            console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            console_handler.setFormatter(console_formatter)
-            target_logger.addHandler(console_handler)
-            _handlers.append(console_handler)
-
-        if file_handler not in _handlers:
-            _handlers.append(file_handler)
-
-        banner = f"--- Logging de Fase Ativado: Console limpo (INFO), detalhes em '{log_filename}' (DEBUG) ---"
-        print(banner)
-        return log_filename
+    return ""
 
 
 
