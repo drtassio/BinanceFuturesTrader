@@ -1056,16 +1056,32 @@ class TrendFollowingEnv(gym.Env):
         return core
 
     def _calculate_sharpe_reward(self) -> float:
-        # Unificar a fonte de dados com o snapshot financeiro: usar retornos do episÃ³dio atual
+        """
+        [SCIENTIFIC FIX R1] Mantido como alias para compatibilidade reversa,
+        mas a implementação agora computa Calmar (return/max_drawdown).
+        Calmar é INFLÁVEL — não é manipulável por "operar pouco" ou "evitar volatilidade":
+        para subir, é necessário PnL real maior que o pior drawdown realizado.
+        Sharpe puro era gameable (mean/std pode crescer com poucos trades de baixa vol).
+        """
+        return self._calculate_calmar_reward()
+
+    def _calculate_calmar_reward(self) -> float:
+        """
+        Calmar local: retorno cumulativo do episódio dividido pelo drawdown máximo.
+        - Operar pouco não infla (cum_return baixo).
+        - Evitar volatilidade não infla (drawdown só é referência se houver perda real).
+        - Ganhar muito sem grandes perdas SOBE Calmar de forma honesta.
+        """
         source_returns = self._current_episode_returns if self._current_episode_returns else self.trade_return_history
-        if len(source_returns) < 10:
+        if len(source_returns) < 5:
             return 0.0
-        recent_returns = np.array(source_returns[-20:])
-        std_rr = float(np.std(recent_returns))
-        if std_rr < 1e-9:
-            return 0.0
-        sharpe_ratio = float(np.mean(recent_returns) / (std_rr + 1e-12))
-        return float(np.tanh(sharpe_ratio) * self.config.REWARD_SHARPE_RATIO_WEIGHT)
+        cum_return = float(np.sum(source_returns))
+        max_dd = float(getattr(self, 'episode_max_drawdown', 0.0))
+        # Drawdown floor: se DD ≈ 0, evita explosão; se cum_return negativo, retorna negativo.
+        denom = max(max_dd, 0.005)  # piso de 0.5% para drawdown
+        calmar = cum_return / denom
+        # tanh bound + peso configurável (reutilizamos o mesmo weight do antigo Sharpe)
+        return float(np.tanh(calmar) * self.config.REWARD_SHARPE_RATIO_WEIGHT)
 
     def _init_dynamic_risk_controls(self) -> None:
         """Calcula valores de refer?ncia din?micos para car?ncia e SL a partir do dataset."""
@@ -3505,15 +3521,28 @@ class TrendSpecialist:
             profit_factor = metrics.get('profit_factor', 0)
             trade_sharpe = metrics.get('trade_sharpe', 0)
             max_drawdown = metrics.get('max_drawdown_pct', 100)
-            # exigÃªncia mÃ­nima de participaÃ§Ã£o
+            # [SCIENTIFIC FIX R2] Substituímos `trade_sharpe * 0.3` por base_score
+            # derivado de RETORNO ABSOLUTO ajustado a drawdown (proxy de Calmar).
+            # Razão: Sharpe puro pode ser inflado por:
+            #   - operar pouco (poucos trades, variância baixa → SR alto sem PnL real)
+            #   - evitar volatilidade (filtrar entradas até std mínimo)
+            # Lucro absoluto / max_dd não é gameable: para subir é preciso PnL real maior
+            # que o pior drawdown — exatamente o que queremos otimizar em produção.
+            cumulative_return_pct = float(metrics.get('cumulative_trade_return_pct', 0.0))
+            avg_return_pct = float(metrics.get('avg_return_pct', 0.0))
+            # Calmar local com piso de drawdown (0.5%) para evitar explosão
+            dd_for_calmar = max(float(max_drawdown) / 100.0, 0.005)
+            calmar_local = cumulative_return_pct / dd_for_calmar
+            # base_score = mistura 70% Calmar + 30% retorno absoluto (tanh-bounded)
+            base_score = 0.7 * float(np.tanh(calmar_local)) + 0.3 * float(np.tanh(cumulative_return_pct * 50.0))
+            # exigência mínima de participação
             trade_target_min, trade_target_max = 5, 60
             max_trades_cap = float(metrics.get('max_trades_cap', trade_target_max)) or trade_target_max
             if max_trades_cap > 0:
                 trade_target_max = min(trade_target_max, max_trades_cap)
                 trade_target_min = min(trade_target_min, trade_target_max)
-            # mÃ­nimo anti-scalping
+            # mínimo anti-scalping
             duration_target_min = 10
-            base_score = trade_sharpe * 0.3
             win_rate_bonus = (win_rate - 50) / 100 * 0.2
             profit_factor_capped = float(np.clip(profit_factor, 0.0, 4.0))
             pf_reliability = float(np.clip(metrics.get('pf_reliable', 1.0), 0.0, 1.0))
@@ -3522,7 +3551,10 @@ class TrendSpecialist:
             profit_factor_effective = profit_factor_capped * (0.5 + 0.5 * pf_reliability)
             pf_bonus = max(0.0, (profit_factor_effective - 1.0) * 0.4)
             dd_penalty = max(0.0, (max_drawdown - 12.0)) * 0.08
-            neg_sharpe_penalty = max(0.0, -trade_sharpe) * 0.6
+            # [R2] neg_sharpe_penalty substituída por neg_return_penalty (mesma lógica
+            # mas sobre o sinal de PnL absoluto, não sobre Sharpe gameable)
+            neg_return_penalty = max(0.0, -cumulative_return_pct * 50.0) * 0.6
+            neg_sharpe_penalty = neg_return_penalty  # alias para compat. com log/print abaixo
             # banda de trades
             trade_penalty = 0.0
             if trade_target_min <= num_trades <= trade_target_max:

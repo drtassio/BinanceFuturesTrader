@@ -30,6 +30,7 @@ PHASE_ORDER = [
     ("5", "scripts.validation.phase_5_specialists"),
     ("6", "scripts.validation.phase_6_scientific"),
     ("7", "scripts.validation.phase_7_e2e"),
+    ("8", "scripts.validation.phase_8_anti_gaming"),
 ]
 
 
