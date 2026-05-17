@@ -94,6 +94,11 @@ system_state: Dict[str, Any] = {
     "recent_trades": [],  # Lista para armazenar trades recentes para o ExecutionEngine
     "last_adaptation": None,  # Timestamp da última adaptação
     "adaptation_count": 0,  # Contador de adaptações realizadas
+    # [N-TRADE ADAPT] Contador de trades fechados desde a última adaptação.
+    # Disparador adicional ao gatilho temporal de 4h, configurado via
+    # BacktestConfig.MIN_TRADES_FOR_ADAPT (default 30).
+    "trades_since_last_adapt": 0,
+    "total_closed_trades": 0,
 }
 system_components: Dict[str, Any] = {}
 background_tasks: List[asyncio.Task] = []
@@ -103,7 +108,12 @@ training_trade_logs: List[Dict[str, Any]] = []
 # --- Funções de Logging e Persistência ---
 
 def save_trade_to_log(trade_data: Dict):
-    """Salva os detalhes de um trade em um arquivo CSV para auditoria e retreinamento."""
+    """Salva os detalhes de um trade em um arquivo CSV para auditoria e retreinamento.
+
+    [N-TRADE ADAPT] Também incrementa system_state['trades_since_last_adapt']
+    para um trade FECHADO (status FILLED/CLOSED). O loop principal lê esse
+    contador e dispara ai_controller.adapt() quando atinge MIN_TRADES_FOR_ADAPT.
+    """
     file_exists = os.path.isfile(TRADES_LOG_FILE)
     try:
         with open(TRADES_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -116,6 +126,13 @@ def save_trade_to_log(trade_data: Dict):
                 writer.writeheader()
             writer.writerow(trade_data)
         logger.info(f"💾 [AUDITORIA] Trade salvo: {trade_data.get('symbol')} {trade_data.get('action')}")
+
+        # [N-TRADE ADAPT] Conta apenas trades de fechamento. Status pode vir
+        # como 'FILLED', 'CLOSED', 'PARTIALLY_FILLED' — consideramos todos.
+        status = str(trade_data.get('status', '')).upper()
+        if status in ('FILLED', 'CLOSED', 'PARTIALLY_FILLED'):
+            system_state['trades_since_last_adapt'] = system_state.get('trades_since_last_adapt', 0) + 1
+            system_state['total_closed_trades'] = system_state.get('total_closed_trades', 0) + 1
     except Exception as e:
         logger.error(f"❌ [AUDITORIA] Falha ao salvar trade no log CSV: {e}", exc_info=True)
 
@@ -1113,36 +1130,54 @@ async def main_trading_loop():
                     'tape_pulse': system_state.get('tape_pulse', {})
                 })
             
-            # Verifica se é hora de adaptar (a cada 4 horas ou quando há drift detectado)
-            should_adapt = (
-                time_since_last_adaptation >= adaptation_interval_hours and 
-                len(adaptation_data_buffer) >= 100 and  # Mínimo de dados para adaptação
-                ai_controller.is_trained and
-                ai_controller.is_trained  # [ARCH] Drift gate removido - adaptacao nao bloqueia
+            # Verifica se é hora de adaptar — dois gatilhos independentes:
+            #   T1 (tempo)  : >= 4h desde a última adaptação E >= 100 pontos no buffer
+            #   T2 (trades) : >= MIN_TRADES_FOR_ADAPT trades fechados desde a última adaptação
+            # Ambos respeitam: IA treinada E buffer com pelo menos 50 pontos (sanidade).
+            from config.settings import BacktestConfig as _BTConfig
+            min_trades_for_adapt = int(getattr(_BTConfig, 'MIN_TRADES_FOR_ADAPT', 30))
+            trades_since = int(system_state.get('trades_since_last_adapt', 0))
+
+            trigger_time = (
+                time_since_last_adaptation >= adaptation_interval_hours
+                and len(adaptation_data_buffer) >= 100
             )
-            
+            trigger_trades = (
+                trades_since >= min_trades_for_adapt
+                and len(adaptation_data_buffer) >= 50  # piso mínimo p/ não retreinar com nada
+            )
+            should_adapt = (trigger_time or trigger_trades) and ai_controller.is_trained
+
             if should_adapt:
+                trigger_reason = (
+                    f"TRADES ({trades_since} >= {min_trades_for_adapt})"
+                    if trigger_trades and not trigger_time
+                    else f"TEMPO ({time_since_last_adaptation:.1f}h >= {adaptation_interval_hours}h)"
+                )
                 try:
-                    logger.info(f"🧠 [META-LEARNING] Iniciando ciclo de adaptação com {len(adaptation_data_buffer)} pontos de dados...")
-                    
+                    logger.info(f"🧠 [META-LEARNING] Iniciando ciclo de adaptação | gatilho={trigger_reason} | "
+                                f"buffer={len(adaptation_data_buffer)} pontos | trades_desde_último={trades_since}")
+
                     # Converte buffer para DataFrame
                     adaptation_df = pd.DataFrame(adaptation_data_buffer)
-                    
+
                     # Chama a função de adaptação do Meta-Learner
                     adaptation_success = await ai_controller.adapt(
                         recent_data=adaptation_df,
                         adaptation_strength=0.1,  # Adaptação suave
                         preserve_core_learning=True
                     )
-                    
+
                     if adaptation_success:
                         last_adaptation_time = current_time
                         adaptation_data_buffer = []  # Limpa o buffer após adaptação bem-sucedida
+                        system_state['trades_since_last_adapt'] = 0  # zera contador N-trades
                         logger.info("✅ [META-LEARNING] Adaptação concluída com sucesso!")
-                        
+
                         # Atualiza o estado do sistema
                         system_state["last_adaptation"] = current_time.isoformat()
                         system_state["adaptation_count"] = system_state.get("adaptation_count", 0) + 1
+                        system_state["last_adaptation_trigger"] = trigger_reason
                     else:
                         logger.warning("⚠️ [META-LEARNING] Adaptação falhou. Tentará novamente no próximo ciclo.")
                         

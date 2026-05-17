@@ -432,8 +432,21 @@ class BacktestConfig(Config):
     END_DATE = os.environ.get('BACKTEST_END_DATE', '2024-01-01')
     INITIAL_CAPITAL = float(os.environ.get('BACKTEST_INITIAL_CAPITAL', 100.0))
     # Usar as taxas reais do TradingConfig para o Backtest tambÃ©m
-    MAKER_FEE = TradingConfig.MAKER_FEE 
+    MAKER_FEE = TradingConfig.MAKER_FEE
     TAKER_FEE = TradingConfig.TAKER_FEE
+
+    # [BOOTSTRAP] Backtest pós-treino que gera os primeiros trades para o
+    # buffer de adaptação. Roda imediatamente após os especialistas treinarem.
+    BOOTSTRAP_ENABLED = os.environ.get('BOOTSTRAP_BACKTEST_ENABLED', 'true').lower() == 'true'
+    BOOTSTRAP_BACKTEST_DAYS = int(os.environ.get('BOOTSTRAP_BACKTEST_DAYS', 90))
+    BOOTSTRAP_OUTPUT_PATH = os.environ.get(
+        'BOOTSTRAP_OUTPUT_PATH', 'logs/bootstrap_trades.json'
+    )
+
+    # [N-TRADE ADAPT] Em produção, dispara adaptação a cada N trades fechados
+    # (alongside o trigger temporal de 4h). 30 é um bom ponto: amostra
+    # suficiente para sinal estatístico sem retreinar excessivamente.
+    MIN_TRADES_FOR_ADAPT = int(os.environ.get('MIN_TRADES_FOR_ADAPT', 30))
     SLIPPAGE_MODEL = os.environ.get('BACKTEST_SLIPPAGE_MODEL', 'volume_based')
     SLIPPAGE_CONSTANT = float(os.environ.get('BACKTEST_SLIPPAGE_CONSTANT', 0.0005))
     SLIPPAGE_IMPACT_FACTOR = float(os.environ.get('BACKTEST_SLIPPAGE_IMPACT_FACTOR', 5e-7))

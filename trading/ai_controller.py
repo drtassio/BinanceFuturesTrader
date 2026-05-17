@@ -979,6 +979,13 @@ class AIController:
             self.load_all_models() # Recarrega tudo para garantir um estado consistente
             if self.is_trained:
                 logger.info(" Treinamento granular concludo com sucesso. Todos os componentes esto prontos.")
+                # [BOOTSTRAP BACKTEST] Roda um backtest com dados recentes
+                # imediatamente após o treino para gerar os primeiros trades
+                # que alimentam o buffer de adaptação em produção.
+                try:
+                    await self._run_bootstrap_backtest()
+                except Exception as bt_exc:
+                    logger.warning(f"[BOOTSTRAP] Falha não-fatal no backtest pós-treino: {bt_exc}")
                 return True
             else:
                 logger.error(" Treinamento granular finalizado, mas a IA ainda no est em estado 'treinado'. Verifique os logs.")
@@ -987,6 +994,103 @@ class AIController:
         except Exception as e:
             logger.error(f" Erro catastrfico durante o treinamento granular: {e}", exc_info=True)
             return False
+
+    async def _run_bootstrap_backtest(self) -> int:
+        """
+        [POST-TRAINING BOOTSTRAP]
+        Roda um backtest curto com dados recentes imediatamente após o treino
+        dos especialistas. Os trades gerados são salvos em
+        BacktestConfig.BOOTSTRAP_OUTPUT_PATH e usados pelo run_bot.py para:
+          1) inicializar o buffer de adaptação (não começa "frio")
+          2) servir de evidência empírica de que o pipeline opera end-to-end
+             nos dados ATUAIS (não nos do dataset histórico de 3 anos)
+
+        Retorna o número de trades gerados (0 se desabilitado ou se falhar).
+        """
+        from config.settings import BacktestConfig
+        if not getattr(BacktestConfig, 'BOOTSTRAP_ENABLED', True):
+            logger.info("[BOOTSTRAP] Desabilitado via BOOTSTRAP_BACKTEST_ENABLED=false. Pulando.")
+            return 0
+        if not self.data_provider or not self.feature_pipeline:
+            logger.warning("[BOOTSTRAP] DataProvider/FeaturePipeline ausentes. Pulando bootstrap.")
+            return 0
+
+        try:
+            from trading.backtester import Backtester
+            from trading.portfolio import PortfolioOptimizer
+            from trading.risk_manager import RiskManager
+
+            days = int(getattr(BacktestConfig, 'BOOTSTRAP_BACKTEST_DAYS', 90))
+            end_date = datetime.now(timezone.utc)
+            start_date = end_date - timedelta(days=days)
+            logger.info(f"[BOOTSTRAP] Iniciando backtest pós-treino dos últimos {days} dias "
+                        f"({start_date.date()} a {end_date.date()})...")
+
+            historical_data = await self.data_provider.get_data_for_training(
+                symbol=self.config_trading.PRIMARY_PAIR,
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d'),
+            )
+            if not historical_data:
+                logger.warning("[BOOTSTRAP] Sem dados históricos para o período. Pulando.")
+                return 0
+
+            featured_df = await self.feature_pipeline.create_features(
+                historical_data,
+                self.config_trading.PRIMARY_PAIR,
+                self.config_trading.PRIMARY_TIMEFRAME_TRADING,
+                fit_scaler=False,
+                apply_latent=True,
+            )
+            if featured_df is None or featured_df.empty:
+                logger.warning("[BOOTSTRAP] create_features retornou vazio. Pulando.")
+                return 0
+
+            # Portfolio e RiskManager temporários (capital sintético, não afeta produção)
+            temp_portfolio = PortfolioOptimizer(self.config_trading)
+            temp_risk_manager = RiskManager(self.config_trading)
+            backtester = Backtester(BacktestConfig, db_session=None)
+
+            result = await backtester.run(
+                historical_data_multi_tf={self.config_trading.PRIMARY_TIMEFRAME_TRADING: featured_df},
+                ai_controller=self,
+                portfolio=temp_portfolio,
+                risk_manager=temp_risk_manager,
+                symbol=self.config_trading.PRIMARY_PAIR,
+                timeframe=self.config_trading.PRIMARY_TIMEFRAME_TRADING,
+                model_version='bootstrap',
+                explainer=None,
+                explain_decisions=False,
+            )
+            if result is None:
+                logger.warning("[BOOTSTRAP] Backtester retornou None. Pulando.")
+                return 0
+
+            # Extrai trade_log (BacktestResult.trade_log é JSON string)
+            try:
+                trade_log = json.loads(result.trade_log) if isinstance(result.trade_log, str) else (result.trade_log or [])
+            except Exception:
+                trade_log = []
+
+            n_trades = len(trade_log)
+            out_path = getattr(BacktestConfig, 'BOOTSTRAP_OUTPUT_PATH', 'logs/bootstrap_trades.json')
+            os.makedirs(os.path.dirname(out_path) or '.', exist_ok=True)
+            with open(out_path, 'w') as f:
+                json.dump({
+                    'generated_at': datetime.now(timezone.utc).isoformat(),
+                    'period_days': days,
+                    'symbol': self.config_trading.PRIMARY_PAIR,
+                    'timeframe': self.config_trading.PRIMARY_TIMEFRAME_TRADING,
+                    'n_trades': n_trades,
+                    'trades': trade_log,
+                }, f, indent=2, default=str)
+            logger.info(f"[BOOTSTRAP] ✅ Backtest pós-treino gerou {n_trades} trades "
+                        f"em {days} dias. Salvo em '{out_path}'.")
+            return n_trades
+
+        except Exception as e:
+            logger.error(f"[BOOTSTRAP] Erro durante backtest pós-treino: {e}", exc_info=True)
+            return 0
 
     def _save_metadata(self):
         """Salva o dicionrio de metadados atual no arquivo JSON."""
