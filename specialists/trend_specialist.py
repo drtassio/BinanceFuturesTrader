@@ -31,10 +31,7 @@ import json
 import shutil
 from collections import Counter
 import gc
-import torch
 import torch.cuda
-import pandas as pd
-import numpy as np
 import time
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
@@ -705,6 +702,16 @@ class TrendFollowingEnv(gym.Env):
         self._episode_reward_accumulator = 0.0
         self._active_grace_period = 0
         self._last_prior_dir_val = 0.0
+        # [SCIENTIFIC FIX] Reset das estatísticas de normalização do reward.
+        # Antes elas acumulavam ENTRE episódios, fazendo o reward inicial de cada
+        # episódio ter escala diferente do final do anterior — confunde o crítico SAC.
+        self._reward_running_mean = 0.0
+        self._reward_running_var = 1.0
+        self._reward_count = 0
+        # [SCIENTIFIC FIX] Zera PnL realizado persistente para impedir vazamento
+        # entre episódios via reward_shaping ou _last_pnl_realized.
+        if hasattr(self, '_last_pnl_realized'):
+            self._last_pnl_realized = 0.0
         # Para episódios curtos, reinicia em um ponto aleatório do dataset
         # Isso permite que o agente veja diferentes períodos de tempo
         if self.max_steps < len(self.df) - 1:

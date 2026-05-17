@@ -172,12 +172,45 @@ class ProfitabilityPredictor(nn.Module):
             return 100 # Retorna o objetivo total de épocas
 
         logger.info(f"💪 [PROFITABILITY] Iniciando/Continuando treinamento por {num_epochs} épocas...")
-        
-        # ... (lógica de preparação de dados) ...
-        if X is None: return 0
+
+        # [BUG FIX] Implementação real do train_model — antes era stub com X e val_loss
+        # indefinidos (linhas 177, 207, 208 originais), que crashava em qualquer chamada.
+        prep = self._prepare_training_data(featured_df, trade_log)
+        if prep is None or prep[0] is None:
+            logger.warning("⚠️ [PROFITABILITY] Sem dados de treinamento válidos. Pulando.")
+            return 0
+        X, ctx, y_prob, y_pnl, y_hold = prep
+        if len(X) < 32:
+            logger.warning(f"⚠️ [PROFITABILITY] Apenas {len(X)} amostras — insuficiente para treino. Pulando.")
+            return 0
+
+        # Split cronológico 80/20 (sem shuffle — séries temporais).
+        split_idx = int(len(X) * 0.80)
+        X_train, X_val = X[:split_idx], X[split_idx:]
+        ctx_train, ctx_val = ctx[:split_idx], ctx[split_idx:]
+        yp_train, yp_val = y_prob[:split_idx], y_prob[split_idx:]
+        ypnl_train, ypnl_val = y_pnl[:split_idx], y_pnl[split_idx:]
+        yh_train, yh_val = y_hold[:split_idx], y_hold[split_idx:]
+
+        from torch.utils.data import TensorDataset, DataLoader
+        train_ds = TensorDataset(
+            torch.from_numpy(X_train).float(), torch.from_numpy(ctx_train).float(),
+            torch.from_numpy(yp_train).float().unsqueeze(1),
+            torch.from_numpy(ypnl_train).float().unsqueeze(1),
+            torch.from_numpy(yh_train).float().unsqueeze(1),
+        )
+        val_ds = TensorDataset(
+            torch.from_numpy(X_val).float(), torch.from_numpy(ctx_val).float(),
+            torch.from_numpy(yp_val).float().unsqueeze(1),
+            torch.from_numpy(ypnl_val).float().unsqueeze(1),
+            torch.from_numpy(yh_val).float().unsqueeze(1),
+        )
+        batch_size = min(64, max(8, len(X_train) // 4))
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
 
         optimizer = optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4)
-        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5)
         checkpoint_path = os.path.join(self.model_dir, "profitability_predictor_checkpoint.pth")
 
         # <<< 2. CONTINUAR DE ONDE PAROU (CARREGAR CHECKPOINT) >>>
@@ -194,14 +227,37 @@ class ProfitabilityPredictor(nn.Module):
             except Exception as e:
                 logger.warning(f"⚠️ Não foi possível carregar checkpoint: {e}. Iniciando do zero.")
 
-        # ... (lógica de DataLoaders) ...
         patience_counter = 0
         final_epoch = start_epoch
-        
-        # <<< 3. LOOP DE TREINO MODIFICADO >>>
+        val_loss = float('inf')
+
+        # <<< 3. LOOP DE TREINO >>>
         for epoch in range(start_epoch, start_epoch + num_epochs):
             final_epoch = epoch
-            # ... (lógica do loop de treino e validação) ...
+
+            self.train()
+            for xb, cb, ypb, ypnlb, yhb in train_loader:
+                xb, cb = xb.to(self.device), cb.to(self.device)
+                ypb, ypnlb, yhb = ypb.to(self.device), ypnlb.to(self.device), yhb.to(self.device)
+                optimizer.zero_grad()
+                prob_logits, pnl_pred, hold_pred = self.forward(xb, cb)
+                loss = self._compute_loss(prob_logits, pnl_pred, hold_pred, ypb, ypnlb, yhb)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                optimizer.step()
+
+            self.eval()
+            val_losses = []
+            with torch.no_grad():
+                for xb, cb, ypb, ypnlb, yhb in val_loader:
+                    xb, cb = xb.to(self.device), cb.to(self.device)
+                    ypb, ypnlb, yhb = ypb.to(self.device), ypnlb.to(self.device), yhb.to(self.device)
+                    prob_logits, pnl_pred, hold_pred = self.forward(xb, cb)
+                    vl = self._compute_loss(prob_logits, pnl_pred, hold_pred, ypb, ypnlb, yhb)
+                    val_losses.append(float(vl.item()))
+            val_loss = float(np.mean(val_losses)) if val_losses else float('inf')
+            scheduler.step(val_loss)
+            logger.info(f"[PROFITABILITY] Época {epoch+1}: val_loss={val_loss:.5f}")
 
             # <<< 4. SALVAR CHECKPOINT COMPLETO >>>
             if val_loss < best_val_loss:

@@ -815,19 +815,20 @@ class TemporalAutoencoderPipeline:
     # CRITICAL VALIDATIONS: OOD and Permutation Tests
     # =========================================================================
     
-    def validate_ood_reconstruction(self, df: pd.DataFrame, ood_periods: List[Tuple[str, str, str]]) -> Dict[str, Any]:
+    def _legacy_validate_ood_reconstruction(self, df: pd.DataFrame, ood_periods: List[Tuple[str, str, str]]) -> Dict[str, Any]:
         """
+        [LEGACY — substituído pela versão array-based em validate_ood_reconstruction]
         Valida robustez em períodos out-of-distribution.
-        
+
         Args:
             df: DataFrame completo com dados históricos
             ood_periods: Lista de (start_date, end_date, label) para testar
                          Ex: [('2020-03-01', '2020-04-30', 'COVID_CRASH'),
                               ('2021-11-01', '2021-12-31', 'BULL_PEAK')]
-        
+
         Returns:
             Dict com erros por período
-            
+
         Referência: Goodfellow et al. (2016) - Deep Learning, Cap. 5.2
         """
         if not self.is_trained:
@@ -845,20 +846,20 @@ class TemporalAutoencoderPipeline:
             logger.error("❌ Dados normais insuficientes para baseline")
             return {'error': 'insufficient_data'}
         
-        baseline_error = self._compute_reconstruction_error(df[normal_mask])
+        baseline_error = self._legacy_compute_reconstruction_error_df(df[normal_mask])
         results['baseline'] = float(baseline_error)
         logger.info(f"📊 Baseline error (dados normais): {baseline_error:.4f}")
-        
+
         # Testa cada período OOD
         for start, end, label in ood_periods:
             try:
                 ood_data = df[df.index.to_series().between(start, end)]
-                
+
                 if len(ood_data) < self.hyperparams['seq_length']:
                     logger.warning(f"⚠️ Período {label} muito curto ({len(ood_data)} < {self.hyperparams['seq_length']}), pulando")
                     continue
-                
-                ood_error = self._compute_reconstruction_error(ood_data)
+
+                ood_error = self._legacy_compute_reconstruction_error_df(ood_data)
                 degradation = (ood_error - baseline_error) / (baseline_error + 1e-8)
                 
                 acceptable = degradation < 0.5  # < 50% aumento
@@ -900,20 +901,21 @@ class TemporalAutoencoderPipeline:
         
         return results
     
-    def permutation_test_reconstruction(self, df: pd.DataFrame, n_permutations: int = 50) -> Dict[str, Any]:
+    def _legacy_permutation_test_reconstruction(self, df: pd.DataFrame, n_permutations: int = 50) -> Dict[str, Any]:
         """
+        [LEGACY — substituído pela versão array-based em permutation_test_reconstruction]
         Testa se padrões aprendidos são genuínos via bootstrap temporal.
-        
+
         Método: Permuta blocos temporais e verifica se reconstrução degrada.
         Se modelo aprendeu padrões temporais reais, permutações devem piorar erro.
-        
+
         Args:
             df: DataFrame com features
             n_permutations: Número de permutações (50-100 recomendado)
-        
+
         Returns:
             Dict com p-value e interpretação
-            
+
         Referência: De Prado (2018) - Advances in Financial ML, Cap. 12
         """
         if not self.is_trained:
@@ -922,18 +924,18 @@ class TemporalAutoencoderPipeline:
         logger.info(f"🔬 [SDAE] Iniciando teste de permutação ({n_permutations} permutações)...")
         
         # 1. Erro de reconstrução em dados originais
-        real_error = self._compute_reconstruction_error(df)
+        real_error = self._legacy_compute_reconstruction_error_df(df)
         logger.info(f"📊 Erro real: {real_error:.4f}")
-        
+
         # 2. Erros em dados permutados
         permuted_errors = []
         block_size = self.hyperparams['seq_length'] * 2  # Permuta blocos de 2x seq_length
-        
+
         for i in range(n_permutations):
             try:
                 # Permuta blocos preservando estrutura local
                 df_perm = self._block_permutation(df, block_size=block_size)
-                perm_error = self._compute_reconstruction_error(df_perm)
+                perm_error = self._legacy_compute_reconstruction_error_df(df_perm)
                 permuted_errors.append(perm_error)
                 
                 if (i + 1) % 10 == 0:
@@ -985,13 +987,14 @@ class TemporalAutoencoderPipeline:
         
         return result
     
-    def _compute_reconstruction_error(self, df: pd.DataFrame) -> float:
+    def _legacy_compute_reconstruction_error_df(self, df: pd.DataFrame) -> float:
         """
+        [LEGACY — substituído pela versão array-based em _compute_reconstruction_error]
         Helper para calcular erro de reconstrução médio.
-        
+
         Args:
             df: DataFrame com features originais
-            
+
         Returns:
             Erro médio de reconstrução (MAE)
         """
@@ -2153,8 +2156,9 @@ class TemporalAutoencoderPipeline:
             available_cols = [c for c in use_cols if c in df.columns]
             
             # [FIX] Usa o scaler treinado em vez de criar um novo.
-            df_numeric = df[available_cols].copy()
-            df_numeric.fillna(0, inplace=True)
+            # [SCIENTIFIC FIX] ffill/bfill antes de zero — preserva propriedades
+            # estatísticas da feature em vez de injetar "zero" como observação real.
+            df_numeric = df[available_cols].copy().ffill().bfill().fillna(0)
             if self.scaler_fitted:
                 scaled_data = self.scaler.transform(df_numeric.values)
             else:
@@ -2237,9 +2241,9 @@ class TemporalAutoencoderPipeline:
             use_cols = self.feature_columns[:self.hyperparams.get('input_dim', len(self.feature_columns))]
             available_cols = [c for c in use_cols if c in df.columns]
             
-            df_numeric = df[available_cols].copy()
-            df_numeric.fillna(0, inplace=True)
-            
+            # [SCIENTIFIC FIX] ffill/bfill antes de zero (mesma justificativa acima).
+            df_numeric = df[available_cols].copy().ffill().bfill().fillna(0)
+
             if self.scaler_fitted:
                 scaled_data = self.scaler.transform(df_numeric.values)
             else:

@@ -365,26 +365,32 @@ class ScientificDataProcessor:
                     # BUG I1 FIX: Removido 'fit = True' para evitar contaminação (leakage) com estatísticas de inferência.
 
         if fit:
-            # 🔬 [HYBRID REGIME NORMALIZATION] 
+            # 🔬 [HYBRID REGIME NORMALIZATION]
             # Fitamos no GLOBAL para a escala (IQR) e no REGIME para o centro (Mediana).
             # Isso impede que o bot ignore sinais fortes de outros regimes.
-            global_data = df[numeric_cols].fillna(0).values
-            regime_data = df.loc[regime_mask, numeric_cols].fillna(0).values if regime_mask.any() else None
-            
-            if regime_data is not None and len(regime_data) > 0:
+            # [SCIENTIFIC FIX] NaNs são preenchidos com forward-fill (depois back-fill
+            # para o caso de NaNs no início), em vez de zero. Filling com zero em
+            # features de retorno/log-return desloca a mediana do RobustScaler,
+            # introduzindo viés sistemático na normalização. Ref: López de Prado,
+            # MLAM Cap. 3 (tratamento de missing data em features financeiras).
+            def _clean(arr_df):
+                return arr_df.ffill().bfill().fillna(0).values
+
+            regime_df = df.loc[regime_mask, cols_to_normalize] if regime_mask.any() else None
+            if regime_df is not None and len(regime_df) > 0:
                 # 1. Escala Global (Contexto de 101k samples)
                 temp_global = RobustScaler()
-                temp_global.fit(df[cols_to_normalize].fillna(0).values)
-                
+                temp_global.fit(_clean(df[cols_to_normalize]))
+
                 # 2. Centro de Regime (Contexto de 27k samples)
-                scaler.fit(df.loc[regime_mask, cols_to_normalize].fillna(0).values)
-                
+                scaler.fit(_clean(regime_df))
+
                 # 3. Injeção: Mantém a mediana do regime, mas usa a escala global
                 scaler.scale_ = temp_global.scale_
                 logger.info(f"✅ Scaler Regime-{regime_code} hibridizado (Estabilidade: Global IQR)")
             else:
                 logger.warning(f"⚠️ Dados insuficientes para fit do regime {regime_code}. Usando fit global.")
-                scaler.fit(df[cols_to_normalize].fillna(0).values)
+                scaler.fit(_clean(df[cols_to_normalize]))
         
         # 🔬 [TRANSFORM] Aplicar a normalização híbrida (ou global) APENAS às colunas técnicas
         try:

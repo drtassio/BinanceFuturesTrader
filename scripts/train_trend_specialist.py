@@ -19,9 +19,9 @@ from trading.utils.trend_backtest import (
 	check_data_freshness,
 	ensure_datetime_index,
 	split_train_holdout,
-	build_unseen_eval_frame,
-	build_recent_eval_frame,
-	run_manual_backtest,
+	build_unseen_eval_frame as tb_build_unseen_eval_frame,
+	build_recent_eval_frame as tb_build_recent_eval_frame,
+	run_manual_backtest as tb_run_manual_backtest,
 	DEFAULT_EVAL_MONTHS,
 	DEFAULT_EVAL_MIN_ROWS,
 )

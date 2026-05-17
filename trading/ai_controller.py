@@ -2754,9 +2754,19 @@ class AIController:
                 logger.critical(" FALHA CRTICA: Nenhum especialista disponvel no AIController. Abortando sinal.")
                 return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "No active specialists available"})
 
+            # [BUG FIX] Sensores de Física calculados ANTES do loop para evitar
+            # UnboundLocalError no caminho cerebral (target_shape[0] >= 80).
+            # A computação completa (com persistência em ensemble_details) acontece
+            # mais abaixo após o loop; aqui só precisamos do dict para a observação.
+            try:
+                quantum_metrics = get_market_chaos_metrics(recent_market_df)
+            except Exception as _qm_err:
+                logger.warning(f"[PHYSICS] Falha ao computar quantum_metrics na pré-fase: {_qm_err}. Usando defaults.")
+                quantum_metrics = {'shannon_entropy': 0.0, 'hurst_exponent': 0.5}
+
             # 2. Iterar sobre especialistas ativos e construir observaes
             expert_signals = []
-            
+
             for expert_key, expert_weight in active_experts.items():
                 active_specialist = self.specialists.get(expert_key)
                 
@@ -2776,11 +2786,20 @@ class AIController:
                              'dist_to_max_50', 'dist_to_min_50']
 
                 # Computa dist_to_max/min ao vivo — não existem na pipeline principal
+                # [SCIENTIFIC FIX] Janela calculada APENAS sobre as `_w` barras
+                # ANTERIORES ao bar atual (excluindo a barra de decisão). Antes,
+                # `rolling(_w).max().iloc[-1]` incluía o close atual, o que vazava
+                # o próprio bar de decisão; em treinamento, features semelhantes
+                # podiam vazar futuro via shift incorreto. Aqui usamos shift(1)
+                # implícito via slice [-_w-1:-1].
                 _mem_live = {}
                 for _w in [20, 50]:
                     try:
-                        _h = df_fully_enriched['high'].rolling(_w).max().iloc[-1]
-                        _l = df_fully_enriched['low'].rolling(_w).min().iloc[-1]
+                        _hist = df_fully_enriched.iloc[-_w-1:-1] if len(df_fully_enriched) > _w else df_fully_enriched.iloc[:-1]
+                        if len(_hist) < 2:
+                            raise ValueError("histórico curto")
+                        _h = float(_hist['high'].max())
+                        _l = float(_hist['low'].min())
                         _c = float(latest_row.get('close', 1.0))
                         _mem_live[f'dist_to_max_{_w}'] = (_c - _h) / (_h + 1e-9)
                         _mem_live[f'dist_to_min_{_w}'] = (_c - _l) / (_l + 1e-9)

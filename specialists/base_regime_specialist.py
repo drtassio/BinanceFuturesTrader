@@ -491,6 +491,7 @@ class BaseRegimeSpecialist(TrendSpecialist):
         # Isso permite que o sinal passe para o ensemble (se for muito forte), mas sinaliza
         # ao RL que operar contra o regime é um erro estratégico via reward shaping.
         # Ref: Dr. Tensor Fix - "Hard masking breaks policy gradient".
+        direction = getattr(self, '_specialist_direction', 'both')
         mismatch = False
         if direction == 'long_only' and signal.action == Action.SELL:
             mismatch = True

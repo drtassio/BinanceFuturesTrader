@@ -374,7 +374,9 @@ async def check_profitability_condition(components: Dict[str, Any]) -> bool:
         # Se não conseguiu carregar o pré-processado, busca dados históricos
         if featured_df is None:
             logger.info("⚙️ [PRÉ-VOO] Coletando dados históricos multi-timeframe para o backtest de validação...")
-            from datetime import datetime, timedelta, timezone
+            # [BUG FIX] Import local removido — fazia Python tratar `timedelta` como
+            # local em toda a função, quebrando a linha 361 com UnboundLocalError.
+            # datetime/timedelta/timezone já estão importados no topo do módulo.
             end_date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             start_date_str = (datetime.now(timezone.utc) - timedelta(days=365*2)).strftime('%Y-%m-%d')
 

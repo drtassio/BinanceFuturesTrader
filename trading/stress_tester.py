@@ -20,12 +20,14 @@ import math
 import uuid # Para gerar IDs únicos de trade
 
 from utils.logger import get_logger
-from config.settings import StressTestConfig, TradingConfig 
+from config.settings import StressTestConfig, TradingConfig
+# [BUG FIX] Estes enums/dataclasses eram referenciados sem importar.
+from models.trade_schema import Action, OrderSide, Trade
 # Classes importadas apenas para tipagem, pois há dependência circular
-from trading.ai_controller import AIController 
+from trading.ai_controller import AIController
 from trading.portfolio import PortfolioOptimizer
 from trading.risk_manager import RiskManager
-from feature_engineering import FeatureEngineeringPipeline 
+from feature_engineering import FeatureEngineeringPipeline
 
 logger = get_logger("StressTester")
 

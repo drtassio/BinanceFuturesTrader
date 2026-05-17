@@ -243,25 +243,30 @@ class CryptoRegimeDetector:
             logger.warning(f"⚠️ ADX computation failed: {e}")
             return pd.Series(0.0, index=df.index)
     
-    def _train_hmm(self, features: np.ndarray) -> np.ndarray:
+    def _train_hmm(self, features: np.ndarray, predict_on: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Train Hidden Markov Model and predict regimes.
-        
+
         Uses hmmlearn if available, falls back to simple Markov chain.
-        [B1 FIX] Sub-amostragem via janela contígua aleatória, não stride. 
+        [B1 FIX] Sub-amostragem via janela contígua aleatória, não stride.
         Stride viola a suposição Markoviana ao criar sequências com gaps.
         [F2 FIX] Mapeamento por score Sharpe-like (mean/std) em vez de mean apenas.
+        [SCIENTIFIC FIX] `predict_on` permite ajustar nos primeiros `features` (treino)
+        e predizer em uma série maior (treino+holdout), eliminando leakage.
+        O mapeamento estado→regime é calculado SOMENTE com o slice de treino.
         """
+        if predict_on is None:
+            predict_on = features
         try:
             from hmmlearn.hmm import GaussianHMM
-            
+
             self.hmm_model = GaussianHMM(
                 n_components=self.config.n_hmm_states,
                 covariance_type=self.config.hmm_covariance_type,
                 n_iter=self.config.hmm_n_iter,
                 random_state=42
             )
-            
+
             # [B1 FIX] Sub-amostragem por janela contígua aleatória
             # Evita violar a suposição Markoviana de sequências contíguas
             if len(features) > 50000:
@@ -271,17 +276,20 @@ class CryptoRegimeDetector:
                 train_data = features[start:start + 50000]
             else:
                 train_data = features
-                
+
             self.hmm_model.fit(train_data)
-            hidden_states = self.hmm_model.predict(features)
-            
+            # Predição no slice de treino (para mapping) e na série completa.
+            train_hidden = self.hmm_model.predict(features)
+            hidden_states = self.hmm_model.predict(predict_on)
+
             # [F2 FIX] Mapeamento por Sharpe Contemporâneo (SEM LEAKAGE)
             # Bull = Alto retorno/Baixa vol, Bear = Baixo retorno/Alta vol.
+            # [SCIENTIFIC FIX] Calculado APENAS sobre o slice de treino.
             state_scores = []
             for state in range(self.config.n_hmm_states):
-                mask = hidden_states == state
+                mask = train_hidden == state
                 if mask.sum() > 2:
-                    r = features[mask, 0] # Retorno contemporâneo
+                    r = features[mask, 0] # Retorno contemporâneo (treino)
                     score = r.mean() / (r.std() + 1e-8)
                     state_scores.append(score)
                 else:
@@ -326,18 +334,22 @@ class CryptoRegimeDetector:
         
         return regimes
     
-    def _train_gmm(self, features: np.ndarray) -> np.ndarray:
+    def _train_gmm(self, features: np.ndarray, predict_on: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Train Gaussian Mixture Model for regime clustering.
-        
+
         GMM doesn't assume temporal dependence - good for abrupt changes.
         [B1 FIX] Sub-amostragem aleatória sem reposição (não stride).
         [B2 FIX] Salva `_gmm_cluster_mapping` para uso idêntico em predict().
         [F2 FIX] Mapeamento por score Sharpe-like.
+        [SCIENTIFIC FIX] `predict_on` permite ajustar em `features` (treino) e
+        predizer em uma série maior — mapping cluster→regime usa só treino.
         """
+        if predict_on is None:
+            predict_on = features
         try:
             from sklearn.mixture import GaussianMixture
-            
+
             self.gmm_model = GaussianMixture(
                 n_components=self.config.n_gmm_components,
                 covariance_type=self.config.gmm_covariance_type,
@@ -345,7 +357,7 @@ class CryptoRegimeDetector:
                 max_iter=self.config.gmm_n_iter,
                 random_state=42
             )
-            
+
             # [B1 FIX] Amostragem aleatória sem reposição (respeita IID do GMM)
             if len(features) > 50000:
                 logger.info(f"Sub-sampling GMM training data (random 50k/{len(features)})")
@@ -354,15 +366,17 @@ class CryptoRegimeDetector:
                 self.gmm_model.fit(features[idx])
             else:
                 self.gmm_model.fit(features)
-                
-            clusters = self.gmm_model.predict(features)
-            
+
+            train_clusters = self.gmm_model.predict(features)
+            clusters = self.gmm_model.predict(predict_on)
+
             # [B2+F2 FIX] Economic grounding: Sharpe Contemporâneo (SEM LEAKAGE)
+            # [SCIENTIFIC FIX] Mapping calculado SOMENTE com slice de treino.
             cluster_scores = []
             for cluster in range(self.config.n_gmm_components):
-                mask = clusters == cluster
+                mask = train_clusters == cluster
                 if mask.sum() > 2:
-                    r = features[mask, 0] # Retorno contemporâneo
+                    r = features[mask, 0] # Retorno contemporâneo (treino)
                     score = r.mean() / (r.std() + 1e-8)
                     cluster_scores.append(score)
                 else:
@@ -562,47 +576,63 @@ class CryptoRegimeDetector:
 
         return smoothed
     
-    def fit_predict(self, df: pd.DataFrame) -> pd.DataFrame:
+    def fit_predict(self, df: pd.DataFrame, train_ratio: float = 0.80) -> pd.DataFrame:
         """
         Main entry point: fit all models and predict regimes.
-        
+
+        [SCIENTIFIC FIX] O scaler e os modelos (HMM/GMM) agora são ajustados
+        apenas nos primeiros `train_ratio` da série (default 80%), eliminando
+        o vazamento de informação do futuro para o presente. A predição é
+        feita sobre 100% dos dados usando o transform aprendido só com o passado.
+        Ref: López de Prado (2018), MLAM, Cap. 7.
+
         Args:
             df: DataFrame with OHLCV data + optional funding_rate, open_interest
-            
+            train_ratio: Fração inicial usada para fit (0.0-1.0). 1.0 reproduz
+                         o comportamento antigo (use apenas para retreinos full-history).
+
         Returns:
             DataFrame with regime, confidence, and individual model predictions
         """
         logger.info("📊 Starting ensemble regime detection...")
-        
+
         # Validate input
         required_cols = ['high', 'low', 'close']
         if not all(col in df.columns for col in required_cols):
             missing = set(required_cols) - set(df.columns)
             raise ValueError(f"Missing required columns: {missing}")
-        
+
         # 1. Extract features
         logger.info("🔧 Computing features...")
         features_df = self._compute_features(df)
-        
+
         # Select core features for models
         core_features = ['returns', 'volatility', 'volume_z', 'adx', 'autocorr', 'drawdown', 'di_diff']
         if 'funding_rate' in df.columns:
             core_features.append('funding_rate')
-        
+
         features_array = features_df[core_features].values
-        
+
         # Handle NaN/Inf
         features_array = np.nan_to_num(features_array, nan=0.0, posinf=1.0, neginf=-1.0)
-        
-        # Scale features
-        features_scaled = self.scaler.fit_transform(features_array)
-        
-        # 2. Train individual models
-        logger.info("🧠 Training HMM...")
-        hmm_regimes = self._train_hmm(features_scaled)
-        
-        logger.info("🧠 Training GMM...")
-        gmm_regimes = self._train_gmm(features_scaled)
+
+        # [SCIENTIFIC FIX] Split cronológico — scaler/HMM/GMM ajustados apenas
+        # nos primeiros train_ratio para evitar vazamento de futuro.
+        n_total = len(features_array)
+        n_train = max(int(n_total * float(np.clip(train_ratio, 0.1, 1.0))), 100)
+        n_train = min(n_train, n_total)
+        train_slice = features_array[:n_train]
+
+        self.scaler.fit(train_slice)
+        features_scaled = self.scaler.transform(features_array)
+        features_scaled_train = features_scaled[:n_train]
+
+        # 2. Train individual models (apenas no slice de treino)
+        logger.info(f"🧠 Training HMM (fit em {n_train}/{n_total} barras)...")
+        hmm_regimes = self._train_hmm(features_scaled_train, predict_on=features_scaled)
+
+        logger.info(f"🧠 Training GMM (fit em {n_train}/{n_total} barras)...")
+        gmm_regimes = self._train_gmm(features_scaled_train, predict_on=features_scaled)
         
         logger.info("📈 Computing ADX regimes...")
         adx_regimes = self._compute_adx_regimes(df, features_df['adx'])
