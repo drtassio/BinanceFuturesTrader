@@ -428,10 +428,18 @@ class BinanceConnector:
             result = await self._make_request('DELETE', '/fapi/v1/order', params=params, signed=True)
             if result:
                 logger.info(f"✅ [CONECTOR] Ordem {result.get('orderId')} ({result.get('status')}) cancelada com sucesso.")
-            else:
-                logger.warning(f"⚠️ [CONECTOR] Falha ao cancelar ordem para {symbol}.")
-            return result
+                return result
         except Exception as e:
+            # Fallback para Algo Order API (/fapi/v1/algoOrder)
+            if order_id:
+                try:
+                    algo_params = {'symbol': symbol, 'algoId': order_id}
+                    algo_res = await self._make_request('DELETE', '/fapi/v1/algoOrder', params=algo_params, signed=True)
+                    if algo_res:
+                        logger.info(f"✅ [CONECTOR] Algo Order {order_id} cancelada com sucesso via /fapi/v1/algoOrder.")
+                        return algo_res
+                except Exception as ae:
+                    logger.debug(f"Fallback algoOrder falhou: {ae}")
             logger.error(f"❌ [ERRO CONECTOR] Exceção ao cancelar ordem: {e}", exc_info=True)
             return None
 
@@ -614,16 +622,36 @@ class BinanceConnector:
         price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
         qty_precision = int(symbol_info['quantityPrecision']) if symbol_info else 3
         
+        # Tenta primeiro via Algo Order API (/fapi/v1/algoOrder) conforme especificação recente da Binance
+        algo_params = {
+            'algoType': 'CONDITIONAL',
+            'symbol': symbol,
+            'side': side,
+            'type': 'STOP_MARKET',
+            'triggerPrice': f"{stop_price:.{price_precision}f}",
+            'closePosition': 'true',
+            'workingType': 'MARK_PRICE'
+        }
+        
+        logger.info(f"🛡️ [CONECTOR] Colocando Stop Loss (Server-Side Algo): {side} {symbol} @ {algo_params['triggerPrice']} (ClosePosition)...")
+        
+        try:
+            result = await self._make_request('POST', '/fapi/v1/algoOrder', params=algo_params, signed=True)
+            if result and (result.get('algoId') or result.get('orderId')):
+                oid = result.get('algoId') or result.get('orderId')
+                logger.info(f"✅ [CONECTOR] Stop Loss {oid} (Server-Side Algo) colocado com sucesso na Binance.")
+                return result
+        except Exception as ae:
+            logger.warning(f"⚠️ [CONECTOR] AlgoOrder SL falhou: {ae}. Tentando fallback legada /fapi/v1/order...")
+
+        # Fallback legado para /fapi/v1/order
         params = {
             'symbol': symbol,
             'side': side,
             'type': 'STOP_MARKET',
             'stopPrice': f"{stop_price:.{price_precision}f}",
-            'closePosition': 'true' # Fecha a posição toda automaticamente
+            'closePosition': 'true'
         }
-        
-        logger.info(f"🛡️ [CONECTOR] Colocando Stop Loss (Server-Side): {side} {symbol} @ {params['stopPrice']} (ClosePosition)...")
-        
         try:
             result = await self._make_request('POST', '/fapi/v1/order', params=params, signed=True)
             if result:
@@ -635,7 +663,7 @@ class BinanceConnector:
 
     async def place_take_profit_order(self, symbol: str, side: str, quantity: float, stop_price: float) -> Optional[Dict[str, Any]]:
         """
-        Coloca uma ordem de Take Profit Market (Reduce Only).
+        Coloca uma ordem de Take Profit Market (Reduce Only / ClosePosition).
         
         Args:
             symbol: Par de trading
@@ -643,25 +671,42 @@ class BinanceConnector:
             quantity: Quantidade a fechar
             stop_price: Preço de disparo do TP
         """
-        if not symbol or not side or quantity <= 0 or stop_price <= 0:
+        if not symbol or not side or stop_price <= 0:
             logger.error(f"❌ [ERRO CONECTOR] Parâmetros inválidos para Take Profit: {symbol} {side} {quantity} @ {stop_price}")
             return None
 
         # Obter precisão de preço/quantidade
         symbol_info = await self.get_symbol_info(symbol)
         price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
-        qty_precision = int(symbol_info['quantityPrecision']) if symbol_info else 3
         
+        algo_params = {
+            'algoType': 'CONDITIONAL',
+            'symbol': symbol,
+            'side': side,
+            'type': 'TAKE_PROFIT_MARKET',
+            'triggerPrice': f"{stop_price:.{price_precision}f}",
+            'closePosition': 'true',
+            'workingType': 'MARK_PRICE'
+        }
+        
+        logger.info(f"💰 [CONECTOR] Colocando Take Profit (Server-Side Algo): {side} {symbol} @ {algo_params['triggerPrice']} (ClosePosition)...")
+        
+        try:
+            result = await self._make_request('POST', '/fapi/v1/algoOrder', params=algo_params, signed=True)
+            if result and (result.get('algoId') or result.get('orderId')):
+                oid = result.get('algoId') or result.get('orderId')
+                logger.info(f"✅ [CONECTOR] Take Profit {oid} (Server-Side Algo) colocado com sucesso na Binance.")
+                return result
+        except Exception as ae:
+            logger.warning(f"⚠️ [CONECTOR] AlgoOrder TP falhou: {ae}. Tentando fallback legada /fapi/v1/order...")
+
         params = {
             'symbol': symbol,
             'side': side,
             'type': 'TAKE_PROFIT_MARKET',
             'stopPrice': f"{stop_price:.{price_precision}f}",
-            'closePosition': 'true' # Fecha a posição toda automaticamente
+            'closePosition': 'true'
         }
-        
-        logger.info(f"💰 [CONECTOR] Colocando Take Profit (Server-Side): {side} {symbol} @ {params['stopPrice']} (ClosePosition)...")
-        
         try:
             result = await self._make_request('POST', '/fapi/v1/order', params=params, signed=True)
             if result:
@@ -697,13 +742,14 @@ class BinanceConnector:
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Obtém todas as ordens abertas para um símbolo ou para todos os símbolos.
+        Obtém todas as ordens abertas para um símbolo ou para todos os símbolos,
+        incluindo ordens padrão e ordens condicionais da Algo Order API (Stop Loss / Take Profit).
         
         Args:
             symbol: Par de trading (opcional, se None retorna todas as ordens)
         
         Returns:
-            Lista de ordens abertas
+            Lista de ordens abertas normalizadas
         """
         params = {}
         if symbol:
@@ -711,15 +757,34 @@ class BinanceConnector:
         
         logger.debug(f"📋 [CONECTOR] Buscando ordens abertas{' para ' + symbol if symbol else ''}...")
         
+        all_orders: List[Dict[str, Any]] = []
+
+        # 1. Busca ordens padrão (LIMIT, etc.)
         try:
             result = await self._make_request('GET', '/fapi/v1/openOrders', params=params, signed=True)
-            if result is None:
-                return []
-            logger.info(f"📋 [CONECTOR] {len(result)} ordens abertas encontradas{' para ' + symbol if symbol else ''}.")
-            return result
+            if result and isinstance(result, list):
+                all_orders.extend(result)
         except Exception as e:
-            logger.error(f"❌ [ERRO CONECTOR] Exceção ao buscar ordens abertas: {e}", exc_info=True)
-            return []
+            logger.warning(f"⚠️ [CONECTOR] Erro ao buscar openOrders padrão: {e}")
+
+        # 2. Busca ordens condicionais (Algo Orders: STOP_MARKET, TAKE_PROFIT_MARKET, etc.)
+        try:
+            algo_res = await self._make_request('GET', '/fapi/v1/openAlgoOrders', params=params, signed=True)
+            if algo_res:
+                algo_list = algo_res if isinstance(algo_res, list) else algo_res.get('orders', [])
+                for ao in algo_list:
+                    # Normaliza chaves da Algo API para o formato padrão do bot
+                    normalized_order = dict(ao)
+                    normalized_order['orderId'] = ao.get('algoId') or ao.get('orderId')
+                    normalized_order['type'] = ao.get('orderType') or ao.get('type')
+                    normalized_order['stopPrice'] = ao.get('triggerPrice') or ao.get('stopPrice')
+                    normalized_order['is_algo'] = True
+                    all_orders.append(normalized_order)
+        except Exception as ae:
+            logger.debug(f"ℹ️ [CONECTOR] Nenhuma algo order ou endpoint indisponível: {ae}")
+
+        logger.info(f"📋 [CONECTOR] {len(all_orders)} ordens abertas encontradas{' para ' + symbol if symbol else ''}.")
+        return all_orders
 
     async def cancel_all_orders(self, symbol: str) -> bool:
         """

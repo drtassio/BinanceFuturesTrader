@@ -359,9 +359,7 @@ class ExecutionEngine:
                 if order_type not in protected_types:
                     oid = o.get('orderId')
                     try:
-                        await self.connector._make_request('DELETE', '/fapi/v1/order', params={
-                            'symbol': primary_symbol, 'orderId': oid
-                        }, signed=True)
+                        await self.connector.cancel_order(primary_symbol, order_id=oid)
                         cancelled += 1
                         logger.warning(
                             f"🗑️ [STARTUP] Ordem zumbi cancelada: {oid} "
