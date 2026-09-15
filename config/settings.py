@@ -100,9 +100,9 @@ class TradingConfig(Config):
     ALL_TRADING_TIMEFRAMES = [PRIMARY_TIMEFRAME_TRADING] + SECONDARY_TIMEFRAMES + MICRO_TIMEFRAMES
 
 
-    MAX_PORTFOLIO_RISK_PERCENT = float(os.environ.get('MAX_PORTFOLIO_RISK_PERCENT', 0.02)) # Risco por trade como % do portfÃ³lio
-    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.15)) # Max % do capital para MARGEM (Subiu de 10% para 15%)
-    MAX_TOTAL_EXPOSURE_PERCENT = float(os.environ.get('MAX_TOTAL_EXPOSURE_PERCENT', 0.80)) # Max % do capital para EXPOSIÃ‡ÃƒO TOTAL (valor nocional)
+    MAX_PORTFOLIO_RISK_PERCENT = float(os.environ.get('MAX_PORTFOLIO_RISK_PERCENT', 0.02)) # Risco por trade como % do portfólio
+    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.15)) # Max % do capital para MARGEM (15%)
+    MAX_TOTAL_EXPOSURE_PERCENT = float(os.environ.get('MAX_TOTAL_EXPOSURE_PERCENT', 2.50)) # Max alavancagem nocional total da conta (ex: 2.50 = 250% do capital nocional)
 
     # --- ConfiguraÃ§Ãµes de Alavancagem DinÃ¢mica ---
     # MAX_LEVERAGE Ã© a alavancagem mÃ¡xima permitida pela exchange ou pelo seu sistema.
@@ -174,10 +174,10 @@ class TradingConfig(Config):
     TWAP_THRESHOLD_PCT = float(os.environ.get('TWAP_THRESHOLD_PCT', 0.05)) # Percentual do portfÃ³lio para acionar TWAP (0.05 = 5%)
     MIN_CONFIDENCE_FOR_LARGE_TRADE = float(os.environ.get('MIN_CONFIDENCE_FOR_LARGE_TRADE', 0.85))
 
-    if not (0 <= MAX_PORTFOLIO_RISK_PERCENT <= 1): logger.error("âŒ [ERRO CONFIG] MAX_PORTFOLIO_RISK_PERCENT fora do intervalo [0, 1].")
-    if not (0 <= MAX_POSITION_SIZE_PERCENT <= 1): logger.error("âŒ [ERRO CONFIG] MAX_POSITION_SIZE_PERCENT fora do intervalo [0, 1].")
-    if not (0 <= MAX_TOTAL_EXPOSURE_PERCENT <= 1): logger.error("âŒ [ERRO CONFIG] MAX_TOTAL_EXPOSURE_PERCENT fora do intervalo [0, 1].")
-    if not (0 <= MAX_DRAWDOWN_PERCENT <= 1): logger.error("âŒ [ERRO CONFIG] MAX_DRAWDOWN_PERCENT fora do intervalo [0, 1].")
+    if not (0 <= MAX_PORTFOLIO_RISK_PERCENT <= 1): logger.error("â Œ [ERRO CONFIG] MAX_PORTFOLIO_RISK_PERCENT fora do intervalo [0, 1].")
+    if not (0 <= MAX_POSITION_SIZE_PERCENT <= 1): logger.error("â Œ [ERRO CONFIG] MAX_POSITION_SIZE_PERCENT fora do intervalo [0, 1].")
+    if not (0 <= MAX_TOTAL_EXPOSURE_PERCENT <= 10.0): logger.error("❌ [ERRO CONFIG] MAX_TOTAL_EXPOSURE_PERCENT fora do intervalo [0, 10].")
+    if not (0 <= MAX_DRAWDOWN_PERCENT <= 1): logger.error("â Œ [ERRO CONFIG] MAX_DRAWDOWN_PERCENT fora do intervalo [0, 1].")
 
 class AIConfig(Config):
     """ConfiguraÃ§Ãµes para os modelos de InteligÃªncia Artificial e Machine Learning."""

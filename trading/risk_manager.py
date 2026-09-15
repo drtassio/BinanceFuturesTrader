@@ -256,12 +256,27 @@ class RiskManager:
         projected_leverage_ratio = projected_total_notional_value / (self.portfolio_value + np.finfo(float).eps)
 
         # [FIX] Ordens de FECHAMENTO sempre passam nesta checagem, mesmo com alavancagem projetada alta.
-        # O objetivo é REDUZIR a exposição, não aumentá-la.
-        if not is_closing_trade and projected_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT: 
-            reason = (f"❌ [REJEITADO] Alavancagem projetada do portfólio ({projected_leverage_ratio:.2f}x) "
-                      f"excederia o limite de {self.config.MAX_TOTAL_EXPOSURE_PERCENT:.2f}x (Exposição total).")
-            logger.warning(reason)
-            return False, reason
+        if not is_closing_trade and projected_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT:
+            # Tenta auto-ajustar a alavancagem para caber no teto de exposicao em vez de rejeitar
+            max_allowed_trade_notional = max(0.0, self.config.MAX_TOTAL_EXPOSURE_PERCENT * self.portfolio_value - self.total_notional_value)
+            if max_allowed_trade_notional > 0 and signal.position_size_pct > 0:
+                adjusted_lev = max_allowed_trade_notional / (self.portfolio_value * signal.position_size_pct)
+                if adjusted_lev >= self.config.MIN_LEVERAGE_PER_TRADE:
+                    new_lev = float(np.clip(adjusted_lev, self.config.MIN_LEVERAGE_PER_TRADE, signal.leverage))
+                    logger.info(
+                        f"📐 [RISCO] Alavancagem auto-ajustada de {signal.leverage:.2f}x para {new_lev:.2f}x "
+                        f"para respeitar limite de exposição total ({self.config.MAX_TOTAL_EXPOSURE_PERCENT:.2f}x)."
+                    )
+                    signal.leverage = new_lev
+                    trade_notional_value = self.portfolio_value * signal.position_size_pct * signal.leverage
+                    projected_total_notional_value = self.total_notional_value + trade_notional_value
+                    projected_leverage_ratio = projected_total_notional_value / (self.portfolio_value + np.finfo(float).eps)
+
+            if projected_leverage_ratio > self.config.MAX_TOTAL_EXPOSURE_PERCENT:
+                reason = (f"❌ [REJEITADO] Alavancagem projetada do portfólio ({projected_leverage_ratio:.2f}x) "
+                          f"excederia o limite de {self.config.MAX_TOTAL_EXPOSURE_PERCENT:.2f}x (Exposição total).")
+                logger.warning(reason)
+                return False, reason
 
         # 3. Checagem de Tamanho Máximo da Posição Individual (margem usada)
         # O signal.position_size_pct já representa a porcentagem da MARGEM.
