@@ -349,13 +349,24 @@ async def check_profitability_condition(components: Dict[str, Any]) -> bool:
         
         # Primeiro tenta carregar o DataFrame pré-processado para economizar tempo
         base_featured_path = os.path.join("models_ai", "base_featured_df.pkl")
+        base_parquet_path = os.path.join("data", "featured_data.parquet")
         featured_df = None
         
         if os.path.exists(base_featured_path):
             try:
                 featured_df = pd.read_pickle(base_featured_path)
-                logger.info(f"✅ [PRÉ-VOO] DataFrame pré-processado carregado com sucesso! Shape: {featured_df.shape}")
-                
+                logger.info(f"✅ [PRÉ-VOO] DataFrame pré-processado (pickle) carregado com sucesso! Shape: {featured_df.shape}")
+            except Exception as e:
+                logger.warning(f"⚠️ [PRÉ-VOO] Erro ao carregar DataFrame pré-processado: {e}.")
+        elif os.path.exists(base_parquet_path):
+            try:
+                featured_df = pd.read_parquet(base_parquet_path)
+                logger.info(f"✅ [PRÉ-VOO] DataFrame pré-processado (parquet) carregado com sucesso! Shape: {featured_df.shape}")
+            except Exception as e:
+                logger.warning(f"⚠️ [PRÉ-VOO] Erro ao carregar DataFrame parquet: {e}.")
+        
+        if featured_df is not None:
+            try:
                 # Verifica se os dados são recentes o suficiente (últimos 180 dias)
                 end_date = featured_df.index[-1]
                 start_date = end_date - timedelta(days=180)
@@ -366,9 +377,8 @@ async def check_profitability_condition(components: Dict[str, Any]) -> bool:
                 else:
                     logger.warning("⚠️ [PRÉ-VOO] Dados pré-processados insuficientes. Buscando dados históricos...")
                     featured_df = None
-                    
             except Exception as e:
-                logger.warning(f"⚠️ [PRÉ-VOO] Erro ao carregar DataFrame pré-processado: {e}. Buscando dados históricos...")
+                logger.warning(f"⚠️ [PRÉ-VOO] Erro ao processar slice de backtest: {e}.")
                 featured_df = None
         
         # Se não conseguiu carregar o pré-processado, busca dados históricos
@@ -772,7 +782,7 @@ async def initialize_all_components():
                             
                             if len(available_ae_cols) >= len(ae_input_cols) * 0.8:
                                 # Aplica AE para gerar as 25-32 colunas latentes
-                                hidden_df = ae.apply_hidden(background_df)
+                                hidden_df = ae.apply_hidden_features_temporal(background_df)
                                 # Adiciona à lista de colunas que o SHAP deve monitorar
                                 latent_cols = [c for c in hidden_df.columns if 'hidden_feature' in c]
                                 base_cols = list(base_cols) + latent_cols

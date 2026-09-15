@@ -91,14 +91,19 @@ pipeline.hyperparams = scientific_hyperparams
 # Extrai colunas de features (exclui OHLCV)
 ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
 feature_columns = [col for col in df.columns if col not in ohlcv_cols]
+filtered_columns = pipeline._filter_features_for_autoencoder(df, feature_columns)
+pipeline.feature_columns = filtered_columns
+pipeline.hyperparams['input_dim'] = len(filtered_columns)
 
-print(f"   📊 Features: {len(feature_columns)} colunas")
+print(f"   📊 Features: {len(filtered_columns)} colunas filtradas")
 print(f"   🎯 Latent space: {latent_dim} dimensões")
 print(f"   🗜️  Compression: {compression:.1f}:1")
 print()
 
 # Treina modelo final
 success = pipeline._train_final_model(df)
+if success:
+    pipeline._save_state()
 
 if not success:
     print("\n❌ Treinamento falhou!")

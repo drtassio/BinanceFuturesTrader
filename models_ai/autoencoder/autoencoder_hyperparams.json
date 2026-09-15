@@ -1,0 +1,19 @@
+{
+    "input_dim": 198,
+    "latent_dim": 32,
+    "seq_length": 32,
+    "cnn_out_channels": 64,
+    "kernel_size": 3,
+    "gru_hidden": 64,
+    "gru_layers": 2,
+    "dropout": 0.15,
+    "learning_rate": 0.001,
+    "batch_size": 128,
+    "weight_decay": 1e-05,
+    "p_mask": 0.2,
+    "sigma": 0.1,
+    "vae_beta": 0.01,
+    "lambda_sparse": 0.0001,
+    "num_regimes": 3,
+    "regime_emb_dim": 4
+}

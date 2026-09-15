@@ -555,6 +555,9 @@ class RangerTradingEnv(TrendFollowingEnv):
         3. EMA alcançada com lucro: reversão completa → sair imediatamente
         4. 2x half-life com qualquer lucro positivo → não esperar mais
         """
+        if not getattr(getattr(self, 'config', None), 'ENABLE_RANGER_RULE_BASED_EXITS', True):
+            return False
+
         # ── Critério base ────────────────────────────────────────────────────
         if current_pnl_pct >= 0.008:
             return True

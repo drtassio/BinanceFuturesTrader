@@ -299,8 +299,8 @@ class MoETrainingOrchestrator:
                         "No training data found. Run the bot first to generate data or provide featured_data.parquet"
                     )
                     
-            latent_cols = [c for c in self.train_df.columns if c.startswith('latent_')]
-            self.latent_dim = len(latent_cols) if latent_cols else 64
+            latent_cols = [c for c in self.train_df.columns if c.startswith('latent_') or c.startswith('hidden_feature_')]
+            self.latent_dim = len(latent_cols) if latent_cols else 32
             
             logger.info(f"✅ Loaded {len(self.train_df)} samples, latent_dim={self.latent_dim}")
             if self.verbose:
@@ -444,7 +444,7 @@ class MoETrainingOrchestrator:
         self.display.print_header("Training Soft Gating Network")
         
         # Prepare data
-        latent_cols = [c for c in self.train_df.columns if c.startswith('latent_')]
+        latent_cols = [c for c in self.train_df.columns if c.startswith('latent_') or c.startswith('hidden_feature_')]
         if not latent_cols:
             latent_cols = self.train_df.select_dtypes(include=np.number).columns.tolist()[:self.latent_dim]
             
@@ -545,12 +545,27 @@ class MoETrainingOrchestrator:
             
             metrics = specialist.train_model(
                 df=self.train_df,
-                total_timesteps=timesteps,
-                tensorboard_log=tb_log_dir
+                total_timesteps=timesteps
             )
             
             elapsed = time.time() - start
             self.status.mark_trained(f'{name}_specialist')
+            
+            # Atualiza explicitamente models_ai/training_metadata.json
+            meta_path = ROOT_DIR / "models_ai" / "training_metadata.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, 'r') as f:
+                        meta = json.load(f)
+                    model_key = f"{name}_specialist_sac"
+                    if "models" in meta and model_key in meta["models"]:
+                        meta["models"][model_key]["trained"] = True
+                        meta["models"][model_key]["trained_on"] = datetime.now().isoformat()
+                        with open(meta_path, 'w') as f:
+                            json.dump(meta, f, indent=4)
+                        logger.info(f"✅ Updated training_metadata.json for {model_key}")
+                except Exception as meta_err:
+                    logger.warning(f"Failed to update metadata: {meta_err}")
             
             final = metrics if isinstance(metrics, dict) else {}
             final['training_time_min'] = elapsed / 60

@@ -484,6 +484,11 @@ class CryptoRegimeDetector:
             self.config.weight_funding
         ])
         
+        # Funding stub guard: se funding for apenas um stub neutro (todo RANGER),
+        # seu peso nao deve diluir nem distorcer o consenso ativo de HMM, GMM e ADX.
+        if np.all(funding == self.RANGER) and self.config.weight_funding > 0:
+            weight_list[3] = 0.0
+
         # BUG M1 FIX: Normalize weights so they always sum strictly to 1.0
         weight_sum = np.sum(weight_list)
         if weight_sum > 0:
@@ -555,7 +560,7 @@ class CryptoRegimeDetector:
             high_confidence_threshold = 0.75
             is_high_confidence = seg_conf >= high_confidence_threshold
             
-            if duration < self.config.min_regime_duration and seg_start > 0 and not is_high_confidence:
+            if duration < self.config.min_regime_duration and seg_start > 0 and not is_high_confidence and seg_end < n:
                 # Segmento curto e baixa confiança: absorve no regime anterior
                 prev_regime = smoothed[seg_start - 1]
                 smoothed[seg_start:seg_end] = prev_regime

@@ -429,6 +429,20 @@ class TrendFollowingEnv(gym.Env):
             # 🚀 [OPTIMIZATION] Reusa colunas filtradas passadas pelo agente
             self.feature_columns = self._filter_to_core_features(feature_columns)
         num_enriched_features = len(self.feature_columns)
+
+        # [AUTO SCALER] Se nenhum scaler externo foi fornecido, auto-ajusta um RobustScaler interno
+        if self._feature_scaler is None and not self.df.empty:
+            try:
+                from sklearn.preprocessing import RobustScaler
+                fit_cols = [c for c in self.feature_columns if c in self.df.columns]
+                if fit_cols:
+                    _auto_scaler = RobustScaler()
+                    _auto_scaler.fit(self.df[fit_cols].fillna(0.0))
+                    self._feature_scaler = _auto_scaler
+                    logger.info(f"[SCALER] RobustScaler interno ajustado para {len(fit_cols)} features.")
+            except Exception as _sc_err:
+                logger.debug(f"[SCALER] Não foi possível auto-ajustar fallback scaler: {_sc_err}")
+
         # O shape final ÃƒÂ©: features enriquecidas + extras + estado do agente + tempo + prior
         self.observation_space = spaces.Box(
             low=-np.inf, 
@@ -540,6 +554,33 @@ class TrendFollowingEnv(gym.Env):
         # Sistema de cooldown removido (permitir flips imediatos)
         self.reset()
         logger.debug(f"[ENV ELITE] TrendFollowingEnv inicializado. Periodo: {self.max_steps} passos (de {len(self.df)} total). Obs Space: {self.observation_space.shape}. Features base: {num_enriched_features}")
+
+    @staticmethod
+    def _historical_funding_cost(
+        notional: float,
+        position_sign: float,
+        funding_rate: float,
+        prev_ts: pd.Timestamp,
+        curr_ts: pd.Timestamp,
+        interval_hours: float = 8.0,
+    ) -> float:
+        """
+        Calcula o custo de funding entre prev_ts e curr_ts baseado nas janelas de liquidacao (00:00, 08:00, 16:00 UTC).
+        """
+        if position_sign == 0 or funding_rate == 0 or notional <= 0:
+            return 0.0
+        
+        p_sec = int(prev_ts.timestamp())
+        c_sec = int(curr_ts.timestamp())
+        if c_sec <= p_sec:
+            return 0.0
+            
+        period_sec = int(interval_hours * 3600)
+        boundary_count = (c_sec // period_sec) - (p_sec // period_sec)
+        if boundary_count <= 0:
+            return 0.0
+            
+        return float(notional * funding_rate * position_sign * boundary_count)
 
     def set_anti_scalping_config(self, config_params: Dict[str, Any]):
                 # FASE 1 desativada: nenhuma configuracao anti-scalping aplicada
@@ -846,29 +887,26 @@ class TrendFollowingEnv(gym.Env):
         [SCIENTIFIC IMPROVEMENT] Normaliza features de mercado usando RobustScaler IMUTÁVEL.
         O scaler deve ser passado já treinado (fit) no dataset de treino para evitar data leakage.
         """
-        if not hasattr(self, '_feature_scaler') or self._feature_scaler is None:
-            # Se nenhum scaler externo foi fornecido, emite warning e usa passthrough
-            if not hasattr(self, '_scaler_warning_shown'):
-                logger.warning("[SCALER] Nenhum scaler externo fornecido. Features não serão normalizadas.")
-                self._scaler_warning_shown = True
-            return features
-        
-        try:
-            # [SCIENTIFIC FIX] ColumnTransformer exige nomes de colunas se foi treinado com DataFrame
-            if isinstance(self._feature_scaler, ColumnTransformer) and hasattr(self, 'feature_columns') and self.feature_columns:
-                # Verifica se a dimensão bate
-                if len(features) == len(self.feature_columns):
-                    features_df = pd.DataFrame(features.reshape(1, -1), columns=self.feature_columns)
-                    return self._feature_scaler.transform(features_df).flatten()
-            
-            # Fallback para array puro (pode falhar se fit com nomes)
-            return self._feature_scaler.transform(features.reshape(1, -1)).flatten()
-        except Exception as e:
-            # Log apenas o primeiro erro para não poluir
-            if not hasattr(self, '_scaler_error_shown'):
-                logger.warning(f"[SCALER] Falha ao transformar features: {e}. Usando features brutas.")
-                self._scaler_error_shown = True
-            return features
+        if hasattr(self, '_feature_scaler') and self._feature_scaler is not None:
+            try:
+                # [SCIENTIFIC FIX] ColumnTransformer exige nomes de colunas se foi treinado com DataFrame
+                if isinstance(self._feature_scaler, ColumnTransformer) and hasattr(self, 'feature_columns') and self.feature_columns:
+                    if len(features) == len(self.feature_columns):
+                        features_df = pd.DataFrame(features.reshape(1, -1), columns=self.feature_columns)
+                        return self._feature_scaler.transform(features_df).flatten()
+                
+                return self._feature_scaler.transform(features.reshape(1, -1)).flatten()
+            except Exception as e:
+                if not hasattr(self, '_scaler_error_shown'):
+                    logger.debug(f"[SCALER] Falha ao transformar features ({e}). Usando normalizacao robusta.")
+                    self._scaler_error_shown = True
+
+        # Fallback robusto: z-score local com clipping [-10, 10] para proteger redes neurais
+        mean_v = np.mean(features)
+        std_v = np.std(features)
+        if std_v > 1e-6:
+            return np.clip((features - mean_v) / std_v, -10.0, 10.0).astype(np.float32)
+        return np.clip(features, -10.0, 10.0).astype(np.float32)
 
     def _get_observation(self) -> np.ndarray:
         if self.current_step >= len(self.df):
@@ -4819,6 +4857,12 @@ class TrendSpecialist:
         # Bear specialist recebe o complemento. Ranger recebe tudo (opera em ambas direções).
         _sname = (specialist_name or self.specialist_name or '').lower()
         if featured_df is not None and len(featured_df) > 0:
+            # [SANIDADE NUMÉRICA] Substitui Infs por NaNs e limita valores numéricos extremos
+            num_cols_feat = featured_df.select_dtypes(include=np.number).columns
+            featured_df[num_cols_feat] = featured_df[num_cols_feat].replace([np.inf, -np.inf], np.nan)
+            featured_df[num_cols_feat] = featured_df[num_cols_feat].ffill().bfill().fillna(0.0)
+            featured_df[num_cols_feat] = featured_df[num_cols_feat].clip(lower=-1e9, upper=1e9)
+
             _regime_col = None
             for _col in ('regime_name', 'tp_regime_name', 'market_regime', 'regime'):
                 if _col in featured_df.columns:
@@ -4989,7 +5033,9 @@ class TrendSpecialist:
                 
                 # Limpeza (in-place é ok no subset_opt que é cópia)
                 for df_tmp in (train_df_opt, eval_df_opt):
+                    df_tmp.loc[:, num_cols_all] = df_tmp[num_cols_all].replace([np.inf, -np.inf], np.nan)
                     df_tmp.loc[:, num_cols_all] = df_tmp[num_cols_all].ffill().bfill().fillna(0)
+                    df_tmp.loc[:, num_cols_all] = df_tmp[num_cols_all].clip(lower=-1e9, upper=1e9)
                 
                 scaler_opt_pipeline = ColumnTransformer([
                     ('robust', RobustScaler(), ohlcv_cols),
@@ -5029,10 +5075,12 @@ class TrendSpecialist:
                 _feat_for_train_pool = featured_df.iloc[:_holdout_idx]
             train_df, eval_df = train_test_split(_feat_for_train_pool, test_size=0.15, shuffle=False)
             
-            # [RESTAURAÇÃO] Limpeza de NaNs (essencial para o RL)
+            # [RESTAURAÇÃO] Limpeza de NaNs e Infs (essencial para o RL)
             for df_tmp in (train_df, eval_df):
                 num_cols_tmp = df_tmp.select_dtypes(include=np.number).columns
+                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].replace([np.inf, -np.inf], np.nan)
                 df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].ffill().bfill().fillna(0)
+                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].clip(lower=-1e9, upper=1e9)
             
             # [FIX CIENTÍFICO] Define contrato de features ANTES do fit do scaler
             # Isso garante que o scaler seja treinado apenas nas colunas que o ambiente enviará
@@ -5165,11 +5213,10 @@ class TrendSpecialist:
                 log_path=checkpoint_dir,
                 eval_freq=self.config.CHECKPOINT_FREQ,
                 deterministic=True,
-                render=False,
-                n_eval_episodes=10,  # 🔬 Fix: era 5
+                n_eval_episodes=1,  # Reduzido para 1 para avaliacao rapida e sem hangs
                 callback_after_eval=early_stopping_callback,
             )
-            trade_analysis_callback = TradeAnalysisCallback(eval_env=eval_env, n_eval_episodes=10)  # 🔬 Fix: era 5
+            trade_analysis_callback = TradeAnalysisCallback(eval_env=eval_env, n_eval_episodes=1)
             
             # 🔬 [SCIENTIFIC] Callbacks para métricas avançadas e prevenção de policy collapse
             try:
@@ -5384,6 +5431,18 @@ class TrendSpecialist:
             _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             _tb_dir = os.path.join(_project_root, "logs", "tensorboard", self.specialist_name)
             os.makedirs(_tb_dir, exist_ok=True)
+            # Verifica compatibilidade de observation space entre modelo carregado e novo train_env
+            if self.model is not None:
+                try:
+                    if self.model.observation_space.shape != train_env.observation_space.shape:
+                        logger.warning(
+                            "[TREND SAC] Observation space incompativel (%s != %s). Recriando modelo para novo ambiente.",
+                            self.model.observation_space.shape,
+                            train_env.observation_space.shape
+                        )
+                        self.model = None
+                except Exception:
+                    self.model = None
 
             if self.model is None:
                 logger.info(
@@ -5430,7 +5489,7 @@ class TrendSpecialist:
                     tau=self.hyperparams.get("tau", 0.015),
                     train_freq=self.hyperparams.get("train_freq", 1),
                     ent_coef=self.hyperparams.get("ent_coef", 'auto_0.5'),
-                    target_entropy=float(self.hyperparams.get("target_entropy", -1.0)),
+                    target_entropy=self.hyperparams.get("target_entropy", "auto") if str(self.hyperparams.get("target_entropy", "")).lower() == "auto" else float(self.hyperparams.get("target_entropy", -1.0)),
                     use_sde=self.hyperparams.get("use_sde", True),
                     verbose=1,
                     device=self._get_device(),
@@ -5498,7 +5557,7 @@ class TrendSpecialist:
             # [MONITOR] Avaliação pós-treino e log do relatorio de convergencia
             try:
                 final_mean_reward, _ = evaluate_policy(
-                    self.model, train_env, n_eval_episodes=5, deterministic=True
+                    self.model, train_env, n_eval_episodes=1, deterministic=True
                 )
                 # Coleta sumário do episodio para extrair metricas de qualidade
                 _sums = []
@@ -5603,18 +5662,18 @@ class TrendSpecialist:
                 except Exception:
                     pass
             final_action = Action.HOLD
-            # Threshold dinÃƒÂ¢mico por regime
-            action_threshold = 0.15
-            if regime_up > 0.5 or regime_down > 0.5:
-                action_threshold = 0.10
+            # Threshold dinamico por regime: permite surfar em tendencias claras
+            action_threshold = 0.10
+            if regime_up > 0.4 or regime_down > 0.4 or abs(prior_dir) > 0.3:
+                action_threshold = 0.05  # Mercado em tendencia: permite ao especialista surfar
             elif regime_side > 0.5:
-                action_threshold = 0.20
+                action_threshold = 0.15
             explanation = {"specialist": "TrendSpecialist"}
             
             # [FIX] Initialize all variables BEFORE conditional logic to avoid UnboundLocalError
             base_conf = abs(float(position_action_raw))  # Base confidence from model output
             prior_conf_val = float(df_row.get('tp_prior_conf', base_conf)) if df_row.get('tp_prior_conf') is not None else base_conf
-            conf_regime_bonus = 0.05 if (regime_up > 0.5 or regime_down > 0.5) else -0.05 if regime_side > 0.5 else 0.0
+            conf_regime_bonus = 0.08 if (regime_up > 0.4 or regime_down > 0.4) else -0.05 if regime_side > 0.5 else 0.0
             confidence = float(np.clip(0.5 * base_conf + 0.5 * prior_conf_val + conf_regime_bonus, 0.0, 1.0))
             
             # Ajuste por incerteza
@@ -5625,9 +5684,25 @@ class TrendSpecialist:
                     pass
             
             position_size_pct = float(self.trading_config.MAX_POSITION_SIZE_PERCENT * confidence)
-            leverage = gated_leverage
-            stop_loss = float(self.trading_config.DEFAULT_STOP_LOSS_PCT)
-            take_profit = float(self.trading_config.DEFAULT_TAKE_PROFIT_PCT)
+            
+            # Combina alavancagem predita pelo modelo SAC com alavancagem de gating
+            if desired_leverage_raw is not None and desired_leverage_raw >= lev_min:
+                combined_leverage = 0.5 * gated_leverage + 0.5 * float(desired_leverage_raw)
+            else:
+                combined_leverage = gated_leverage
+            leverage = float(np.clip(round(combined_leverage), lev_min, lev_max))
+
+            # Stop Loss e Take Profit dinamicos por ATR e multiplicador predito
+            atr_val = float(df_row.get('atr_15m', df_row.get('atr', 0.0)))
+            cur_close = float(df_row.get('close', 1.0))
+            if atr_val > 0 and cur_close > 0:
+                atr_pct = atr_val / cur_close
+                sl_mult = float(np.clip(sl_mult_raw, 1.0, 4.0)) if sl_mult_raw is not None else 2.0
+                stop_loss = float(np.clip(atr_pct * sl_mult, 0.015, 0.08))
+                take_profit = float(np.clip(stop_loss * 2.5, 0.03, 0.20))
+            else:
+                stop_loss = float(self.trading_config.DEFAULT_STOP_LOSS_PCT)
+                take_profit = float(self.trading_config.DEFAULT_TAKE_PROFIT_PCT)
             
             if gating_active:
                 explanation["reason"] = f"Gating por baixa confianca do prior (< tau*)"

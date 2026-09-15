@@ -46,6 +46,26 @@ import numpy as np
 from typing import Optional, Dict, Any
 
 
+def _safe_float(env: Any, attr: str, default: float = 0.0) -> float:
+    try:
+        val = getattr(env, attr, default)
+        if val is None:
+            return default
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(env: Any, attr: str, default: int = 0) -> int:
+    try:
+        val = getattr(env, attr, default)
+        if val is None:
+            return default
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def compute_scientific_reward(
     env,
     pnl_realized: float,
@@ -77,18 +97,23 @@ def compute_scientific_reward(
     _specialist_name = str(getattr(env, 'specialist_name', '')).lower()
     _is_ranger = 'ranger' in _specialist_name
     # Half-life de Ornstein-Uhlenbeck: Ranger usa 15 candles; fallback seguro para outros.
-    _mr_halflife = int(getattr(env, 'mean_reversion_halflife', 15)) if _is_ranger else 15
+    _mr_halflife = _safe_int(env, 'mean_reversion_halflife', 15) if _is_ranger else 15
 
     # Variaveis de contexto reutilizadas em multiplos componentes
-    steps_in_pos = int(getattr(env, 'steps_in_position', 0))
+    steps_in_pos = _safe_int(env, 'steps_in_position', 0)
     atr_pct = atr / (current_price + 1e-9) if current_price > 0 else 0.01
     depth_in_atr = 0.0  # sera preenchido no Componente 1A se posicao aberta
     # exit_reason setado = trade fechou neste step, mesmo que pnl_realized == 0.0
     # (break-even exato). Isso garante que todos os componentes de fechamento disparam.
     _pnl_finite = pnl_realized is not None and np.isfinite(pnl_realized)
     trade_closed_this_step = _pnl_finite and (pnl_realized != 0 or exit_reason is not None)
-    # [ZERO-REWARD GUARD] Break-even puro (pnl=0 sem exit_reason) = flat desnecessário.
-    # Não é "neutro" — tem custo de oportunidade. Será penalizado no clip final.
+
+    # ── SINAL ECONÔMICO PRIMÁRIO (Net Equity Log Return) ──────────────────────
+    # Ref: López de Prado (2018) & Invariantes Científicos
+    # O crescimento real do patrimônio líquido (mark-to-market + taxas) é a métrica mestra.
+    economic_step_return = info.get('economic_step_return', None)
+    if economic_step_return is not None and np.isfinite(economic_step_return):
+        reward += float(economic_step_return) * 100.0
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMPONENTE 1A: GRAVITY WELL + MOMENTUM + RETREAT SIGNAL (AFLM Ch.3)
@@ -110,7 +135,7 @@ def compute_scientific_reward(
             * np.sign(env.position)
         )
         depth_in_atr = unrealized_return / (atr_pct + 1e-9)
-        leverage = float(min(getattr(env, 'current_leverage', 1.0), 3.0))
+        leverage = float(min(_safe_float(env, 'current_leverage', 1.0), 3.0))
 
         if not _is_ranger:
             # ── TREND (Bull/Bear): Gravity Well clássico ─────────────────────
@@ -176,12 +201,12 @@ def compute_scientific_reward(
                 pass  # Falha silenciosa — não quebra o reward
 
         # B) Momentum
-        curr_unrealized = float(getattr(env, 'pnl_since_entry', unrealized_return))
+        curr_unrealized = _safe_float(env, 'pnl_since_entry', unrealized_return)
         if steps_in_pos <= 1:
             env._prev_sci_unrealized = curr_unrealized
             momentum_reward = 0.0
         else:
-            prev_unrealized_sci = float(getattr(env, '_prev_sci_unrealized', curr_unrealized))
+            prev_unrealized_sci = _safe_float(env, '_prev_sci_unrealized', curr_unrealized)
             delta_return = curr_unrealized - prev_unrealized_sci
             momentum_norm = delta_return / (atr_pct + 1e-9)
             if not _is_ranger:
@@ -449,8 +474,8 @@ def compute_scientific_reward(
     # ─────────────────────────────────────────────────────────────────────────
     # So penaliza quando o drawdown PIORA neste step — evita "black hole"
     # onde uma perda grande no inicio do episodio mata todo o reward futuro.
-    current_dd = float(getattr(env, 'episode_max_drawdown', 0.0))
-    prev_dd = float(getattr(env, '_prev_scientific_dd', 0.0))
+    current_dd = _safe_float(env, 'episode_max_drawdown', 0.0)
+    prev_dd = _safe_float(env, '_prev_scientific_dd', 0.0)
     # [RANGER GUARD] Ranger opera em mercado lateral: drawdowns temporários de 2-5%
     # são parte natural da estratégia (o preço precisa se afastar antes de reverter).
     # Penalizar delta DD aqui ensina o agente a NÃO manter trades contra o fundo,
@@ -505,8 +530,8 @@ def compute_scientific_reward(
     # Este componente inverte o sinal padrao de oportunidade: ao inves de
     # penalizar flat, RECOMPENSA flat quando a posicao esta com perda acima
     # do limiar critico. Funciona como "saida de emergencia positiva".
-    grace_period_steps = int(getattr(env, 'grace_period', 5))
-    pnl_since_entry = float(getattr(env, 'pnl_since_entry', 0.0))
+    grace_period_steps = _safe_int(env, 'grace_period', 5)
+    pnl_since_entry = _safe_float(env, 'pnl_since_entry', 0.0)
     emergency_threshold = -0.02  # -2.0% em retorno fracionado
 
     # [RANGER GATE] Componente 6 DESATIVADO para Ranger.
@@ -646,9 +671,9 @@ def compute_scientific_reward(
 
         # [RANGER GUARD] Flat base penalty reduzida para Ranger.
         # Mean reversion exige PACIÊNCIA: esperar o squeeze + RSI extremo pode levar
-        # 50-200 candles flat. -0.01 × 200 = -2.0/episódio não é dramático, mas
-        # -0.003 é suficiente como pressão leve sem dominar o sinal.
-        reward -= 0.003 if _is_ranger else 0.01  # flat base penalty por estar flat
+        # 50-200 candles flat.
+        if economic_step_return is None:
+            reward -= 0.003 if _is_ranger else 0.01  # flat base penalty por estar flat
 
         if not _is_ranger:
             # Trend: penaliza flat quando sinal forte existe
@@ -695,7 +720,7 @@ def compute_scientific_reward(
     # Formula: net_return = gross_return - 2×TAKER_FEE×leverage
     # Aplicar -0.8 adicional causaria dupla contagem e tornaria todos os Q-values negativos,
     # impedindo convergência (actor_loss diverge para 100+ porque Q(s,a) < 0 sempre).
-    if getattr(env, 'steps_in_position', -1) == 0 and env.position != 0 and not _is_ranger:
+    if _safe_int(env, 'steps_in_position', -1) == 0 and env.position != 0 and not _is_ranger:
         reward -= 0.8
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -719,56 +744,39 @@ def compute_scientific_reward(
     # COMPONENTE 13: QUANTUM CHAOS GUARD (Uncertainty Penalty)
     # 🧪 Baseado em Shannon (Entropia) e Mandelbrot (Hurst)
     # ─────────────────────────────────────────────────────────────────────────
-    market_entropy = info.get('market_entropy', 0.0)
-    market_hurst = info.get('market_hurst', 0.5)
-    gating_entropy = info.get('gating_entropy', 0.0)
-    
-    uncertainty_penalty = 0.0
-    if env.position != 0:
-        # 1. Filtro de Caos (Entropia alta > 3.0)
-        if market_entropy > 3.0:
-            uncertainty_penalty -= 2.0 * (market_entropy - 2.5)
-            
-        # 2. Filtro de Ruído (Hurst 0.45 < H < 0.55 - Movimento Browniano)
-        if 0.45 < market_hurst < 0.55:
-            uncertainty_penalty -= 1.5
-            
-        # 3. Incerteza do Ensemble (Gating Entropy alta)
-        if gating_entropy > 0.8:
-            uncertainty_penalty -= 1.0
-    else:
-        # Recompensa Paciência (Hold) em mercados caóticos
-        if market_entropy > 3.2 or (0.48 < market_hurst < 0.52):
-            uncertainty_penalty += 0.3 # Bônus por paciência em ruído puro
-            
-    reward += uncertainty_penalty
+    if economic_step_return is None:
+        market_entropy = info.get('market_entropy', None)
+        market_hurst = info.get('market_hurst', None)
+        gating_entropy = info.get('gating_entropy', None)
+        
+        uncertainty_penalty = 0.0
+        if env.position != 0:
+            # 1. Filtro de Caos (Entropia alta > 3.0)
+            if market_entropy is not None and market_entropy > 3.0:
+                uncertainty_penalty -= 2.0 * (market_entropy - 2.5)
+                
+            # 2. Filtro de Ruído (Hurst 0.45 < H < 0.55 - Movimento Browniano)
+            if market_hurst is not None and 0.45 < market_hurst < 0.55:
+                uncertainty_penalty -= 1.5
+                
+            # 3. Incerteza do Ensemble (Gating Entropy alta)
+            if gating_entropy is not None and gating_entropy > 0.8:
+                uncertainty_penalty -= 1.0
+        elif market_entropy is not None and market_hurst is not None:
+            # Recompensa Paciência (Hold) em mercados caóticos confirmados
+            if market_entropy > 3.2 or (0.48 < market_hurst < 0.52):
+                uncertainty_penalty += 0.1 # Bônus sutil por paciência em ruído puro
+                
+        reward += uncertainty_penalty
 
     # ─────────────────────────────────────────────────────────────────────────
     # FINALIZACAO: CQL Clipping implicito via clip final
     # ─────────────────────────────────────────────────────────────────────────
     # Ref: Kumar et al. (2020) CQL — Conservative Q-Learning.
-    # O reward clipping em [-20, 20] atua como regularizador do target Q-value,
-    # contendo a explosao de Q-values observada no log (actor loss → -99.7).
-    # Range reduzido de [-25, 25] (v3.0) para [-20, 20] (v4.0) para maior
-    # conservadorismo consistente com o diagnostico de Q-overestimation.
-    reward_clipped = float(np.clip(reward, -20.0, 20.0))
-
-    # ── ZERO-REWARD GUARD ────────────────────────────────────────────────────
-    # Princípio: reward=0 NUNCA deve ser ponto fixo neutro.
-    # "Não fazer nada" tem custo de oportunidade — o agente precisa aprender isso.
-    #
-    # Casos em que reward_clipped == 0.0:
-    #   a) Flat num step normal sem sinal → deveria ser penalizado (Comp 10 já trata,
-    #      mas pode zerar por outros componentes se todos se cancelam).
-    #   b) Trade break-even exato (pnl=0) → custo de oportunidade + fricção transacional.
-    #   c) Step neutro (sem posição, sem sinal) → inação tem custo.
-    #
-    # Solução: aplicar penalidade fixa de -0.50 quando reward final == 0.0 exato,
-    # EXCETO se um trade acabou de ser fechado (exit_reason não é nulo). Quando um 
-    # trade fecha, é normal o SciRwd ser 0.0 (pois o TradeRwd já lidou com os bônus).
-    if reward_clipped == 0.0 and not exit_reason:
-        reward_clipped = -0.10
-
+    # O reward clipping em [-25, 25] atua como regularizador do target Q-value,
+    # contendo a explosao de Q-values e mantendo sensibilidade diferenciada
+    # para eventos de cauda (como stop losses catastróficos vs saídas orgânicas).
+    reward_clipped = float(np.clip(reward, -25.0, 25.0))
     return reward_clipped
 
 

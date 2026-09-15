@@ -30,7 +30,7 @@ class TradeAnalysisCallback(BaseCallback):
         self,
         eval_env,
         eval_freq: int = 1000,
-        n_eval_episodes: int = 5,
+        n_eval_episodes: int = 1,
         verbose: int = 1,
         log_dir: str | None = None,
     ) -> None:

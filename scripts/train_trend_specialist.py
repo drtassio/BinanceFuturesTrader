@@ -298,23 +298,22 @@ def run_manual_backtest(agent: TrendSpecialist, eval_df: pd.DataFrame, log_dir: 
 
 def main():
     ai_cfg = AIConfig()
-    os.environ.setdefault('TREND_FORCE_OPTIMIZE', '1')
+    os.environ.setdefault('TREND_FORCE_OPTIMIZE', '0')
 
     featured = load_or_build_features()
     featured = ensure_datetime_index(featured)
 
-    is_fresh, latest_ts, staleness_hours = check_data_freshness(featured)
-    if not is_fresh:
-        print(f"[DATA CHECK] ⚠️ Dados desatualizados ({staleness_hours:.1f}h desde o último candle em {latest_ts}). Reconstruindo features...")
-        featured = load_or_build_features(force_rebuild=True)
-        featured = ensure_datetime_index(featured)
+    # Verifica staleness apenas se variável de ambiente exigir
+    check_fresh = os.getenv('CHECK_DATA_FRESHNESS', '0').strip().lower() in {'1', 'true', 'yes'}
+    if check_fresh:
         is_fresh, latest_ts, staleness_hours = check_data_freshness(featured)
         if not is_fresh:
-            print(f"[DATA CHECK] ⚠️ Após reconstrução, os dados ainda estão defasados ({staleness_hours:.1f}h). Verifique a atualização dos históricos antes de prosseguir.")
-        else:
-            print(f"[DATA CHECK] ✅ Features atualizadas até {latest_ts}.")
+            print(f"[DATA CHECK] ⚠️ Dados desatualizados ({staleness_hours:.1f}h desde o último candle em {latest_ts}). Reconstruindo features...")
+            featured = load_or_build_features(force_rebuild=True)
+            featured = ensure_datetime_index(featured)
     else:
-        print(f"[DATA CHECK] ✅ Dados atualizados até {latest_ts}.")
+        latest_ts = featured.index.max() if not featured.empty else None
+        print(f"[DATA CHECK] ✅ Usando base_featured_df existente com {len(featured)} amostras (último candle: {latest_ts}).")
 
     train_frame, holdout_frame = split_train_holdout(featured, holdout_months=2, min_holdout_rows=DEFAULT_EVAL_MIN_ROWS)
     if not holdout_frame.empty:

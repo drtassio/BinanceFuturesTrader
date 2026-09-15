@@ -236,6 +236,16 @@ class FeatureEngineeringPipeline:
         if 'regime' not in df_enriched.columns:
             df_enriched['regime'] = df_enriched.get('regime_val', 2)
 
+        # [CRITICAL FIX] Mapear probabilidades reais de regime para os especialistas
+        reg_conf = df_enriched.get('regime_confidence', pd.Series(0.5, index=df_enriched.index))
+        df_enriched['tp_regime_up'] = np.where(df_enriched['regime'] == 0, reg_conf, 0.0)
+        df_enriched['tp_regime_down'] = np.where(df_enriched['regime'] == 1, reg_conf, 0.0)
+        df_enriched['tp_regime_sideways'] = np.where(df_enriched['regime'] >= 2, reg_conf, 0.0)
+
+        df_enriched['trend_pred_uptrend'] = df_enriched['tp_regime_up']
+        df_enriched['trend_pred_downtrend'] = df_enriched['tp_regime_down']
+        df_enriched['trend_pred_neutral'] = df_enriched['tp_regime_sideways']
+
         # [BUG 9 FIX] Mapeamento CONTINUO (identico ao ai_controller.py L1124).
         # Antes: mapeamento discreto {0:1.0, 1:-1.0, 2:0.0} fazia prior_dir = +-1.0 fixo,
         # eliminando o efeito de confianca e impedindo o low_confidence_gate de funcionar.

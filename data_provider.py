@@ -260,6 +260,31 @@ class DataProvider:
                     os.remove(filepath)
                 except OSError:
                     pass
+
+        # Fallback para data/historical em formato parquet (versionado no Git)
+        parquet_path = os.path.join("data", "historical", f"{symbol}_{interval}_historical.parquet")
+        if os.path.exists(parquet_path):
+            try:
+                data = pd.read_parquet(parquet_path)
+                logger.info(f"✅ [DATA PROVIDER] Dados históricos (parquet) carregados de '{parquet_path}'. Total de linhas: {len(data)}.")
+                return data
+            except Exception as e:
+                logger.warning(f"⚠️ [DATA PROVIDER] Falha ao carregar parquet '{parquet_path}': {e}")
+
+        # Fallback para dados particionados (ex: 1m part1 + part2)
+        p1 = os.path.join("data", "historical", f"{symbol}_{interval}_part1.parquet")
+        p2 = os.path.join("data", "historical", f"{symbol}_{interval}_part2.parquet")
+        if os.path.exists(p1) and os.path.exists(p2):
+            try:
+                d1 = pd.read_parquet(p1)
+                d2 = pd.read_parquet(p2)
+                data = pd.concat([d1, d2]).sort_index()
+                data = data[~data.index.duplicated(keep='first')]
+                logger.info(f"✅ [DATA PROVIDER] Dados históricos particionados ({interval}) reconstruídos com sucesso. Total de linhas: {len(data)}.")
+                return data
+            except Exception as e:
+                logger.warning(f"⚠️ [DATA PROVIDER] Falha ao reconstruir partes parquet: {e}")
+
         return None
 
     def _get_interval_milliseconds(self, interval: str) -> int:

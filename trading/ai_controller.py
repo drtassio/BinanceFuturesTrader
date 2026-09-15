@@ -438,19 +438,26 @@ class AIController:
         
         # Tenta inferir a partir do dataset base
         base_df_path = os.path.join(self.config_ai.MODEL_DIR, "base_featured_df.pkl")
-        if os.path.exists(base_df_path) and not self.metadata.get('base_feature_columns'):
+        base_parquet_path = os.path.join("data", "featured_data.parquet")
+        if not self.metadata.get('base_feature_columns'):
             try:
                 import pandas as pd
-                base_df = pd.read_pickle(base_df_path)
-                numeric_cols = base_df.select_dtypes(include=['number']).columns.tolist()
-                if numeric_cols:
-                    self.metadata['base_feature_columns'] = numeric_cols
-                    self.metadata['final_feature_count'] = len(numeric_cols)
-                    self.base_feature_columns = numeric_cols
-                    self.final_feature_count = len(numeric_cols)
-                    logger.debug(f" Contrato de features inferido do dataset: {len(numeric_cols)} colunas")
+                base_df = None
+                if os.path.exists(base_df_path):
+                    base_df = pd.read_pickle(base_df_path)
+                elif os.path.exists(base_parquet_path):
+                    base_df = pd.read_parquet(base_parquet_path)
+                    
+                if base_df is not None:
+                    numeric_cols = base_df.select_dtypes(include=['number']).columns.tolist()
+                    if numeric_cols:
+                        self.metadata['base_feature_columns'] = numeric_cols
+                        self.metadata['final_feature_count'] = len(numeric_cols)
+                        self.base_feature_columns = numeric_cols
+                        self.final_feature_count = len(numeric_cols)
+                        logger.debug(f" Contrato de features inferido do dataset: {len(numeric_cols)} colunas")
             except Exception as e:
-                logger.debug(f" No foi possvel inferir features do dataset: {e}")
+                logger.debug(f" Nao foi possivel inferir features do dataset: {e}")
     
     def load_metadata(self):
         """
@@ -660,10 +667,16 @@ class AIController:
                 # [DRIFT] Tenta carregar dados de referncia para o Drift Detector
                 if self.drift_detector and not self.drift_detector.reference_data:
                     try:
-                        logger.info(" [DRIFT] Carregando dados de referncia a partir do dataset base...")
+                        logger.info(" [DRIFT] Carregando dados de referencia a partir do dataset base...")
                         base_df_path = os.path.join(self.config_ai.MODEL_DIR, "base_featured_df.pkl")
+                        base_parquet_path = os.path.join("data", "featured_data.parquet")
+                        base_df = None
                         if os.path.exists(base_df_path):
                             base_df = pd.read_pickle(base_df_path)
+                        elif os.path.exists(base_parquet_path):
+                            base_df = pd.read_parquet(base_parquet_path)
+                            
+                        if base_df is not None:
                             # Usa as colunas de features salvas nos metadados ou infere
                             features_to_monitor = self.base_feature_columns
                             if not features_to_monitor:
@@ -674,7 +687,7 @@ class AIController:
                                 
                             self.drift_detector.set_reference_data(base_df, features_to_monitor)
                         else:
-                            logger.warning(" [DRIFT] Dataset base no encontrado. Drift status permanecer DESCONHECIDO.")
+                            logger.warning(" [DRIFT] Dataset base nao encontrado. Drift status permanecera DESCONHECIDO.")
                     except Exception as e:
                         logger.error(f" [DRIFT] Erro ao carregar dados de referncia: {e}")
             else:
@@ -1897,16 +1910,26 @@ class AIController:
     async def _get_or_create_base_dataset(self) -> Optional[pd.DataFrame]:
         """Obtm o dataset base; reutiliza cache e enriquece com dados multi-timeframe."""
         base_df_path = os.path.join(self.config_ai.MODEL_DIR, "base_featured_df.pkl")
+        base_parquet_path = os.path.join("data", "featured_data.parquet")
         backup_path = base_df_path + ".bak"
         
-        # [SAFEGUARD] Auto-restore from backup if main file is missing but backup exists
-        if not os.path.exists(base_df_path) and os.path.exists(backup_path):
-            try:
-                import shutil
-                shutil.copy2(backup_path, base_df_path)
-                logger.info(f" [CACHE RESTORE] Arquivo restaurado de backup: '{backup_path}'")
-            except Exception as restore_err:
-                logger.warning(f" [CACHE RESTORE] Falha ao restaurar backup: {restore_err}")
+        # [SAFEGUARD] Auto-restore from backup or parquet if main file is missing
+        if not os.path.exists(base_df_path):
+            if os.path.exists(backup_path):
+                try:
+                    import shutil
+                    shutil.copy2(backup_path, base_df_path)
+                    logger.info(f" [CACHE RESTORE] Arquivo restaurado de backup: '{backup_path}'")
+                except Exception as restore_err:
+                    logger.warning(f" [CACHE RESTORE] Falha ao restaurar backup: {restore_err}")
+            elif os.path.exists(base_parquet_path):
+                try:
+                    logger.info(f" [CACHE RESTORE] Reconstruindo base_featured_df.pkl a partir de '{base_parquet_path}'...")
+                    df_pq = pd.read_parquet(base_parquet_path)
+                    df_pq.to_pickle(base_df_path)
+                    logger.info(f" [CACHE RESTORE] Cache base_featured_df.pkl reconstruido com sucesso ({df_pq.shape})!")
+                except Exception as pq_err:
+                    logger.warning(f" [CACHE RESTORE] Falha ao ler parquet: {pq_err}")
 
         if os.path.exists(base_df_path):
             try:
@@ -2755,6 +2778,12 @@ class AIController:
                 return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0, explanation={"reason": "No active specialists available"})
 
             # 2. Iterar sobre especialistas ativos e construir observaes
+            # Sensores Qunticos e de Fsica de Mercado calculados previamente para uso nos especialistas
+            try:
+                quantum_metrics = get_market_chaos_metrics(recent_market_df)
+            except Exception:
+                quantum_metrics = {'shannon_entropy': 0.0, 'hurst_exponent': 0.5}
+
             expert_signals = []
             
             for expert_key, expert_weight in active_experts.items():
@@ -2886,24 +2915,26 @@ class AIController:
                                     # 4. Physics Extras (Entropy & Hurst) - Unificando a visão "Cerebral"
                                     return np.concatenate([mkt, mem, _agent_state, _time_features, prior_2, _physics])
 
-                                # --- Sensores de Física (Dr. Tensor) ---
+                                # --- Sensores de Fisica (Dr. Tensor) ---
                                 market_entropy = quantum_metrics.get('shannon_entropy', 0.0)
                                 market_hurst = quantum_metrics.get('hurst_exponent', 0.5)
                                 physics_extras = np.array([market_entropy, market_hurst], dtype=np.float32)
 
-                                if target_shape[0] >= 80: # Novo Formato Cerebral (78 + 2)
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
-                                elif target_shape[0] == 78: # Formato de transição (sem física)
-                                    # Fallback para modelos antigos que ainda não têm física na observação
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
-                                elif target_shape[0] == 312: # Sequencial (4x78 ou similar)
+                                if target_shape[0] in (304, 312): # Sequencial temporal n_stack=4 (4x76 ou 4x78)
                                     n_rows = len(df_fully_enriched)
                                     steps_seq = []
+                                    phys_arg = physics_extras if target_shape[0] == 312 else np.array([], dtype=np.float32)
                                     for offset in range(3, -1, -1):
                                         idx = max(0, n_rows - 1 - offset)
                                         past_row = df_fully_enriched.iloc[idx]
-                                        steps_seq.append(_build_cerebral_obs(past_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32)))
+                                        steps_seq.append(_build_cerebral_obs(past_row, agent_state, time_features, prior_dir_val, prior_conf_val, phys_arg))
                                     expert_observation = np.concatenate(steps_seq)
+                                elif target_shape[0] >= 80: # Novo Formato Cerebral (78 + 2)
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
+                                elif target_shape[0] == 78: # Formato de transicao (sem fisica)
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
+                                elif target_shape[0] == 76: # Base sem fisica
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
                                 elif target_shape[0] == 65:
                                     tau_val = float(latest_row.get('tp_tau', 0.0))
                                     primary_signal_val = float(latest_row.get('tp_primary_signal', 0.0))
@@ -3145,13 +3176,49 @@ class AIController:
                 else:
                     final_action = Action.HOLD
 
+                # --- Calculo Dinamico de Alavancagem por Certeza e Risco ---
+                _reg_conf = float(latest_row.get('regime_confidence', 0.5))
+                _ent_val = float(quantum_metrics.get('shannon_entropy', 0.0))
+                _min_lev = float(self.config_trading.MIN_LEVERAGE_PER_TRADE)
+                _max_lev = float(self.config_trading.MAX_LEVERAGE_PER_TRADE)
+                
+                # Certeza Composta [0, 1]
+                certainty_score = float(np.clip(weighted_confidence * 0.6 + _reg_conf * 0.4, 0.0, 1.0))
+                
+                # Fator de Risco [0.25, 1.0]
+                risk_discount = 1.0
+                if _ent_val > 2.5:
+                    risk_discount *= float(np.clip(1.0 - (_ent_val - 2.5) * 0.35, 0.25, 1.0))
+                
+                try:
+                    _curr_dd = getattr(self.risk_manager, 'current_drawdown', 0.0)
+                    if _curr_dd > 0.03:
+                        risk_discount *= float(np.clip(1.0 - (_curr_dd - 0.03) * 5.0, 0.25, 1.0))
+                except Exception:
+                    pass
+                
+                if certainty_score < 0.50:
+                    target_lev = _min_lev
+                else:
+                    norm_cert = (certainty_score - 0.50) / 0.50
+                    target_lev = _min_lev + (_max_lev - _min_lev) * (norm_cert ** 1.25)
+                
+                if weighted_leverage > _min_lev:
+                    target_lev = 0.5 * target_lev + 0.5 * weighted_leverage
+                
+                dynamic_leverage = float(np.clip(round(target_lev * risk_discount), _min_lev, _max_lev))
+                logger.info(
+                    f" [DYNAMIC LEVERAGE] Certeza={certainty_score:.1%} | Entropia={_ent_val:.2f} | "
+                    f"RiskDiscount={risk_discount:.2f} -> Alavancagem: {dynamic_leverage:.1f}x (Max: {_max_lev}x)"
+                )
+
                 # Cria o sinal agregado com parmetros herdados
                 strategic_signal = Signal(
                     symbol=self.config_trading.PRIMARY_PAIR,
                     action=final_action,
                     confidence=weighted_confidence,
                     position_size_pct=float(np.clip(weighted_size, 0.0, self.config_trading.MAX_POSITION_SIZE_PERCENT)),
-                    leverage=float(np.clip(weighted_leverage, self.config_trading.MIN_LEVERAGE_PER_TRADE, self.config_trading.MAX_LEVERAGE_PER_TRADE)),
+                    leverage=dynamic_leverage,
                     stop_loss=float(weighted_sl),
                     take_profit=float(weighted_tp),
                     estimated_duration=10.0,

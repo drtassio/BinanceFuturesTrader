@@ -1,0 +1,11 @@
+{
+    "learning_rate": 0.0003,
+    "buffer_size": 300000,
+    "batch_size": 256,
+    "gamma": 0.99,
+    "tau": 0.005,
+    "train_freq": 1,
+    "use_sde": false,
+    "ent_coef": "auto",
+    "target_entropy": "auto"
+}

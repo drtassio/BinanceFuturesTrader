@@ -212,8 +212,8 @@ class TemporalSDAE(nn.Module):
             num_groups=decoder_num_groups,
             num_channels=input_dim
         )
-        self.decoder_relu = nn.ReLU()
-        self.decoder_dropout = nn.Dropout(dropout)
+        self.decoder_relu = nn.Identity()
+        self.decoder_dropout = nn.Identity()
         
         # Inicialização de pesos
         self.apply(self._init_weights)
@@ -577,15 +577,23 @@ class TemporalAutoencoderPipeline:
         # Forward fill para preencher buracos temporais
         df_clean = df_clean.ffill()
         
-        # Backward fill para o início
-        df_clean = df_clean.bfill()
-        
-        # Se ainda sobrar NaN (dataset inteiro vazio?), preencher com 0
-        if df_clean.isnull().any().any():
-            logger.warning("⚠️ [SDAE] Ainda existem NaNs após ffill/bfill. Preenchendo com 0.")
-            df_clean = df_clean.fillna(0)
+        # Preencher NaNs iniciais com 0.0 para evitar lookahead bias (nao usar bfill)
+        df_clean = df_clean.fillna(0.0)
             
         return df_clean
+
+    def _build_future_return_targets(self, df: pd.DataFrame, horizons: Tuple[int, ...] = (4,)) -> np.ndarray:
+        """Calcula retornos futuros para os horizontes especificados sem cruzar limites de partição."""
+        if 'close' not in df.columns or df.empty:
+            return np.empty((len(df), len(horizons)))
+        
+        targets = []
+        close = df['close']
+        for h in horizons:
+            future_ret = (close.shift(-h) - close) / (close + 1e-9)
+            targets.append(future_ret.to_numpy())
+            
+        return np.column_stack(targets)
 
     def _filter_features_for_autoencoder(self, df: pd.DataFrame, feature_columns: List[str]) -> List[str]:
         """

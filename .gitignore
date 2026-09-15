@@ -17,34 +17,35 @@ coverage.xml
 *.log
 .DS_Store
 
-# Environments
+# Environments - CRITICAL: NEVER COMMIT SECRETS
 .env
+*.env
 .venv
 env/
 venv/
 ENV/
 
-# Data and Databases
+# Databases and temporary files
 *.db
 *.sqlite3
 *.csv
-*.parquet
 *.gz
 
-# ML Frameworks & Models (Binary Files - High VRAM/Storage)
-models_ai/
-checkpoints_ai/
-*.zip
-*.pt
-*.pth
-*.joblib
-*.pkl
-*.onnx
-*.h5
+# Large uncompressed pickle files exceeding GitHub 100MB limit
+models_ai/base_featured_df.pkl
+models_ai/*.pkl.bak
+models_ai/base_featured_df.pkl.bak
+config/logs/historical_data/
+logs/historical_data/
 
-# Optimization & Studies
+# Machine Learning Checkpoints & Temp artifacts
+checkpoints_ai/
+checkpoints/
 optuna_studies/
 *.optuna
+graphify-out/
+tmp/
+scratch/
 
 # Logs and Tensorboard
 logs/*

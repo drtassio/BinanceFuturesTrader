@@ -107,11 +107,11 @@ class TradingConfig(Config):
     # --- ConfiguraÃ§Ãµes de Alavancagem DinÃ¢mica ---
     # MAX_LEVERAGE Ã© a alavancagem mÃ¡xima permitida pela exchange ou pelo seu sistema.
     # MAX_LEVERAGE_PER_TRADE Ã© o limite que o agente pode *predizer* ou que o RiskManager pode *permitir*.
-    MAX_LEVERAGE = float(os.environ.get('MAX_LEVERAGE', 5.0)) # MÃ¡ximo de alavancagem permitida pela corretora
-    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 5.0)) # Limite que o agente pode usar (Subiu de 3x para 5x)
-    MIN_LEVERAGE_PER_TRADE = float(os.environ.get('MIN_LEVERAGE_PER_TRADE', 1.0)) # MÃ­nimo de alavancagem
-    LEVERAGE_PREDICTION_RANGE = (MIN_LEVERAGE_PER_TRADE, MAX_LEVERAGE_PER_TRADE) # Range para a aÃ§Ã£o de alavancagem do agente
-    LEVERAGE_COST_PER_DAY_PCT = float(os.environ.get('LEVERAGE_COST_PER_DAY_PCT', 0.0003)) # Custo diÃ¡rio da alavancagem (para funding fee, se aplicÃ¡vel em simulaÃ§Ã£o)
+    MAX_LEVERAGE = float(os.environ.get('MAX_LEVERAGE', 20.0)) # Maximo de alavancagem permitida pela corretora
+    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 15.0)) # Limite maximo para conviccao extrema
+    MIN_LEVERAGE_PER_TRADE = float(os.environ.get('MIN_LEVERAGE_PER_TRADE', 1.0)) # Minimo de alavancagem
+    LEVERAGE_PREDICTION_RANGE = (MIN_LEVERAGE_PER_TRADE, MAX_LEVERAGE_PER_TRADE) # Range para a acao de alavancagem do agente
+    LEVERAGE_COST_PER_DAY_PCT = float(os.environ.get('LEVERAGE_COST_PER_DAY_PCT', 0.0003))
 
 
     DEFAULT_STOP_LOSS_PCT = float(os.environ.get('DEFAULT_STOP_LOSS_PCT', 0.03))

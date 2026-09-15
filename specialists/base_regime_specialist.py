@@ -491,6 +491,10 @@ class BaseRegimeSpecialist(TrendSpecialist):
         # Isso permite que o sinal passe para o ensemble (se for muito forte), mas sinaliza
         # ao RL que operar contra o regime é um erro estratégico via reward shaping.
         # Ref: Dr. Tensor Fix - "Hard masking breaks policy gradient".
+        direction = getattr(self, '_specialist_direction', None)
+        if direction is None:
+            direction = 'long_only' if self.regime_type == 'bull' else ('short_only' if self.regime_type == 'bear' else 'both')
+        
         mismatch = False
         if direction == 'long_only' and signal.action == Action.SELL:
             mismatch = True
@@ -502,14 +506,13 @@ class BaseRegimeSpecialist(TrendSpecialist):
                 signal.explanation = {}
             
             original_action = signal.action.value
-            original_conf = signal.confidence
-            
-            # Redução de 80% na confiança - o sinal ainda existe mas é "sussurrado" no ensemble
-            signal.confidence *= 0.20
+            signal.action = Action.HOLD
+            signal.confidence = 0.0
+            signal.position_size_pct = 0.0
             signal.explanation['_regime_mismatch'] = True
-            signal.explanation['reason'] = f"{self.name}: sinal {original_action} suavizado (regime {self.regime_type} prefere {direction})"
+            signal.explanation['reason'] = f"{self.name}: sinal {original_action} bloqueado em produção (regime {self.regime_type} exige {direction})"
             
-            logger.debug(f"{'🐂' if direction == 'long_only' else '🐻'} [REGIME SOFT-FILTER] {self.name}: {original_action} ({original_conf:.2f}) suavizado para {signal.confidence:.2f}")
+            logger.info(f"{'🐂' if direction == 'long_only' else '🐻'} [REGIME FILTER] {self.name}: {original_action} bloqueado → HOLD ({direction} em produção)")
         
         return signal
 

@@ -84,38 +84,22 @@ class CurriculumEngine:
         stage = self.get_current_stage()
         logger.info(f"🧪 [CURRÍCULO] Preparando dados para o estágio: '{stage['name']}' ({self.current_stage_index + 1}/{len(self.stages)}).")
 
-        # Inicia com uma cópia do DataFrame completo para usar como fallback
-        original_df = featured_df.copy()
-        filtered_df = featured_df.copy()
-
         # Define as colunas a serem usadas para filtragem
         volatility_col = f'atr_percentage_{self.primary_timeframe}'
         adx_col = f'adx_{self.primary_timeframe}'
         
-        # Filtrar por Volatilidade
-        if 'volatility_max' in stage and volatility_col in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df[volatility_col] <= stage['volatility_max']]
-        
-        # Filtrar por Clareza da Tendência
-        if 'trend_clarity_min' in stage and adx_col in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df[adx_col] >= stage['trend_clarity_min']]
+        mask = pd.Series(True, index=featured_df.index)
+        if 'volatility_max' in stage and volatility_col in featured_df.columns:
+            mask &= (featured_df[volatility_col] <= stage['volatility_max'])
+        if 'trend_clarity_min' in stage and adx_col in featured_df.columns:
+            mask &= (featured_df[adx_col] >= stage['trend_clarity_min'])
+        if 'trend_clarity_max' in stage and adx_col in featured_df.columns:
+            mask &= (featured_df[adx_col] <= stage['trend_clarity_max'])
 
-        if 'trend_clarity_max' in stage and adx_col in filtered_df.columns:
-            filtered_df = filtered_df[filtered_df[adx_col] <= stage['trend_clarity_max']]
-
-        # --- INÍCIO DA CORREÇÃO LÓGICA ---
-        # Define um limite mínimo razoável de amostras para um estágio
-        min_samples_for_stage = 500
-        
-        if len(filtered_df) < min_samples_for_stage:
-            logger.warning(f"⚠️ [ALERTE CURRÍCULO] A filtragem para o estágio '{stage['name']}' resultou em apenas {len(filtered_df)} amostras (mínimo: {min_samples_for_stage}).")
-            logger.warning("Usando o conjunto de dados de treinamento COMPLETO (não filtrado) como fallback para este estágio, para garantir o aprendizado.")
-            # Retorna o DataFrame original sem filtro como fallback
-            return original_df
-        # --- FIM DA CORREÇÃO LÓGICA ---
-        
-        logger.info(f"✅ [CURRÍCULO] Dados filtrados para o estágio '{stage['name']}': {len(filtered_df)} amostras prontas para treinamento.")
-        return filtered_df
+        res_df = featured_df.copy()
+        res_df['curriculum_eligible'] = mask.astype(int)
+        logger.info(f"✅ [CURRÍCULO] Dados preparados para '{stage['name']}': {res_df['curriculum_eligible'].sum()} amostras elegíveis de {len(res_df)} totais.")
+        return res_df
     
     def update_progress(self, episode_metrics: Dict[str, float]):
         """
@@ -208,11 +192,10 @@ class CurriculumEngine:
             max_runs = stage.get('max_training_runs', evaluation_frequency * 4)
             if len(history) >= max_runs:
                 logger.warning(
-                    f"⏫ [CURRÍCULO] Limite de {max_runs} ciclos de treino atingido "
+                    f"⚠️ [CURRÍCULO] Limite de {max_runs} ciclos de treino atingido "
                     f"no estágio '{stage['name']}' sem critérios atingidos. "
-                    f"Avançando forçadamente para o próximo estágio."
+                    f"Permanecendo no estágio atual para consolidação."
                 )
-                self._advance_stage()
             else:
                 logger.info(
                     f"⏳ [CURRÍCULO] Critérios de '{stage['name']}' ainda não atingidos "
