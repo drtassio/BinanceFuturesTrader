@@ -197,7 +197,9 @@ _LIVE_REPRODUCIBLE_FAMILIES = (
     "aggressor_delta_z", "taker_buy_ratio", "funding_rate",
 )
 _HISTORY_DEPENDENT = ("obv", "pvt", "adl", "vwap", "close_reference", "bb_upper",
-                      "bb_lower", "bb_middle", "macd_line", "macd_signal", "psar_value")
+                      "bb_lower", "bb_middle", "macd_line", "macd_signal", "psar_value",
+                      # legacy resample columns with no live counterpart
+                      "_tf_")
 
 
 def select_feature_columns(df: pd.DataFrame) -> List[str]:

@@ -1104,6 +1104,18 @@ class TrendFollowingEnv(gym.Env):
             if any(fl.endswith(tf) or (tf + '_') in fl for tf in _EXCLUDED_TF):
                 continue
 
+            # Colunas "*_tf_*" nao existem no pipeline ao vivo: o especialista
+            # receberia zero em producao no lugar do valor visto no treino.
+            if '_tf_' in fl:
+                continue
+
+            # Diferenciacao fracionaria com janela expansiva depende de quanto
+            # historico existe antes da barra. Medido por
+            # scripts/verify_live_parity.py: close_frac_1h vale 11057.8 no treino e
+            # 12074.7 ao vivo na mesma barra (8%), porque o bot so tem 852 barras.
+            if '_frac' in fl:
+                continue
+
             # Features técnicas em _15m e _1h (substring match restrito)
             if any(p in fl for p in _TECH_PATTERNS):
                 core.append(f)

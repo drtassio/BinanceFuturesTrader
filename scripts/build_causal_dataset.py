@@ -72,7 +72,16 @@ def main() -> None:
         if col in df.columns:
             df[col] = df[col].ffill()
 
+    # Colunas "*_tf_*" vem de um construtor historico antigo e NAO existem no
+    # pipeline ao vivo (scripts/verify_live_parity.py lista 38 delas). Um modelo
+    # que as usasse receberia zeros em producao. Elas saem antes de qualquer
+    # coisa, para que nenhum seletor de features possa escolhe-las.
+    legacy = [c for c in df.columns if isinstance(c, str) and "_tf_" in c]
+    df = df.drop(columns=legacy)
+    print("colunas legadas sem equivalente ao vivo removidas: %d" % len(legacy))
+
     df, meta = build_causal_features(df)
+    meta["dropped_legacy_columns"] = legacy
 
     # The higher timeframe shift leaves genuine warm-up NaNs at the head, and
     # the rolling windows need history. Filling either would put back exactly
