@@ -182,6 +182,16 @@ class AIController:
         self.last_trained_date = None
         self.last_adaptation_date = None
         
+        # Portao fora da amostra. O caminho fica junto dos modelos porque a
+        # aprovacao vale para AQUELES arquivos: o relatorio guarda o hash de
+        # cada .zip avaliado e perde a validade se algum for substituido.
+        import os as _os
+        self.policy_validation_path = _os.path.join(
+            str(getattr(config, 'MODEL_DIR', 'models_ai')), 'policy_oos_validation.json'
+        )
+        self.policy_oos_approved = False
+        self.last_oos_validation: Dict[str, Any] = {}
+
         # --- Componentes de Deciso ---
         # self.profitability_predictor = None # Removido: Mdulo obsoleto (substitudo pelo HRLMaster)
         # self.trend_predictor = None          # Removido: Mdulo obsoleto
