@@ -115,8 +115,8 @@ class DataProvider:
             df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             
-            # Convert OHLCV to numeric
-            for col in ['open', 'high', 'low', 'close', 'volume']:
+            # Convert OHLCV and Binance's taker-buy field to numeric.
+            for col in ['open', 'high', 'low', 'close', 'volume', 'taker_buy_base_asset_volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
             df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
@@ -142,6 +142,17 @@ class DataProvider:
             # 3. Realized volatility (rolling std of log-returns)
             df['realized_vol_20'] = df['log_return'].rolling(20, min_periods=5).std().fillna(0)
             df['realized_vol_100'] = df['log_return'].rolling(100, min_periods=20).std().fillna(0)
+
+            # Historical taker flow is available in Futures klines.  These
+            # features describe completed-candle aggression; they are not a
+            # synthetic order book and therefore remain causal.
+            sell_volume = (df['volume'] - df['taker_buy_base_asset_volume']).clip(lower=0.0)
+            delta = df['taker_buy_base_asset_volume'] - sell_volume
+            df['aggressor_imbalance'] = delta / df['volume'].clip(lower=1e-12)
+            df['taker_buy_ratio'] = df['taker_buy_base_asset_volume'] / df['volume'].clip(lower=1e-12)
+            delta_mean = delta.rolling(32, min_periods=8).mean()
+            delta_std = delta.rolling(32, min_periods=8).std().replace(0, np.nan)
+            df['aggressor_delta_z'] = ((delta - delta_mean) / delta_std).fillna(0.0)
             
             # 4. Keep close ONLY as reference for position sizing (NOT for training)
             df['close_reference'] = df['close']
@@ -154,7 +165,7 @@ class DataProvider:
                 'hl_range_pct', 'oc_move_pct', 
                 'hc_wick_upper', 'lc_wick_lower',
                 'realized_vol_20', 'realized_vol_100',
-                'close_reference'
+                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z'
             ]
             
             # 6. Clean infinities and remaining NaNs
@@ -225,6 +236,25 @@ class DataProvider:
                 return None
             
             # Adicionamos a palavra-chave 'await' aqui, pois create_features é uma função assíncrona.
+            # Funding is published every eight hours. Align the last rate
+            # already published with each primary-timeframe candle.
+            primary_tf = self.trading_config.PRIMARY_TIMEFRAME_TRADING
+            primary_df = raw_dfs_multi_tf.get(primary_tf)
+            if primary_df is not None and not primary_df.empty:
+                try:
+                    start_ms = int((primary_df.index.min() - pd.Timedelta(days=1)).timestamp() * 1000)
+                    end_ms = int(primary_df.index.max().timestamp() * 1000)
+                    funding_rows = await self.connector.get_funding_rate_history(symbol, start_ms, end_ms)
+                    if funding_rows:
+                        funding = pd.DataFrame(funding_rows)
+                        funding.index = pd.to_datetime(funding['fundingTime'], unit='ms', utc=True)
+                        series = funding.sort_index()['fundingRate'].astype(float)
+                        primary_df = primary_df.copy()
+                        primary_df['funding_rate'] = series.reindex(primary_df.index, method='ffill').fillna(0.0)
+                        raw_dfs_multi_tf[primary_tf] = primary_df
+                except Exception as exc:
+                    logger.warning(f"[DATA PROVIDER] Funding unavailable; using neutral 0: {exc}")
+
             featured_df = await self.feature_pipeline.create_features(
                 raw_dfs_multi_tf,
                 symbol,

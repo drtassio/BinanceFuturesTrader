@@ -409,8 +409,8 @@ class AIConfig(Config):
     MODEL_RETRAIN_DAYS = int(os.environ.get('MODEL_RETRAIN_DAYS', 90))
     # [FIX] 50k default: 1.5M / 50k = 30 checkpoints por treino final (era 1000 = 1500 checkpoints).
     # 1000 steps causava overhead massivo: 1500 eval × 10 episódios = 15k execuções de avaliação.
-    CHECKPOINT_FREQ: int = int(os.getenv("CHECKPOINT_FREQ", 50000))
-    PATIENCE_EARLY_STOPPING: int = int(os.getenv("PATIENCE_EARLY_STOPPING", 500))
+    CHECKPOINT_FREQ: int = int(os.getenv("CHECKPOINT_FREQ", 10000))
+    PATIENCE_EARLY_STOPPING: int = int(os.getenv("PATIENCE_EARLY_STOPPING", 4))
 
     EARLY_STOP_PATIENCE = int(os.environ.get('EARLY_STOP_PATIENCE', 100))
     EARLY_STOP_MIN_DELTA = float(os.environ.get('EARLY_STOP_MIN_DELTA', 0.001))

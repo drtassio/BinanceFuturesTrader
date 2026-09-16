@@ -42,7 +42,7 @@ def load_dataset(path: Path) -> pd.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", choices=sorted(AGENTS), required=True)
-    parser.add_argument("--data", type=Path, default=ROOT / "data" / "featured_data.parquet")
+    parser.add_argument("--data", type=Path, default=ROOT / "data" / "featured_data_flow_funding.parquet")
     parser.add_argument("--timesteps", type=int, default=100_000)
     parser.add_argument("--output", type=Path, default=ROOT / "cloud" / "artifacts")
     parser.add_argument("--resume", action="store_true")

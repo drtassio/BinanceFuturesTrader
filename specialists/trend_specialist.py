@@ -1042,6 +1042,7 @@ class TrendFollowingEnv(gym.Env):
             'hc_wick', 'lc_wick',           # tamanho de sombras — sinal de reversão
             'money_flow', 'volume_pressure',
             'ema_trend', 'psar_trend',
+            'aggressor_imbalance', 'aggressor_delta_z', 'taker_buy_ratio', 'funding_rate',
         )
 
         core: List[str] = []
@@ -3153,6 +3154,7 @@ class TrendSpecialist:
             'adx', 'plus_di', 'minus_di', 'bb_width', 'atr_percentage',
             'bb_squeeze', 'bb_expansion', 'rsi_oversold', 'rsi_overbought',
             'money_flow', 'volume_pressure', 'ema_trend', 'psar_trend',
+            'aggressor_imbalance', 'aggressor_delta_z', 'taker_buy_ratio', 'funding_rate',
             'hidden_feature', 'sdae_recon', 'regime_conf', 'tp_prior',
         ]
         # Preserva todas as latents e meta-features
@@ -4914,7 +4916,9 @@ class TrendSpecialist:
             # [SANIDADE NUMÉRICA] Substitui Infs por NaNs e limita valores numéricos extremos
             num_cols_feat = featured_df.select_dtypes(include=np.number).columns
             featured_df[num_cols_feat] = featured_df[num_cols_feat].replace([np.inf, -np.inf], np.nan)
-            featured_df[num_cols_feat] = featured_df[num_cols_feat].ffill().bfill().fillna(0.0)
+            # A training row must never receive an indicator from a future
+            # row.  Warm-up gaps are neutral, not backfilled.
+            featured_df[num_cols_feat] = featured_df[num_cols_feat].ffill().fillna(0.0)
             featured_df[num_cols_feat] = featured_df[num_cols_feat].clip(lower=-1e9, upper=1e9)
 
             _regime_col = None
@@ -4922,6 +4926,11 @@ class TrendSpecialist:
                 if _col in featured_df.columns:
                     _regime_col = _col
                     break
+            # Specialists see the complete chronological trajectory.  Filtering
+            # to only bull/bear rows made non-adjacent candles artificial
+            # neighbors and rewarded the trivial always-in-market policy.
+            # Regime remains an observation/gate, not a data-row filter.
+            _regime_col = None
             if _regime_col is not None:
                 _orig_len = len(featured_df)
                 if 'bull' in _sname and 'bear' not in _sname:

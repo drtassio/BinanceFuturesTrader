@@ -245,6 +245,17 @@ class BinanceConnector:
             logger.warning(f"⚠️ [CONECTOR] Nenhuma dado de kline retornado para {symbol}-{interval}.")
         return data
 
+    async def get_funding_rate_history(
+        self, symbol: str, start_ts: Optional[int] = None, end_ts: Optional[int] = None, limit: int = 1000
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Return public USD-M perpetual funding observations."""
+        params: Dict[str, Any] = {'symbol': symbol, 'limit': min(max(limit, 1), 1000)}
+        if start_ts is not None:
+            params['startTime'] = start_ts
+        if end_ts is not None:
+            params['endTime'] = end_ts
+        return await self._make_request('GET', '/fapi/v1/fundingRate', params)
+
 
     async def get_account_summary(self) -> Dict[str, Any]:
         """

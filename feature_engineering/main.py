@@ -215,10 +215,11 @@ class FeatureEngineeringPipeline:
 
         # ETAPA 7: ADICIONAR REGIME LABELS (Hamilton 1989)
         try:
-            from feature_engineering.scientific_data_processor import ScientificDataProcessor
-            data_processor = ScientificDataProcessor()
+            from feature_engineering.scientific_data_processor import create_data_processor
+            # Never overwrite the fitted normalization contract during a live
+            # inference cycle.  The old code saved an empty new processor.
+            data_processor = create_data_processor(self.config.MODEL_DIR)
             featured_df_combined = data_processor.add_regime_labels(featured_df_combined)
-            data_processor.save_scalers()
             logger.info(f"Regime labels adicionados: {featured_df_combined['regime'].value_counts().to_dict()}")
         except Exception as e:
             logger.warning(f"Falha ao adicionar regime labels: {e}")
