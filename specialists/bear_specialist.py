@@ -94,7 +94,7 @@ class BearTradingEnv(TrendFollowingEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # 🔬 Dr. Tensor Fix: Permitir exploração de sinais contrários para punição suave
-        self.relaxed_gates = True
+        self.relaxed_gates = False
         # [FIX SHORT-ONLY] BearSpecialist nunca abre Long, nem durante warmup
         self._specialist_short_only = True
     

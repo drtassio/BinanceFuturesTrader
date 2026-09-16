@@ -2049,7 +2049,22 @@ class TrendFollowingEnv(gym.Env):
         # [FIX CIENTÍFICO] Low confidence gate softened
         # 🔬 Dr. Tensor: Removido o bloqueio rígido (action_side = 0).
         # Agora o mismatch/low-confidence é tratado via reward penalties.
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        # Directional specialists use a constrained action space: invalid
+        # exploratory proposals become HOLD before order/PnL processing.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
+        is_opening_or_reversing = should_open_long or should_open_short
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         if low_confidence_gate:
             # [BUG 6 FIX] Nunca reutilizar _regime_mismatch aqui.
             # _regime_mismatch é específico para Bull tentando Short (e vice-versa).
@@ -2096,8 +2111,23 @@ class TrendFollowingEnv(gym.Env):
                     self._gate_stats["scalping_penalty"] += 1
         
         # Atualiza is_opening_or_reversing após possíveis bloqueios de flip
+        # Direction is a hard safety invariant for directional specialists.
+        # Project invalid exploratory actions to HOLD before order/PnL handling:
+        # Bull can never open SHORT and Bear can never open LONG.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
         is_opening_or_reversing = should_open_long or should_open_short
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         # LUZ AMARELA/VERMELHA (Fechamento Ativo)
         # BUG 6 FIX: Removido reset de info (era info: Dict[str, Any] = {})
         prior_threshold = float(getattr(self, "prior_flip_threshold", 0.3))
@@ -2229,7 +2259,21 @@ class TrendFollowingEnv(gym.Env):
             should_open_short = False
         # Atualiza direção final após possíveis ajustes
         is_opening_or_reversing = should_open_long or should_open_short
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        # Final hard projection for Bull/Bear directional action spaces.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
+        is_opening_or_reversing = should_open_long or should_open_short
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         
         # [FIX CIENTÍFICO] Penalidade de baixa confiança já aplicada na linha ~1908.
         # Remover duplicata: a punição de -1.0 abaixo causava -2.0 no mesmo step.
