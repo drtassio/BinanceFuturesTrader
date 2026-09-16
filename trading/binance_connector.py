@@ -17,6 +17,15 @@ from config.settings import Config, TradingConfig
 
 logger = get_logger("BinanceConnector")
 
+
+class _RateLimited(Exception):
+    """A Binance respondeu 429/418. Transitorio: quem chamou pode reenviar."""
+
+    def __init__(self, delay: float):
+        super().__init__("rate limited")
+        self.delay = float(delay)
+
+
 shutdown_event = asyncio.Event()
 
 class BinanceConnector:
@@ -81,6 +90,29 @@ class BinanceConnector:
             mode_str = "(force_production)" if force_production else ""
             masked_key = f"{self.api_key[:4]}...{self.api_key[-4:]}" if self.api_key else "None"
             logger.info(f"📡 [CONECTOR] Usando ambiente Binance PRODUÇÃO {mode_str}. (Key: {masked_key})")
+
+        # Um conector forcado para producao existe para LER dados publicos, que
+        # na testnet sao curtos e pouco liquidos. Ele carrega as chaves de
+        # PRODUCAO, entao qualquer ordem enviada por ele iria para a corretora
+        # real com dinheiro real, e nao para a testnet onde o bot deveria estar
+        # operando. run_bot.py mantem os dois lado a lado exatamente assim:
+        #
+        #     data_connector    = BinanceConnector(cfg, force_production=True)
+        #     trading_connector = BinanceConnector(cfg, force_production=False)
+        #
+        # Esta trava existia e desapareceu em algum refactor; o teste que a
+        # cobria passou a falhar com AttributeError. Ela e reinstalada aqui e
+        # verificada em _make_request antes de qualquer outra coisa.
+        self.allow_order_execution = not force_production
+        if not self.allow_order_execution:
+            logger.info("🔒 [CONECTOR] Conector de dados em modo somente-leitura: ordens bloqueadas.")
+
+        # Controle de limite de taxa. _max_get_retries so vale para GET, que e
+        # idempotente; reenviar um POST de ordem poderia duplicar posicao.
+        self._request_lock = asyncio.Lock()
+        self._last_request_monotonic = 0.0
+        self._minimum_request_interval_seconds = 0.0
+        self._max_get_retries = 2
 
         self.session: Optional[aiohttp.ClientSession] = None
         self._timestamp_offset: int = 0
@@ -161,6 +193,20 @@ class BinanceConnector:
         Returns:
             Any: A resposta JSON da API, ou None em caso de erro.
         """
+        # A trava de somente-leitura vem ANTES de tudo, inclusive da checagem de
+        # sessao: um conector de dados nunca deve sequer montar uma requisicao
+        # que altere estado na corretora. Na API REST da Binance Futures todo
+        # endpoint que cria, altera ou cancela ordem usa POST, PUT ou DELETE, de
+        # modo que bloquear por metodo cobre tambem endpoints novos sem precisar
+        # manter uma lista de caminhos.
+        if not getattr(self, 'allow_order_execution', True) and method.upper() != 'GET':
+            logger.error(
+                "🔒 [CONECTOR] %s %s bloqueado: este conector é somente-leitura "
+                "(force_production=True) e usa chaves de PRODUÇÃO.",
+                method, endpoint,
+            )
+            return None
+
         if self.session is None or self.session.closed:
             logger.error(f"❌ [ERRO CONECTOR] Sessão aiohttp não está ativa para {method} {endpoint}. Chame connect() primeiro.")
             raise ConnectionError("Sessão aiohttp não está ativa. Chame connect() primeiro.")
@@ -194,11 +240,52 @@ class BinanceConnector:
         # CORREÇÃO: Acessa EXECUTION_TIMEOUT_SECONDS da instância self.trading_config
         timeout = aiohttp.ClientTimeout(total=self.trading_config.EXECUTION_TIMEOUT_SECONDS)
 
+        # Reenvio apenas para GET, e apenas em limite de taxa.
+        #
+        # A Binance responde 429 (e 418 quando ja baniu o IP) sob rajada, o que
+        # acontece com frequencia ao montar a janela historica. Sem reenvio, uma
+        # unica 429 devolvia None e o ciclo seguia com dados faltando.
+        #
+        # O reenvio fica restrito a GET de proposito: repetir um POST de ordem
+        # que pode ter sido aceita duplicaria posicao. GET e idempotente, POST
+        # de ordem nao e.
+        attempt = 0
+        max_retries = int(getattr(self, '_max_get_retries', 2)) if method.upper() == 'GET' else 0
+        while True:
+            try:
+                return await self._execute_request(
+                    method, url, params, req_headers, timeout, endpoint,
+                    attempt, max_retries,
+                )
+            except _RateLimited as limited:
+                attempt += 1
+                if attempt > max_retries:
+                    logger.error("⏳ [CONECTOR] %s %s: limite de taxa após %d tentativas.",
+                                 method, endpoint, attempt)
+                    return None
+                logger.warning("⏳ [CONECTOR] %s %s: limite de taxa, reenviando em %.1fs (%d/%d).",
+                               method, endpoint, limited.delay, attempt, max_retries)
+                await asyncio.sleep(limited.delay)
+
+    async def _execute_request(self, method, url, params, req_headers, timeout,
+                               endpoint, attempt, max_retries):
+        """Uma tentativa. Sinaliza limite de taxa via _RateLimited."""
         try:
             async with self.session.request(method, url, params=params, headers=req_headers, timeout=timeout) as response:
                 # Lê o corpo ANTES de verificar o status para evitar Connection closed
                 response_text = await response.text()
                 
+                # 429 = limite de taxa; 418 = IP ja banido temporariamente.
+                # Ambos sao transitorios e o cabecalho Retry-After diz quanto
+                # esperar. Quem chamou decide se reenvia.
+                if response.status in (418, 429) and max_retries > 0:
+                    try:
+                        delay = float(response.headers.get('Retry-After', 1.0))
+                    except (TypeError, ValueError):
+                        delay = 1.0
+                    # Recuo exponencial quando o servidor nao informa o tempo.
+                    raise _RateLimited(max(delay, 0.0) or (2.0 ** attempt))
+
                 if response.status >= 400:
                     # Tenta parsear como JSON para mensagem de erro detalhada
                     try:
@@ -215,6 +302,9 @@ class BinanceConnector:
                     logger.warning(f"⚠️ [CONECTOR] Resposta não-JSON de {endpoint}: {response_text}")
                     return response_text
                     
+        except _RateLimited:
+            # Sobe para o laco de reenvio; nao e um erro terminal.
+            raise
         except aiohttp.ClientConnectorError as e:
             logger.error(f"❌ [ERRO CONECTOR] Falha de conexão para {endpoint}: {e}. Verifique sua rede ou URL base.", exc_info=True)
             return None

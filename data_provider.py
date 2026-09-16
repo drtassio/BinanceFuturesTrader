@@ -33,6 +33,80 @@ class DataProvider:
     Fornece dados de mercado brutos e transformados para outros componentes do bot.
     Gerencia o cache de dados e a integração com o pipeline de engenharia de features.
     """
+    # Minutos por barra, para converter a janela pedida em numero de barras.
+    _TIMEFRAME_MINUTES = {
+        '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480,
+        '12h': 720, '1d': 1440, '3d': 4320, '1w': 10080,
+    }
+
+    def _validate_historical_coverage(self, frame, timeframe, start, end):
+        """A janela historica recebida cobre de fato o periodo pedido?
+
+        Um download truncado nao levanta erro: a exchange simplesmente devolve
+        menos barras. O treino entao roda sobre um pedaco do periodo, e o bot
+        ao vivo decide com um historico mais curto do que os indicadores
+        precisam, sem que nada apareca como falha.
+
+        Devolve (valido, relatorio); o relatorio sempre traz os numeros, mesmo
+        quando reprova, para o log dizer o que faltou.
+        """
+        import pandas as _pd
+
+        minutes = self._TIMEFRAME_MINUTES.get(str(timeframe).lower())
+        min_ratio = float(getattr(self.data_config, 'HISTORICAL_MIN_COVERAGE_RATIO', 0.995))
+        max_gap_multiplier = float(getattr(self.data_config, 'HISTORICAL_MAX_GAP_MULTIPLIER', 3.0))
+
+        report = {
+            'timeframe': str(timeframe),
+            'requested_start': str(start),
+            'requested_end': str(end),
+            'rows': 0 if frame is None else int(len(frame)),
+            'coverage_ratio': 0.0,
+            'start_ok': False,
+            'end_ok': False,
+            'largest_gap_bars': 0.0,
+            'reason': '',
+        }
+        if frame is None or len(frame) == 0 or minutes is None:
+            report['reason'] = 'frame vazio' if minutes is not None else f'timeframe desconhecido: {timeframe}'
+            return False, report
+
+        index = _pd.DatetimeIndex(frame.index)
+        start_ts, end_ts = _pd.Timestamp(start), _pd.Timestamp(end)
+        # Alinha fuso: comparar um indice consciente com um timestamp ingenuo
+        # levantaria excecao, e a origem do desalinhamento costuma ser o chamador.
+        if index.tz is not None and start_ts.tz is None:
+            start_ts, end_ts = start_ts.tz_localize(index.tz), end_ts.tz_localize(index.tz)
+        elif index.tz is None and start_ts.tz is not None:
+            index = index.tz_localize(None)
+            start_ts, end_ts = start_ts.tz_localize(None), end_ts.tz_localize(None)
+
+        bar = _pd.Timedelta(minutes=minutes)
+        expected = max(1, int((end_ts - start_ts) / bar))
+        report['expected_rows'] = expected
+        report['coverage_ratio'] = round(min(1.0, len(index) / expected), 6)
+        # Uma barra de tolerancia em cada ponta: a exchange pode devolver o
+        # candle seguinte ou omitir o ultimo ainda em formacao.
+        report['start_ok'] = bool(index.min() <= start_ts + bar)
+        report['end_ok'] = bool(index.max() >= end_ts - 2 * bar)
+
+        if len(index) > 1:
+            gaps = index.to_series().diff().dropna()
+            report['largest_gap_bars'] = round(float(gaps.max() / bar), 3) if len(gaps) else 0.0
+
+        problems = []
+        if report['coverage_ratio'] < min_ratio:
+            problems.append('cobertura %.4f abaixo de %.4f' % (report['coverage_ratio'], min_ratio))
+        if not report['start_ok']:
+            problems.append('inicio faltando')
+        if not report['end_ok']:
+            problems.append('fim faltando')
+        if report['largest_gap_bars'] > max_gap_multiplier:
+            problems.append('buraco de %.1f barras' % report['largest_gap_bars'])
+        report['reason'] = '; '.join(problems) if problems else 'ok'
+        return (not problems), report
+
     def __init__(self, connector: BinanceConnector, feature_pipeline: FeatureEngineeringPipeline):
         if not isinstance(connector, BinanceConnector):
             raise TypeError("🚨 [ERRO DATA PROVIDER] 'connector' deve ser uma instância de BinanceConnector.")

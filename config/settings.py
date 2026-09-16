@@ -364,6 +364,26 @@ class AIConfig(Config):
     # que aprendeu a operar, e se exigir menos, opera mais.
     INFERENCE_ACTION_THRESHOLD = float(os.environ.get('INFERENCE_ACTION_THRESHOLD', 0.064))
 
+    # Portao fora da amostra: nenhuma politica opera sem provar desempenho no
+    # holdout, e a aprovacao fica presa ao hash do arquivo avaliado — treinar de
+    # novo na nuvem e sobrescrever o .zip invalida a aprovacao automaticamente.
+    REQUIRE_OOS_POLICY_APPROVAL = os.environ.get(
+        'REQUIRE_OOS_POLICY_APPROVAL', 'True').lower() in ('true', '1', 't')
+    OOS_MIN_SHARPE = float(os.environ.get('OOS_MIN_SHARPE', 0.50))
+    OOS_MIN_PROFIT_FACTOR = float(os.environ.get('OOS_MIN_PROFIT_FACTOR', 1.10))
+    OOS_MAX_DRAWDOWN = float(os.environ.get('OOS_MAX_DRAWDOWN', 0.15))
+    OOS_MIN_NET_RETURN = float(os.environ.get('OOS_MIN_NET_RETURN', 0.0))
+    OOS_MIN_TRADES = int(os.environ.get('OOS_MIN_TRADES', 20))
+
+    # Portao de probabilidade de lucro: so vale com o ProfitabilityPredictor
+    # calibrado. Ligado sem calibracao, reprova todo sinal e o bot fica mudo.
+    ENABLE_PROFIT_PROBABILITY_GATE = os.environ.get(
+        'ENABLE_PROFIT_PROBABILITY_GATE', 'False').lower() in ('true', '1', 't')
+
+    # Cobertura minima aceita numa janela historica baixada.
+    HISTORICAL_MIN_COVERAGE_RATIO = float(os.environ.get('HISTORICAL_MIN_COVERAGE_RATIO', 0.995))
+    HISTORICAL_MAX_GAP_MULTIPLIER = float(os.environ.get('HISTORICAL_MAX_GAP_MULTIPLIER', 3.0))
+
     # Vote Misalignment: penalidade proporcional à confiança do predictor
     # Quando predictor diz BULL com 100% confiança e agente vota SHORT: penalidade máxima
     VOTE_MISALIGN_BASE_PENALTY = float(os.environ.get('VOTE_MISALIGN_BASE_PENALTY', 2.0))

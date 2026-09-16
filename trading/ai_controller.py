@@ -61,6 +61,120 @@ class AIController:
     [VERSO FINAL CORRIGIDA]
     Centraliza a inteligncia do Bot.
     """
+    # ── PORTAO OOS ────────────────────────────────────────────────────────────
+    # Nenhuma politica opera dinheiro sem ter provado desempenho fora da amostra,
+    # e a prova fica presa ao ARQUIVO exato que foi avaliado. Sem essa amarracao
+    # por hash, um relatorio aprovado continuaria valendo depois de alguem
+    # sobrescrever o .zip com um modelo novo e nao testado, que e justamente o
+    # que acontece a cada treino na nuvem.
+
+    _OOS_SPECIALISTS = ('bull', 'bear', 'ranger')
+
+    def _specialist_model_path(self, name):
+        from pathlib import Path as _Path
+        return _Path(str(self.config_ai.MODEL_DIR)) / ("%s_specialist_sac.zip" % name)
+
+    def _specialist_model_hashes(self):
+        """SHA-256 de cada arquivo de politica, ou None se ausente."""
+        import hashlib as _hashlib
+        hashes = {}
+        for name in self._OOS_SPECIALISTS:
+            path = self._specialist_model_path(name)
+            try:
+                hashes[name] = _hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                hashes[name] = None
+        return hashes
+
+    def _validate_specialists_oos(self, holdout_df):
+        """Avalia cada especialista no holdout e grava o veredito assinado."""
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        from pathlib import Path as _Path
+
+        cfg = self.config_ai
+        thresholds = {
+            'min_sharpe': float(getattr(cfg, 'OOS_MIN_SHARPE', 0.5)),
+            'min_profit_factor': float(getattr(cfg, 'OOS_MIN_PROFIT_FACTOR', 1.1)),
+            'max_drawdown': float(getattr(cfg, 'OOS_MAX_DRAWDOWN', 0.15)),
+            'min_net_return': float(getattr(cfg, 'OOS_MIN_NET_RETURN', 0.0)),
+            'min_trades': int(getattr(cfg, 'OOS_MIN_TRADES', 20)),
+        }
+        results = {}
+        for name in self._OOS_SPECIALISTS:
+            specialist = (self.specialists or {}).get(name)
+            if specialist is None:
+                results[name] = {'passed': False, 'reason': 'especialista ausente', 'metrics': {}}
+                continue
+            try:
+                metrics = dict(specialist.evaluate(holdout_df) or {})
+            except Exception as exc:
+                results[name] = {'passed': False, 'reason': 'evaluate falhou: %s' % exc, 'metrics': {}}
+                continue
+
+            checks = {
+                'sharpe': float(metrics.get('sharpe_ratio', 0.0)) >= thresholds['min_sharpe'],
+                'profit_factor': float(metrics.get('profit_factor', 0.0)) >= thresholds['min_profit_factor'],
+                'drawdown': float(metrics.get('max_drawdown', 1.0)) <= thresholds['max_drawdown'],
+                'net_return': float(metrics.get('net_return', -1.0)) >= thresholds['min_net_return'],
+                'trades': int(metrics.get('num_trades', 0)) >= thresholds['min_trades'],
+            }
+            failed = [k for k, ok in checks.items() if not ok]
+            results[name] = {
+                'passed': not failed,
+                'reason': 'ok' if not failed else 'reprovado em: %s' % ', '.join(failed),
+                'checks': checks,
+                'metrics': metrics,
+            }
+
+        report = {
+            'generated_at': _dt.now(_tz.utc).isoformat(),
+            'thresholds': thresholds,
+            'specialists': results,
+            'all_passed': all(r['passed'] for r in results.values()),
+            'model_hashes': self._specialist_model_hashes(),
+        }
+        try:
+            path = _Path(self.policy_validation_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(report, indent=2, default=str), encoding='utf-8')
+        except OSError as exc:
+            logger.error("[OOS] Nao foi possivel gravar o relatorio: %s", exc)
+
+        self.policy_oos_approved = bool(report['all_passed'])
+        self.last_oos_validation = report
+        if report['all_passed']:
+            logger.info("[OOS] Todas as politicas aprovadas para operar.")
+        else:
+            reproved = [n for n, r in results.items() if not r['passed']]
+            logger.warning("[OOS] Politicas reprovadas: %s", ', '.join(reproved) or 'nenhuma avaliada')
+        return report
+
+    def _load_policy_oos_approval(self):
+        """A aprovacao gravada ainda vale para os arquivos que estao em disco?"""
+        import json as _json
+        from pathlib import Path as _Path
+
+        if not bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            return True
+        try:
+            report = _json.loads(_Path(self.policy_validation_path).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            logger.warning("[OOS] Sem relatorio de validacao: operacao bloqueada.")
+            return False
+        if not report.get('all_passed'):
+            return False
+
+        recorded = report.get('model_hashes') or {}
+        current = self._specialist_model_hashes()
+        for name, digest in recorded.items():
+            if current.get(name) != digest:
+                logger.warning(
+                    "[OOS] '%s' mudou desde a validacao: aprovacao invalidada.", name
+                )
+                return False
+        return True
+
     def __init__(self, config: AIConfig, trading_config: TradingConfig, system_state: Dict[str, Any]):
         self.config_ai = config
         self.config_trading = trading_config
