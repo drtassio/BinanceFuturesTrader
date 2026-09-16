@@ -137,9 +137,12 @@ def buy_and_hold_return(frame: pd.DataFrame) -> float:
 
 def judge(holdout: dict, benchmark: float) -> dict:
     """Decide whether this model may trade real money, and say why."""
-    trades = int(holdout.get("total_trades", holdout.get("trades", 0)) or 0)
-    net = float(holdout.get("total_return_pct", holdout.get("net_return", 0.0)) or 0.0)
-    drawdown = float(holdout.get("max_drawdown", 0.0) or 0.0)
+    # Os nomes vêm de TrendFollowingEnv._build_financial_snapshot. Ler uma chave
+    # inexistente devolveria o default silenciosamente e o veredito aprovaria um
+    # modelo com base em zeros.
+    trades = int(holdout.get("num_trades", 0) or 0)
+    net = float(holdout.get("total_return_pct", 0.0) or 0.0)
+    drawdown = float(holdout.get("max_drawdown_pct", 0.0) or 0.0)
     checks = {
         "deterministic_policy_trades": trades >= MIN_HOLDOUT_TRADES,
         "net_return_positive": net > 0.0,
