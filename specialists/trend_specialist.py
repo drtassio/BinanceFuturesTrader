@@ -804,6 +804,7 @@ class TrendFollowingEnv(gym.Env):
         self.time_stop_step = None
         # [TRAILING CATASTROPHE SL] Rastreia pico de preço para ratchet do CSL
         self._peak_price_since_entry = None
+        self._initial_risk_pct = 0.0
         self._catastrophe_sl_floor = None
         self.episode_peak_net_worth = self.initial_balance
         self.episode_max_drawdown = 0.0
@@ -2464,31 +2465,49 @@ class TrendFollowingEnv(gym.Env):
                 closed_trade_duration = self.steps_in_position
                 closed_trade_side = 'long' if self.position > 0 else 'short'
                 info['exit_reason'] = 'Quick Exit (TP)'
-        # Trailing Stop simples baseado em ATR quando em lucro
-        if self.position != 0 and not trade_was_closed and self.pnl_since_entry > (atr / (self.entry_price + 1e-9)):
-            trail_mult = 0.5 * sl_mult  # aproxima o SL conforme o lucro cresce
+        # --- APERTO DO STOP: so depois que o trade conquistou espaco ---
+        #
+        # Os tres mecanismos abaixo (trailing simples, Chandelier e PSAR) eram
+        # aplicados desde a PRIMEIRA barra da posicao, cada um com max()/min(),
+        # de modo que o mais apertado sempre vencia e o sl_mult escolhido pelo
+        # agente virava decoracao.
+        #
+        # O Chandelier era o pior: olhava a maxima das ultimas 22 barras,
+        # INCLUINDO barras anteriores a entrada. Ao entrar numa correcao, essa
+        # maxima fica acima do preco de entrada e 'maxima - 3 ATR' podia nascer
+        # ACIMA da propria entrada — stop ja violado antes da primeira barra.
+        # Resultado medido: 915 trades em 4000 barras, duracao media de 3.4
+        # barras, praticamente todos encerrados por Stop Loss. Seguir uma
+        # tendencia era mecanicamente impossivel.
+        #
+        # Regra agora: nada aperta o stop enquanto o trade nao pagar 1R, isto e,
+        # enquanto o lucro nao cobrir a distancia de risco inicial. E o
+        # Chandelier passa a olhar apenas o extremo ALCANCADO DESDE A ENTRADA,
+        # que e a definicao correta do indicador para uma posicao aberta.
+        initial_risk_pct = float(getattr(self, '_initial_risk_pct', 0.0) or 0.0)
+        r_multiple = (self.pnl_since_entry / initial_risk_pct) if initial_risk_pct > 1e-9 else 0.0
+        may_tighten = self.position != 0 and not trade_was_closed and r_multiple >= 1.0
+
+        if may_tighten:
+            # Trailing proporcional ao risco assumido, nao a metade dele.
+            trail_mult = max(1.0, sl_mult)
             if self.position > 0:
-                new_sl = max(self.sl_level or -np.inf, current_price - atr * trail_mult)
-                self.sl_level = new_sl
+                self.sl_level = max(self.sl_level or -np.inf, current_price - atr * trail_mult)
             else:
-                new_sl = min(self.sl_level or np.inf, current_price + atr * trail_mult)
-                self.sl_level = new_sl
-        # Chandelier Exit (ATR-based)
-        if self.position != 0 and not trade_was_closed:
-            lookback = 22
+                self.sl_level = min(self.sl_level or np.inf, current_price + atr * trail_mult)
+
+        if may_tighten:
+            # Chandelier sobre o extremo desde a entrada.
             atr_mult = 3.0
-            end = self.start_idx + self.current_step + 1
-            start = max(self.start_idx, end - lookback)
-            window_high = float(np.max(self.df['high'].iloc[start:end])) if 'high' in self.df.columns else current_price
-            window_low = float(np.min(self.df['low'].iloc[start:end])) if 'low' in self.df.columns else current_price
             if self.position > 0:
-                chandelier_sl = window_high - atr_mult * atr
-                self.sl_level = max(self.sl_level or -np.inf, chandelier_sl)
+                peak = float(getattr(self, '_peak_price_since_entry', current_price) or current_price)
+                self.sl_level = max(self.sl_level or -np.inf, peak - atr_mult * atr)
             else:
-                chandelier_sl = window_low + atr_mult * atr
-                self.sl_level = min(self.sl_level or np.inf, chandelier_sl)
+                trough = float(getattr(self, '_peak_price_since_entry', current_price) or current_price)
+                self.sl_level = min(self.sl_level or np.inf, trough + atr_mult * atr)
+
         # Parabolic SAR simplificado
-        if self.position != 0 and not trade_was_closed:
+        if may_tighten:
             if self._psar is None:
                 if self.position > 0:
                     self._psar_trend = 1
@@ -2573,23 +2592,47 @@ class TrendFollowingEnv(gym.Env):
                 # Ajusta alavancagem conforme novo espaÃƒÂ§o de aÃƒÂ§ÃƒÂ£o (ÃƒÂ­ndice 2)
                 self.current_leverage = np.clip(desired_leverage, self.action_space.low[2], self.action_space.high[2])
                 
-                # --- CORREÇÃO: POSITION SIZING BASEADO EM CONFIANÇA PURA ---
-                # A confiança vem da Rede Neural (tp_prior_conf), ajustada apenas pela incerteza.
-                # Não misturamos mais com o voto do agente para dimensionamento.
-                raw_conf = float(current_row.get('tp_prior_conf', 0.5))
-                uncertainty = float(current_row.get('tp_uncertainty', 0.0))
-                
-                # Penaliza confiança se a incerteza for alta
-                adjusted_conf = raw_conf * (1.0 - min(uncertainty, 0.5))
-                
-                # Mapeia confiança (0.5 a 1.0) para tamanho (0.5 a 1.0 da banca alocada)
-                # Confiança < 0.5 já deve ter sido filtrada pelos gates, mas garantimos o mínimo.
-                position_size_pct = np.clip((adjusted_conf - 0.5) * 2.0, 0.1, 1.0)
-                
-                # Define o valor nocional inicial com base na confiança pura
-                # (Usa 10% do patrimônio líquido como base, escalado pela alavancagem e confiança)
-                base_allocation = self.net_worth * 0.10 
-                self.initial_notional_value = base_allocation * self.current_leverage * position_size_pct
+                # --- POSITION SIZING POR ORCAMENTO DE RISCO ---
+                #
+                # A formula anterior dimensionava por 'tp_prior_conf', coluna que
+                # NAO existe no dataset. O get() devolvia 0.5 sempre, entao
+                # (0.5 - 0.5) * 2 = 0.0 e o clip travava no piso 0.1. Toda posicao
+                # ficava presa em 10% de uma alocacao de 10%, ou seja 1% do
+                # patrimonio vezes alavancagem: com capital 100 e alavancagem 2, o
+                # nocional era 2.00. Um movimento de 10% no preco mexia 0.3% na
+                # conta, de modo que o reward economico ficava perto de zero e as
+                # penalidades de shaping, que valem varios pontos cada, dominavam
+                # o sinal inteiro. Nenhum ajuste de recompensa poderia funcionar
+                # enquanto o lucro estivesse escalado para nada.
+                #
+                # O tamanho agora sai do risco: arrisca-se uma fracao fixa do
+                # patrimonio por trade e a distancia do stop determina o nocional.
+                # Assim um stop custa sempre o mesmo em percentual da conta,
+                # independente da volatilidade, e um trend trade que corre tres
+                # vezes a distancia do stop ganha tres vezes o risco — a assimetria
+                # de que o trend-following vive.
+                conviction = float(np.clip(abs(position_action_raw), 0.0, 1.0))
+                size_factor = float(np.clip(0.30 + 0.70 * conviction, 0.30, 1.0))
+                # Confianca do meta-modelo supervisionado, quando presente.
+                ml_conf = float(current_row.get('ml_conf', 0.5))
+                if np.isfinite(ml_conf):
+                    size_factor *= float(np.clip(0.5 + ml_conf, 0.5, 1.5))
+
+                risk_budget = (
+                    self.net_worth
+                    * float(getattr(self.trading_config, 'MAX_PORTFOLIO_RISK_PERCENT', 0.02))
+                    * size_factor
+                )
+                # Piso na distancia do stop para nao explodir o nocional quando a
+                # volatilidade colapsa.
+                stop_distance_pct = max(float(sl_mult) * atr / (current_price + 1e-9), 0.0015)
+                notional = risk_budget / stop_distance_pct
+                # A acao de alavancagem limita a exposicao; o risco a define.
+                max_notional = self.net_worth * float(max(self.current_leverage, 1.0))
+                self.initial_notional_value = float(
+                    np.clip(notional, self.net_worth * 0.05, max_notional)
+                )
+                position_size_pct = self.initial_notional_value / (self.net_worth + 1e-9)
                 
                 # Fee de entrada
                 entry_fee = (self.initial_notional_value or 0) * self.trading_config.TAKER_FEE
@@ -2644,6 +2687,13 @@ class TrendFollowingEnv(gym.Env):
                         self.sl_level = self.entry_price - atr * sl_base_multiplier * sl_unc_mult
                     else:
                         self.sl_level = self.entry_price + atr * sl_base_multiplier * sl_unc_mult
+                # Distancia de risco inicial (1R). Os mecanismos de aperto do
+                # stop so passam a agir depois que o trade paga esse valor, o que
+                # da a uma tendencia espaco para se desenvolver antes de o stop
+                # comecar a persegui-la.
+                self._initial_risk_pct = abs(
+                    float(self.sl_level) - float(self.entry_price)
+                ) / (abs(float(self.entry_price)) + 1e-9)
                 # Define time stop usando duraÃƒÂ§ÃƒÂ£o mediana (robustecido por regime)
                 dur_med_raw = self.df.iloc[self.start_idx + self.current_step].get('tp_duration_median', 0)
                 try:

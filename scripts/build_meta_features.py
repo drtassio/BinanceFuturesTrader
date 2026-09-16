@@ -46,7 +46,7 @@ def main() -> None:
     parser.add_argument("--profit-atr", type=float, default=8.0)
     parser.add_argument("--stop-atr", type=float, default=3.0)
     parser.add_argument("--max-bars", type=int, default=384)
-    parser.add_argument("--warmup", type=int, default=25_000)
+    parser.add_argument("--warmup", type=int, default=15_000)
     parser.add_argument("--step", type=int, default=5_000)
     parser.add_argument("--skip-cv", action="store_true")
     args = parser.parse_args()
