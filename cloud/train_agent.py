@@ -86,7 +86,10 @@ def main() -> None:
     cutoff = int(len(df) * 0.8)
     train_df, eval_df = df.iloc[:cutoff].copy(), df.iloc[cutoff:].copy()
     config = AIConfig()
-    config.ECONOMIC_REWARD_ONLY = True
+    # Keep net equity as the primary reward, but do not short-circuit the
+    # opportunity-cost and trend-alignment terms: otherwise a flat policy gets
+    # exactly zero forever and deterministic SAC collapses to 100% HOLD.
+    config.ECONOMIC_REWARD_ONLY = False
     os.environ.setdefault("TREND_SKIP_OPTUNA", "1")
     # Isolate both models AND validation checkpoints; never silently resume a
     # checkpoint distributed in the repository during a fresh cloud run.
@@ -119,7 +122,7 @@ def main() -> None:
         "holdout_start": str(eval_df.index.min()),
         "holdout_end": str(eval_df.index.max()),
         "result": result,
-        "economic_reward_only": True,
+        "economic_reward_only": False,
         "run_directory": str(run_dir),
         "holdout_evaluated": True,
         "holdout_metrics": holdout_metrics,
