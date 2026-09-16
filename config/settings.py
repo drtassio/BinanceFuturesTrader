@@ -351,6 +351,19 @@ class AIConfig(Config):
     ECONOMIC_REWARD_ONLY = os.environ.get('ECONOMIC_REWARD_ONLY', 'True').lower() in ('true', '1', 't')
     ECONOMIC_REWARD_SCALE = float(os.environ.get('ECONOMIC_REWARD_SCALE', 100.0))
 
+    # Teto de alavancagem sob o qual os especialistas sao treinados
+    # (_leverage_cap_hpo no ambiente). Producao nunca pode exceder este valor:
+    # um agente que aprendeu a gerir posicao a 3x, colocado a 8x, repete os
+    # mesmos trades com quase tres vezes o risco por operacao.
+    # Alterar aqui exige retreinar os agentes.
+    TRAINING_LEVERAGE_CAP = float(os.environ.get('TRAINING_LEVERAGE_CAP', 3.0))
+
+    # Limiar de |voto| para converter a saida continua do SAC em BUY/SELL.
+    # Precisa acompanhar train_base_threshold do ambiente de treino: se
+    # producao exigir mais conviccao que o treino, a politica opera menos do
+    # que aprendeu a operar, e se exigir menos, opera mais.
+    INFERENCE_ACTION_THRESHOLD = float(os.environ.get('INFERENCE_ACTION_THRESHOLD', 0.064))
+
     # Vote Misalignment: penalidade proporcional à confiança do predictor
     # Quando predictor diz BULL com 100% confiança e agente vota SHORT: penalidade máxima
     VOTE_MISALIGN_BASE_PENALTY = float(os.environ.get('VOTE_MISALIGN_BASE_PENALTY', 2.0))

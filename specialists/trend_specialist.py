@@ -5826,15 +5826,31 @@ class TrendSpecialist:
             # Dimensionamento de alavancagem guiado pela confiança do TrendPredictor
             gating_active = False
             lev_min = float(self.trading_config.MIN_LEVERAGE_PER_TRADE)
-            lev_max = float(self.trading_config.MAX_LEVERAGE_PER_TRADE)
+            # A alavancagem NUNCA pode passar do teto sob o qual o agente treinou.
+            #
+            # A versao anterior derivava a alavancagem apenas da confianca do
+            # regime e descartava a acao de alavancagem que o proprio agente
+            # emite. Como tp_prior_conf tem media 0.878 neste historico, a
+            # formula entregava 8x na media e 15x no limite, enquanto o
+            # action_space do treino limita a 3x (_leverage_cap_hpo). O agente
+            # aprendia a gerir posicao a 3x e ia operar a 8x: a mesma sequencia
+            # de trades que ele viu no treino levaria a conta a ruina.
+            #
+            # Agora a alavancagem sai da acao do agente, e a confianca de regime
+            # so pode REDUZI-LA, nunca aumenta-la.
+            training_cap = float(getattr(self.config, 'TRAINING_LEVERAGE_CAP', 3.0))
+            lev_max = min(float(self.trading_config.MAX_LEVERAGE_PER_TRADE), training_cap)
+            agent_leverage = float(np.clip(desired_leverage_raw, lev_min, lev_max))
+
             activation_threshold = 0.60
             prior_conf_f = float(prior_conf) if prior_conf is not None else 0.5
             if prior_conf_f <= activation_threshold:
-                calculated_leverage = lev_min
+                confidence_ceiling = lev_min
             else:
                 factor = (prior_conf_f - activation_threshold) / (1.0 - activation_threshold)
-                calculated_leverage = lev_min + (lev_max - lev_min) * (factor ** 2)
-            gated_leverage = float(round(calculated_leverage))
+                confidence_ceiling = lev_min + (lev_max - lev_min) * (factor ** 2)
+            gated_leverage = float(round(min(agent_leverage, confidence_ceiling)))
+            gated_leverage = float(np.clip(gated_leverage, lev_min, lev_max))
             # Se há incerteza alta, reduz para o mínimo
             if uncertainty is not None:
                 try:
@@ -5845,12 +5861,19 @@ class TrendSpecialist:
                 except Exception:
                     pass
             final_action = Action.HOLD
-            # Threshold dinamico por regime: permite surfar em tendencias claras
-            action_threshold = 0.10
+            # Limiar de conviccao ancorado no valor usado no TREINO.
+            #
+            # Producao usava 0.10 enquanto o ambiente de treino resolve para
+            # cerca de 0.064, de modo que o bot exigia mais conviccao do que a
+            # politica aprendeu a produzir e ficava em HOLD em situacoes nas
+            # quais teria operado durante o treino. A modulacao por regime
+            # continua, mas agora em torno do valor correto.
+            base_threshold = float(getattr(self.config, 'INFERENCE_ACTION_THRESHOLD', 0.064))
+            action_threshold = base_threshold
             if regime_up > 0.4 or regime_down > 0.4 or abs(prior_dir) > 0.3:
-                action_threshold = 0.05  # Mercado em tendencia: permite ao especialista surfar
+                action_threshold = base_threshold * 0.75  # tendencia clara: deixa surfar
             elif regime_side > 0.5:
-                action_threshold = 0.15
+                action_threshold = base_threshold * 1.5   # lateral: exige mais conviccao
             explanation = {"specialist": "TrendSpecialist"}
             
             # [FIX] Initialize all variables BEFORE conditional logic to avoid UnboundLocalError

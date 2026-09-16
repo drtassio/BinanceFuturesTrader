@@ -194,3 +194,24 @@ def test_available_edge_is_directional(frame):
     env.specialist_name = "bull_specialist"
     env.current_row = _Row({"cz_ema_dist_50": 0.1, "cz_efficiency_96": 0.02})
     assert _available_edge(env, {}) < 0.05
+
+
+def test_training_leverage_cap_matches_the_environment(frame):
+    """Production must not be allowed to exceed the leverage used in training.
+
+    Live leverage used to be derived from regime confidence alone, ignoring the
+    agent's own leverage action. With tp_prior_conf averaging 0.878 on this
+    history the formula returned 8x, and 15x at full confidence, while the
+    training action space caps at 3x. The same sequence of trades the agent
+    learned on would have been executed with nearly three times the risk.
+    """
+    from config.settings import AIConfig, TradingConfig
+
+    env = _environment(frame)
+    declared = float(getattr(AIConfig(), "TRAINING_LEVERAGE_CAP", 3.0))
+    actual = float(env.action_space.high[2])
+    assert actual == pytest.approx(declared), (
+        "the environment trains up to %.1fx but TRAINING_LEVERAGE_CAP declares "
+        "%.1fx; production reads the declared value" % (actual, declared)
+    )
+    assert declared <= float(TradingConfig().MAX_LEVERAGE_PER_TRADE)
