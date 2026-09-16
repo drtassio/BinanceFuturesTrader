@@ -5343,8 +5343,15 @@ class TrendSpecialist:
             # Exporta para uso em produção
             scaler = scaler_pipeline # Para manter compatibilidade com as linhas de dump abaixo
             std_scaler_main = scaler_pipeline # Para manter compatibilidade com as linhas de dump abaixo (embora repetitivo)
-            # Persiste o contrato de features e o scaler para uso consistente em produÃ§Ã£o/inferÃªncia
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            # Persiste o contrato de features e o scaler JUNTO DO MODELO.
+            #
+            # Antes o scaler ia sempre para os.getcwd()/models_ai enquanto o .zip
+            # ia para config.MODEL_DIR. Num treino isolado (nuvem, ou uma pasta de
+            # execucao local) isso deixava models_ai com o scaler novo e o modelo
+            # antigo: producao montaria a observacao com colunas de um treino e a
+            # entregaria a uma politica de outro. Em producao MODEL_DIR ja e
+            # models_ai, entao nada muda para o bot.
+            models_dir = str(getattr(self.config, 'MODEL_DIR', None) or os.path.join(os.getcwd(), "models_ai"))
             os.makedirs(models_dir, exist_ok=True)
             scaler_path = os.path.join(models_dir, f"{self.specialist_name}_scaler.joblib")
             std_scaler_path = scaler_path  # Usa o mesmo path, pois estão no mesmo ColumnTransformer
@@ -6058,8 +6065,11 @@ class TrendSpecialist:
     def load_model(self):
         self._initialize_model()
         # [SCIENTIFIC FIX] Carrega o contrato de features para garantir consistência com o scaler
+        # Artefatos lidos do mesmo diretorio do modelo, pelo mesmo motivo do
+        # salvamento: scaler e politica precisam vir do mesmo treino.
+        artifacts_dir = os.path.dirname(os.path.abspath(self.model_path))
         try:
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            models_dir = artifacts_dir
             metadata_path = os.path.join(models_dir, "training_metadata.json")
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r', encoding='utf-8') as f:
@@ -6073,7 +6083,7 @@ class TrendSpecialist:
         # [SCIENTIFIC FIX] Tenta carregar o scaler correspondente
         try:
             import joblib
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            models_dir = artifacts_dir
             scaler_filename = f"{self.specialist_name}_scaler.joblib"
             scaler_path = os.path.join(models_dir, scaler_filename)
             
