@@ -194,6 +194,32 @@ class FeatureEngineeringPipeline:
         featured_df_combined.dropna(subset=required_ohlcv, inplace=True)
         featured_df_combined = featured_df_combined.fillna(0.0)
 
+        # [CAUSALIDADE] Mesmo tratamento usado para construir o dataset de treino.
+        #
+        # Sem isto o merge_asof acima expoe um candle 1h/4h a partir da sua
+        # ABERTURA, quando ele so existe ao FECHAR: o bot leria aqui o fechamento
+        # de um candio 4h ate 3h45 antes de ele acontecer. Isso nao apenas vaza o
+        # futuro no backtest como descasa treino de producao, porque ao vivo esse
+        # candle esta em andamento e o valor e outro.
+        #
+        # As features cz_* (estrutura de tendencia e fluxo do tape) tambem nascem
+        # aqui, no mesmo codigo do treino, para que o contrato de observacao do
+        # especialista seja reproduzivel em tempo real.
+        try:
+            from feature_engineering.causal_features import build_causal_features
+            featured_df_combined, _causal_meta = build_causal_features(featured_df_combined)
+            featured_df_combined = featured_df_combined.ffill().fillna(0.0)
+            logger.info(
+                "[CAUSAL] HTF deslocado para candles fechados; +%d features de tendencia, +%d de tape.",
+                len(_causal_meta.get('trend_features', [])),
+                len(_causal_meta.get('tape_features', [])),
+            )
+        except Exception as causal_error:
+            # Falhar aqui em silencio produziria observacoes diferentes das do
+            # treino, entao o erro precisa aparecer.
+            logger.error("[CAUSAL] Falha ao aplicar features causais: %s", causal_error, exc_info=True)
+            raise
+
         # A live tape snapshot belongs only to the latest bar. Applying it to
         # historical rows would leak future order-book state into features.
         if tape_metrics:

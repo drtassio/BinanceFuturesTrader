@@ -66,6 +66,47 @@ def _safe_int(env: Any, attr: str, default: int = 0) -> int:
         return default
 
 
+def _available_edge(env, info: Dict[str, Any]) -> float:
+    """Quanto de oportunidade direcional existe agora, em [0, 1].
+
+    Preferencia pela probabilidade do meta-modelo supervisionado (`ml_edge`),
+    que e a estimativa treinada de que uma entrada aqui termina lucrativa depois
+    do custo. Sem ela, cai para a forca de tendencia causal: o produto entre
+    distancia da media em unidades de volatilidade e a eficiencia do movimento
+    (deslocamento liquido dividido pelo caminho percorrido). O segundo termo e
+    o que separa tendencia de chop, e e justamente o que o especialista deve
+    aprender a esperar.
+
+    Um especialista direcional so enxerga oportunidade do seu proprio lado.
+    """
+    row = getattr(env, 'current_row', None)
+    name = str(getattr(env, 'specialist_name', '')).lower()
+
+    def _read(key: str, default: float = 0.0) -> float:
+        if row is None:
+            return default
+        try:
+            value = float(row.get(key, default))
+        except Exception:
+            return default
+        return value if np.isfinite(value) else default
+
+    edge = _read('ml_edge', float('nan'))
+    if not np.isfinite(edge):
+        # ml_edge em [-1, 1]; o fallback reproduz essa escala.
+        distance = np.tanh(_read('cz_ema_dist_50') / 3.0)
+        efficiency = _read('cz_efficiency_96')
+        edge = float(np.clip(distance * abs(efficiency) * 2.0, -1.0, 1.0))
+
+    if 'bull' in name:
+        directional = max(0.0, edge)
+    elif 'bear' in name:
+        directional = max(0.0, -edge)
+    else:
+        directional = abs(edge)
+    return float(np.clip(directional, 0.0, 1.0))
+
+
 def compute_scientific_reward(
     env,
     pnl_realized: float,
@@ -676,11 +717,21 @@ def compute_scientific_reward(
             # Ranger e genérico: ambas as direções têm oportunidade
             predictor_strength = abs(prior_dir)
 
-        # [RANGER GUARD] Flat base penalty reduzida para Ranger.
-        # Mean reversion exige PACIÊNCIA: esperar o squeeze + RSI extremo pode levar
-        # 50-200 candles flat.
-        if economic_step_return is None:
-            reward -= 0.003 if _is_ranger else 0.01  # flat base penalty por estar flat
+        # ── CUSTO DE OPORTUNIDADE (a correcao central do policy collapse) ────
+        #
+        # A versao anterior estava morta: a condicao era `economic_step_return is
+        # None`, mas o ambiente SEMPRE preenche esse campo. Nenhuma penalidade de
+        # ficar parado jamais disparou, enquanto dois bonus de ficar parado
+        # disparavam todo passo. Ficar flat virou a politica otima.
+        #
+        # A penalidade agora e proporcional a OPORTUNIDADE disponivel, nao
+        # constante. Um dreno constante ensinaria o agente a operar mesmo sem
+        # sinal, so para evita-lo — trocando um colapso por outro. Proporcional
+        # ao edge, o agente aprende exatamente o comportamento pedido: parado no
+        # chop, participando quando a tendencia se forma.
+        opportunity = _available_edge(env, info)
+        if opportunity > 0.0:
+            reward -= (0.05 if _is_ranger else 0.12) * float(np.tanh(opportunity * 2.5))
 
         if not _is_ranger:
             # Trend: penaliza flat quando sinal forte existe
@@ -727,8 +778,15 @@ def compute_scientific_reward(
     # Formula: net_return = gross_return - 2×TAKER_FEE×leverage
     # Aplicar -0.8 adicional causaria dupla contagem e tornaria todos os Q-values negativos,
     # impedindo convergência (actor_loss diverge para 100+ porque Q(s,a) < 0 sempre).
+    # As taxas de entrada e saida JA sao debitadas do patrimonio no ambiente
+    # (entry_fee e exit_fee), portanto ja estao dentro do reward economico.
+    # O -0.8 anterior cobrava o custo uma segunda vez, e a ~8x a magnitude real:
+    # 0.8 de reward equivale a 0.8% de movimento, contra 0.1% de custo efetivo
+    # do round-trip. Sozinho ele tornava negativo qualquer trade menor que 1%.
+    #
+    # Fica apenas um desincentivo residual a girar sem motivo, na escala certa.
     if _safe_int(env, 'steps_in_position', -1) == 0 and env.position != 0 and not _is_ranger:
-        reward -= 0.8
+        reward -= 0.05
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMPONENTE 12: CORRECT HOLD BONUS (Recompensa por Prudência)
@@ -736,17 +794,16 @@ def compute_scientific_reward(
     # Premia o agente por estar FLAT quando o regime do especialista está em
     # desacordo com a movimentação imediata do preço (evitando perdas).
     # Ex: Bull specialist está FLAT enquanto o preço cai -> bônus por prudência.
-    if env.position == 0 and not trade_closed_this_step and prev_price:
-        price_change_pct = (current_price - prev_price) / (prev_price + 1e-9)
-        # Se Bull e preço cai, HOLD é correto
-        if 'bull' in _specialist_name and price_change_pct < -0.0005:
-            # Bônus proporcional à queda evitada, saturado em 0.10
-            patience_bonus = 0.10 * np.tanh(abs(price_change_pct) / (atr_pct + 1e-9))
-            reward += float(patience_bonus)
-        # Se Bear e preço sobe, HOLD é correto
-        elif 'bear' in _specialist_name and price_change_pct > 0.0005:
-            patience_bonus = 0.10 * np.tanh(abs(price_change_pct) / (atr_pct + 1e-9))
-            reward += float(patience_bonus)
+    # [REMOVIDO] "Correct hold bonus": ate +0.10 por passo para o Bull estar flat
+    # enquanto o preco caia (e o espelho para o Bear).
+    #
+    # Eram duas falhas somadas. Primeira, dupla contagem: nao perder ja vale zero
+    # no reward economico, enquanto estar comprado na queda ja e negativo — a
+    # diferenca entre os dois JA e o premio por estar de fora. Segunda, o bonus
+    # disparava em cerca de metade das barras, somando ~+0.03 por passo a um
+    # agente parado, o que junto do bonus de voto tornava o HOLD imbativel.
+    #
+    # O premio por prudencia agora vem de onde deve vir: do patrimonio.
 
     # COMPONENTE 13: QUANTUM CHAOS GUARD (Uncertainty Penalty)
     # 🧪 Baseado em Shannon (Entropia) e Mandelbrot (Hurst)

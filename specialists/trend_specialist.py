@@ -1031,7 +1031,13 @@ class TrendFollowingEnv(gym.Env):
         Alvo: ~50-60 features | obs space ~65-73 com estado do agente.
         """
         # 1. Features sem sufixo de timeframe: latents + meta — SEMPRE incluir
-        _ALWAYS_PREFIXES = ('hidden_feature',)
+        #
+        # 'cz_' sao as features causais de estrutura de tendencia e de fluxo do
+        # tape (feature_engineering/causal_features.py), e 'ml_' as saidas do
+        # meta-modelo supervisionado. Ambas ja nascem estacionarias e em escala
+        # comparavel entre regimes, e sao produzidas pelo MESMO codigo no treino
+        # e ao vivo — por isso entram sempre, sem passar pelo filtro de timeframe.
+        _ALWAYS_PREFIXES = ('hidden_feature', 'cz_', 'ml_')
         _ALWAYS_CONTAINS = ('sdae_recon', 'regime_conf', 'tp_prior')
 
         # 2. Timeframes a EXCLUIR das features técnicas
@@ -1494,6 +1500,11 @@ class TrendFollowingEnv(gym.Env):
         _safe_step = min(_raw_step, len(self.df) - 1)
         row_vals = self._rnp_values[_safe_step]
         current_row = _TrendNpRow(row_vals, self._col_idx_map)
+        # A funcao de recompensa le a linha atual para medir a oportunidade
+        # disponivel. Antes ela chamava getattr(env, 'current_row') sem que nada
+        # jamais atribuisse o atributo, de modo que todo o ramo do Ranger que
+        # dependia dele estava morto.
+        self.current_row = current_row
         if isinstance(getattr(self, "_gate_stats", None), Counter):
             self._gate_stats["total_steps"] += 1
         current_price = current_row.get('close', 0.0)
@@ -1737,11 +1748,19 @@ class TrendFollowingEnv(gym.Env):
         # Ela criava conflito com o entry penalty e dominava o sinal científico.
         # Mantemos apenas o bônus positivo abaixo para incentivar o comportamento core.
             
-        # Se voto está bem calibrado → Bonus (só quando flat: incentiva entradas alinhadas,
-        # não fechamentos de trades — evita reward positivo em trades negativos fechados por Agent Decision)
+        # [REMOVIDO] Bonus de +0.2 por voto "calibrado" enquanto FLAT.
+        #
+        # Com as colunas tp_* ausentes do dataset, prior_conf_dyn e sempre 0.5,
+        # de modo que a condicao virava |voto| entre 0.2 e 0.8 com posicao zero:
+        # +0.2 por passo, para sempre, por nao operar. Num episodio de 3000 passos
+        # isso somava +600 sem abrir um unico trade, enquanto um trade de 2%
+        # rende +2.0 de reward economico e custa -0.8 de entrada.
+        #
+        # Ficar parado era a politica OTIMA desta recompensa. Era essa, e nao um
+        # colapso do SAC, a causa de a politica deterministica ficar 100% em HOLD
+        # no holdout enquanto a exploracao estocastica ainda negociava: o ruido
+        # cruzava o action_threshold, a media aprendida nunca.
         vote_confidence_alignment = 1.0 - abs(vote_magnitude - prior_conf_dyn)
-        if vote_confidence_alignment > 0.7 and self.position == 0:
-            reward += 0.2
 
         # BUG N4 FIX: Removido penalidade estrutural dupla ('directional_misalignment')
         # O método 'compute_scientific_reward' já aplica a punição via _regime_mismatch,

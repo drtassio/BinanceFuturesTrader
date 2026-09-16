@@ -1,17 +1,21 @@
-numpy
-pandas
+# Dependencias do treino remoto (Colab / Kaggle / GPU local).
+#
+# scikit-learn fica preso na versao usada em producao: os scalers sao
+# serializados com joblib e uma versao diferente pode falhar ao carregar, ou
+# pior, carregar com semantica alterada e mudar silenciosamente a observacao.
+numpy<2.0
+pandas>=2.0,<3.0
 pyarrow
 scipy
-scikit-learn==1.6.1
+scikit-learn==1.3.2
 joblib
 python-dotenv
 torch
-stable-baselines3
+stable-baselines3>=2.3
 gymnasium
 optuna
 statsmodels
 hmmlearn
 ta
-shap
 tensorboard
 binance-futures-connector
