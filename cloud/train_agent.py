@@ -59,6 +59,14 @@ def main() -> None:
     input_dim = len(train_df.select_dtypes(include="number").columns)
     agent = agent_cls(config=config, trading_config=trading_config, input_dim=input_dim)
 
+    # Cloud runs must start from a model whose action space was built from the
+    # current environment. Reusing old local checkpoints can silently fail when
+    # action bounds changed between revisions. The trained artifact is still
+    # written to the requested output/model directory afterward.
+    model_path = Path(config.MODEL_DIR) / f"{agent.specialist_name}_sac.zip"
+    if model_path.exists() and not args.resume:
+        model_path.unlink()
+
     result = agent.train_model(train_df, total_timesteps=args.timesteps)
     report = {
         "agent": args.agent,
