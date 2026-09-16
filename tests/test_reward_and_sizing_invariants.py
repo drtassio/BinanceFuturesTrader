@@ -82,6 +82,16 @@ def test_standing_flat_is_not_rewarded(frame):
     assert total <= 0.0, "standing aside earned %+.1f reward" % total
 
 
+@pytest.mark.parametrize('vote', [0.0, 0.9, -0.9])
+def test_economic_reward_telescopes_to_net_equity_including_final_step(frame, vote):
+    env = _environment(frame)
+    total, _, _ = _drive(env, vote=vote, steps=len(frame))
+    expected = env.config.ECONOMIC_REWARD_SCALE * np.log(env.net_worth / env.initial_balance)
+    assert total == pytest.approx(expected, abs=2e-4)
+    summary = env.consume_episode_summaries()[-1]
+    assert summary['episode_reward'] == pytest.approx(expected, abs=2e-4)
+
+
 def test_reward_prefers_trading_when_trading_makes_money(frame):
     """The objective must agree with equity, in both directions.
 

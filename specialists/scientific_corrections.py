@@ -160,19 +160,15 @@ def compute_scientific_reward(
         # Em modo economico, o agente otimiza exatamente a variacao liquida de
         # patrimonio. Taxas, funding, slippage e PnL ja estao refletidos nela.
         #
-        # O unico termo somado e o custo de oportunidade de ficar de fora, sem o
-        # qual uma politica parada pontua zero para sempre e o zero vence
-        # qualquer estrategia com variancia. Ele e proporcional a oportunidade
-        # disponivel, entao ficar parado no chop continua saindo de graca.
+        # Waiting is a valid decision. An opportunity penalty made a measured
+        # +3.49% net reference score -30.26 and encouraged unnecessary trades.
+        # Log equity increments telescope to final log wealth, including costs.
         if bool(getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_ONLY', True)):
-            economic_only = economic_reward
-            if env.position == 0 and not trade_closed_this_step:
-                opportunity = _available_edge(env, info)
-                if opportunity > 0.0:
-                    economic_only -= (0.005 if _is_ranger else 0.01) * float(
-                        np.tanh(opportunity * 2.5)
-                    )
-            return float(np.clip(economic_only, -20.0, 20.0))
+            if economic_step_return <= -1.0:
+                raise ValueError('Non-positive equity in economic reward')
+            return float(np.log1p(economic_step_return)) * float(
+                getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_SCALE', 100.0)
+            )
         reward += economic_reward
 
     # ─────────────────────────────────────────────────────────────────────────

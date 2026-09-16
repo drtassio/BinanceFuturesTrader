@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch.nn as nn
 
 from config.settings import AIConfig
@@ -91,6 +92,7 @@ def test_funding_stub_cannot_bias_ensemble_to_ranger():
 
 def test_mark_to_market_reconciles_with_realized_pnl():
     env = object.__new__(TrendFollowingEnv)
+    env.trading_config = SimpleNamespace(TAKER_FEE=0.0004)
     env.initial_balance = 10_000.0
     env.net_worth = 10_000.0
     env.episode_peak_net_worth = 10_000.0
@@ -106,7 +108,7 @@ def test_mark_to_market_reconciles_with_realized_pnl():
 
     env._apply_realized_pnl(50.0)
 
-    assert np.isclose(env.net_worth, 10_050.0)
+    assert env.net_worth == pytest.approx(10_050.0 - 1_000.0 * 0.0004)
 
 
 def test_reward_tracks_net_equity_log_return():
@@ -130,7 +132,8 @@ def test_reward_tracks_net_equity_log_return():
 
     assert gain > 0.0
     assert loss < 0.0
-    assert np.isclose(gain, -loss)
+    assert gain == pytest.approx(100.0 * np.log1p(0.001))
+    assert loss == pytest.approx(100.0 * np.log1p(-0.001))
 
 
 def test_funding_is_charged_only_at_settlement_boundary():
@@ -199,7 +202,7 @@ def test_production_specialist_blocks_wrong_way_signal(monkeypatch):
         symbol='BTCUSDT', action=Action.SELL, confidence=0.9,
         position_size_pct=0.5,
     )
-    monkeypatch.setattr(TrendSpecialist, 'decide_action', lambda *args: sell)
+    monkeypatch.setattr(TrendSpecialist, 'decide_action', lambda *args, **kwargs: sell)
     specialist = object.__new__(BaseRegimeSpecialist)
     specialist.regime_type = 'bull'
     specialist.name = 'BullSpecialist'

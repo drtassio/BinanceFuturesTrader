@@ -184,7 +184,7 @@ def main() -> None:
     train_df, val_df, holdout_df = split_chronological(df)
 
     config = AIConfig()
-    # Net equity, plus the opportunity cost of standing aside, and nothing else.
+    # Net log equity, including all costs; waiting itself is never penalized.
     #
     # The hand-tuned shaping layer was measured against scripted policies on the
     # strongest uptrend and the worst drawdown in the data. It preferred doing

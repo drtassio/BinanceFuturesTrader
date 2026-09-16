@@ -2997,7 +2997,8 @@ class TrendFollowingEnv(gym.Env):
         self.current_step += 1
         # Limite de duraÃƒÂ§ÃƒÂ£o do episÃƒÂ³dio: roda atÃƒÂ© consumir todo o dataset
         quota_exhausted = getattr(self, 'disable_new_entries', False) and getattr(self, 'trades_remaining', 0) == 0 and self.position == 0
-        done = self.current_step >= self.max_steps or quota_exhausted
+        ruin_reached = self.net_worth / (self.initial_balance + 1e-9) < getattr(self, 'ruin_threshold', 0.50)
+        done = self.current_step >= self.max_steps or quota_exhausted or ruin_reached
         
         # [BUG 4 FIX] Force close at episode end
         # Se um trade foi carregado atÃ© o fim do eval set (surfando a trend sem time stop),
@@ -3046,7 +3047,6 @@ class TrendFollowingEnv(gym.Env):
             self._psar_ep = None
         if done:
             logger.debug("[FASE 1 DEBUG] Trades no episodio: %s | cooldown_base=%s", self._trades_in_episode, getattr(self, 'post_trade_cooldown_base', None))
-            self._store_episode_summary()
             self._trades_in_episode = 0
             self.trades_remaining = self.max_trades_per_episode if self.max_trades_per_episode is not None else float('inf')
             self.disable_new_entries = False
@@ -3175,7 +3175,6 @@ class TrendFollowingEnv(gym.Env):
                 f"Final Reward: {reward:.4f}"
             )
         
-        self._episode_reward_accumulator += float(reward)
         self._prev_net_worth = self.net_worth
         
         # 🔬 SISTEMA 3 CAMADAS: Ruin Buffer Penalty
@@ -3186,7 +3185,8 @@ class TrendFollowingEnv(gym.Env):
         ruin_buffer_threshold = getattr(self, 'ruin_buffer_threshold', 0.80)
         ruin_threshold = getattr(self, 'ruin_threshold', 0.50)
         
-        if capital_ratio < ruin_buffer_threshold:
+        economic_only = bool(getattr(self.config, 'ECONOMIC_REWARD_ONLY', True))
+        if capital_ratio < ruin_buffer_threshold and not economic_only:
             # Penalidade progressiva: até -10 quando chega em ruin_threshold
             ruin_penalty = -10.0 * (ruin_buffer_threshold - capital_ratio) / (ruin_buffer_threshold - ruin_threshold + 1e-9)
             reward += ruin_penalty  # Adicionado AO reward bruto, antes da normalização
@@ -3198,15 +3198,20 @@ class TrendFollowingEnv(gym.Env):
         #   1ª camada (Welford): instável nos primeiros ~200 steps (running_std ≈ 1.0 artificial)
         #   2ª camada (VecNormalize): recebe sinal já distorcido e aplica outra transformação
         # Resultado: SAC recebia gradientes completamente descorrelacionados do PnL real.
-        reward_normalized = float(np.clip(reward, -self._reward_norm_clip, self._reward_norm_clip))
+        reward_normalized = (float(reward) if economic_only else
+                             float(np.clip(reward, -self._reward_norm_clip, self._reward_norm_clip)))
         
         # 🔬 SISTEMA 3 CAMADAS: Episódio Terminal por Ruína
         if capital_ratio < ruin_threshold:
             done = True
-            reward_normalized = -self._reward_norm_clip  # Penalidade máxima
+            if not economic_only:
+                reward_normalized = -self._reward_norm_clip
             info['exit_reason'] = 'Ruin (Capital < 50%)'
             logger.warning("[RUIN TERMINAL] Episódio encerrado por ruína. Capital ratio: %.2f", capital_ratio)
         
+        self._episode_reward_accumulator += float(reward_normalized)
+        if done:
+            self._store_episode_summary()
         return self._get_observation(), np.float32(reward_normalized), done, False, info
 
 class OnlineFeatureCalculator:
