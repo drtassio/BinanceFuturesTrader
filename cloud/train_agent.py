@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT))
 
-from config.settings import AIConfig
+from config.settings import AIConfig, TradingConfig
 from specialists.bull_specialist import BullSpecialist
 from specialists.bear_specialist import BearSpecialist
 from specialists.ranger_specialist import RangerSpecialist
@@ -54,9 +54,10 @@ def main() -> None:
     train_df, eval_df = df.iloc[:cutoff].copy(), df.iloc[cutoff:].copy()
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True
+    trading_config = TradingConfig()
     agent_cls = AGENTS[args.agent]
     input_dim = len(train_df.select_dtypes(include="number").columns)
-    agent = agent_cls(config=config, input_dim=input_dim)
+    agent = agent_cls(config=config, trading_config=trading_config, input_dim=input_dim)
 
     result = agent.train_model(train_df, total_timesteps=args.timesteps)
     report = {
