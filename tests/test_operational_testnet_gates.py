@@ -184,6 +184,8 @@ def _controller_for_oos_gate(tmp_path: Path, metrics):
         for name in ('bull', 'bear', 'ranger')
     }
     for name in ('bull', 'bear', 'ranger'):
+        (tmp_path / f'{name}_specialist_scaler.joblib').write_bytes(b'scaler')
+        (tmp_path / f'{name}_feature_contract.json').write_text('{}')
         (tmp_path / f'{name}_specialist_sac.zip').write_bytes(
             (name * 100).encode('ascii')
         )

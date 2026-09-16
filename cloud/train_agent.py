@@ -83,12 +83,19 @@ def _episode_environment(agent, frame: pd.DataFrame, agent_name: str):
     from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
     from specialists.bull_specialist import BullTradingEnv
     from specialists.bear_specialist import BearTradingEnv
-    from specialists.trend_specialist import TrendFollowingEnv
+    from specialists.ranger_specialist import RangerTradingEnv
 
-    env_class = {"bull": BullTradingEnv, "bear": BearTradingEnv}.get(agent_name, TrendFollowingEnv)
+    env_class = {
+        "bull": BullTradingEnv,
+        "bear": BearTradingEnv,
+        "ranger": RangerTradingEnv,
+    }[agent_name]
     raw = agent._make_trend_env(
         frame, mode="training", env_class=env_class, feature_columns=agent.feature_columns
     )
+    # Final training and its checkpoint evaluation apply these runtime rules.
+    # Omitting them here changes entry thresholds, cooldown and time stops.
+    raw.set_phase3_runtime_tweaks()
     raw.max_steps = len(frame) - 1
     return VecNormalize(
         VecFrameStack(DummyVecEnv([lambda: raw]), n_stack=4),

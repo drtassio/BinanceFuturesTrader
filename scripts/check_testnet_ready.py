@@ -23,6 +23,7 @@ os.environ.setdefault("TREND_SKIP_OPTUNA", "1")
 
 from config.settings import AIConfig, TradingConfig, active_config  # noqa: E402
 from trading.binance_connector import BinanceConnector  # noqa: E402
+from trading.ai_controller import AIController  # noqa: E402
 
 OK, FAIL, WARN = "[ OK ]", "[FALHA]", "[AVISO]"
 results: list = []
@@ -111,12 +112,15 @@ async def main() -> int:
     if approval.exists():
         try:
             report = json.loads(approval.read_text(encoding="utf-8"))
-            record(bool(report.get("all_passed")), "aprovacao OOS registrada",
+            controller = object.__new__(AIController)
+            controller.config_ai = ai_config
+            controller.policy_validation_path = str(approval)
+            record(controller._load_policy_oos_approval(), "aprovacao OOS registrada",
                    "gerada em %s" % str(report.get("generated_at"))[:19])
         except ValueError:
             record(False, "aprovacao OOS registrada", "relatorio ilegivel")
     else:
-        record(None, "aprovacao OOS registrada",
+        record(False, "aprovacao OOS registrada",
                "rode scripts/approve_policies_oos.py apos treinar")
 
     dataset = ROOT / "data" / "featured_data_causal.parquet"

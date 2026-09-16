@@ -582,6 +582,20 @@ class TrendFollowingEnv(gym.Env):
             
         return float(notional * funding_rate * position_sign * boundary_count)
 
+    def _funding_rate_from_row(self, row):
+        """Canonical causal data first; retain compatibility with old datasets.
+
+        None means no historical funding column. A genuine zero rate must not
+        trigger the synthetic financing fallback.
+        """
+        for column in ('funding_rate', 'funding_rate_15m'):
+            if column in self.df.columns:
+                value = float(row[column])
+                if not np.isfinite(value):
+                    raise ValueError(f"Non-finite historical funding: {column}")
+                return value
+        return None
+
     @staticmethod
     def _resting_stop_fill(position, stop, candle_open, candle_high, candle_low):
         """Fill a stop placed before this candle; adverse gaps fill at open."""
@@ -1023,6 +1037,9 @@ class TrendFollowingEnv(gym.Env):
             mark_to_market = 0.0
         self.net_worth -= mark_to_market
         self.net_worth += float(pnl_realized)
+        # Every liquidation pays an exit fee: agent, ordinary stop,
+        # catastrophe, time stop and episode end all share this method.
+        self.net_worth -= float(self.initial_notional_value) * self.trading_config.TAKER_FEE
         # [FIX] Floor de liquidação ao fechar posição também
         _margin_minimum = self.initial_balance * 0.001
         if self.net_worth < _margin_minimum:
@@ -1494,6 +1511,7 @@ class TrendFollowingEnv(gym.Env):
         self._log_episode_matrix()
         summary = self._build_financial_snapshot(list(self._current_episode_returns), self._current_episode_durations)
         summary['episode_reward'] = float(self._episode_reward_accumulator)
+        summary['exit_reason_counts'] = self.get_exit_reason_counts()
         logger.debug("[FASE 1 DEBUG] Episode summary -> trades=%s avg_duration=%.2f", summary.get('num_trades'), summary.get('avg_trade_duration', 0.0))
         self._last_episode_summary = summary
         self._episode_summaries.append(summary)
@@ -1709,10 +1727,11 @@ class TrendFollowingEnv(gym.Env):
             prev_timestamp = self.df.index[_ts_prev]
             current_timestamp = self.df.index[_ts_curr]
             delta_hours = max(1e-6, (current_timestamp - prev_timestamp).total_seconds() / 3600.0)
-            if 'funding_rate_15m' in self.df.columns:
+            historical_rate = self._funding_rate_from_row(current_row)
+            if historical_rate is not None:
                 funding_cost = self._historical_funding_cost(
                     self.initial_notional_value, float(np.sign(self.position)),
-                    float(current_row.get('funding_rate_15m', 0.0)),
+                    historical_rate,
                     prev_timestamp, current_timestamp,
                 )
             else:
@@ -2608,9 +2627,6 @@ class TrendFollowingEnv(gym.Env):
                 pnl_realized = self.initial_notional_value * ((close_price - self.entry_price) / (self.entry_price + 1e-9)) * np.sign(self.position)
                 self._apply_realized_pnl(pnl_realized)
                 self._prev_unrealized_return = 0.0
-                # Fee de sa?da
-                exit_fee = (self.initial_notional_value or 0) * self.trading_config.TAKER_FEE
-                self.net_worth -= exit_fee
                 exit_reason = 'Agent Decision'
                 if closing_due_to_prior:
                     exit_reason = 'Agent Decision - prior pressure'
@@ -2990,7 +3006,12 @@ class TrendFollowingEnv(gym.Env):
         if done and self.position != 0:
             close_price = self._simulate_slippage(current_price, atr, OrderSide.SELL if self.position > 0 else OrderSide.BUY)
             pnl_realized = self.initial_notional_value * ((close_price - self.entry_price) / (self.entry_price + 1e-9)) * np.sign(self.position)
-            trade_return_pct = (close_price - self.entry_price) / (self.entry_price + 1e-9) * np.sign(self.position)
+            # Forced liquidation pays the same taker fee as an ordinary exit.
+            # Its reported return must also use the ordinary margin basis,
+            # rather than mixing unleveraged returns into leveraged statistics.
+            leverage_used = max(abs(float(self.current_leverage)), 1e-9)
+            margin_basis = max(self.initial_notional_value / leverage_used, 1e-6)
+            trade_return_pct = pnl_realized / margin_basis
             
             self._apply_realized_pnl(pnl_realized)
             info['exit_reason'] = 'Episode End'
@@ -5832,14 +5853,66 @@ class TrendSpecialist:
             self.is_trained = False
             raise
 
-    def decide_action(self, observation: np.ndarray, df_row: pd.Series) -> Optional[Signal]:
+    def prepare_live_observation(self, frame: pd.DataFrame, agent_state: np.ndarray) -> np.ndarray:
+        """Build exactly the training observation and retain real candle frames.
+
+        Repeated polling of one candle replaces its frame, never advances the
+        stack. Startup and time gaps use the same zero history as VecFrameStack.
+        """
+        from collections import deque
+        from specialists.bull_specialist import BullTradingEnv
+        from specialists.bear_specialist import BearTradingEnv
+        from specialists.ranger_specialist import RangerTradingEnv
+
+        if self.feature_scaler is None or not self.feature_columns:
+            raise ValueError('Missing live scaler or feature contract')
+        missing = [c for c in self.feature_columns if c not in frame.columns]
+        if missing:
+            raise ValueError(f'Missing live features: {missing[:8]}')
+        name = self.specialist_name.lower()
+        env_class = (BullTradingEnv if 'bull' in name else
+                     BearTradingEnv if 'bear' in name else RangerTradingEnv)
+        raw = self._make_trend_env(frame.tail(100).copy(), mode='training',
+                                   env_class=env_class, feature_columns=self.feature_columns)
+        try:
+            raw.start_idx = 0
+            raw.current_step = len(raw.df) - 1
+            raw.position = float(agent_state[0])
+            raw.pnl_since_entry = float(agent_state[1])
+            raw.steps_in_position = float(agent_state[2]) * 100.0
+            current = raw._get_observation().astype(np.float32)
+        finally:
+            raw.close()
+        expected = tuple(self.model.observation_space.shape)
+        if expected != (len(current) * 4,):
+            raise ValueError(f'Live observation contract mismatch: {len(current)} x4 != {expected}')
+        timestamp = frame.index[-1]
+        previous = getattr(self, '_live_frame_timestamp', None)
+        history = getattr(self, '_live_frame_history', None)
+        interval = frame.index.to_series().diff().dropna().median()
+        reset = (history is None or previous is None or timestamp < previous or
+                 (timestamp > previous and pd.notna(interval) and timestamp - previous > interval))
+        if reset:
+            history = deque([np.zeros_like(current) for _ in range(3)], maxlen=4)
+        elif timestamp == previous:
+            history.pop()
+        history.append(current.copy())
+        self._live_frame_history = history
+        self._live_frame_timestamp = timestamp
+        observation = np.concatenate(list(history))
+        if not np.isfinite(observation).all():
+            raise ValueError('Non-finite live observation')
+        return observation
+
+    def decide_action(self, observation: np.ndarray, df_row: pd.Series,
+                      observation_is_normalized: bool = False) -> Optional[Signal]:
         if not self.is_trained or self.model is None:
             return None
         try:
             # Aplica o scaler APENAS nas market features (primeiras n_features_in_ dims).
             # O scaler foi treinado só nas features de mercado; agent_state/time/prior
             # são concatenados crus depois e NÃO devem ser escalados.
-            if self.feature_scaler is not None:
+            if self.feature_scaler is not None and not observation_is_normalized:
                 try:
                     market_dim = getattr(self.feature_scaler, 'n_features_in_', len(self.feature_columns) if self.feature_columns else 65)
                     obs_subset = observation[:market_dim].reshape(1, -1)

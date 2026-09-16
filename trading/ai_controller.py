@@ -86,6 +86,23 @@ class AIController:
                 hashes[name] = None
         return hashes
 
+    def _specialist_artifact_hashes(self):
+        """Approval binds the policy to its scaler and observation contract."""
+        import hashlib
+        from pathlib import Path
+
+        hashes = {}
+        directory = Path(str(self.config_ai.MODEL_DIR))
+        for name in self._OOS_SPECIALISTS:
+            for filename in (f'{name}_specialist_sac.zip',
+                             f'{name}_specialist_scaler.joblib',
+                             f'{name}_feature_contract.json'):
+                try:
+                    hashes[filename] = hashlib.sha256((directory / filename).read_bytes()).hexdigest()
+                except OSError:
+                    hashes[filename] = None
+        return hashes
+
     def _validate_specialists_oos(self, holdout_df):
         """Avalia cada especialista no holdout e grava o veredito assinado."""
         import json as _json
@@ -127,12 +144,16 @@ class AIController:
                 'metrics': metrics,
             }
 
+        artifact_hashes = self._specialist_artifact_hashes()
+        artifacts_present = all(artifact_hashes.values())
         report = {
             'generated_at': _dt.now(_tz.utc).isoformat(),
             'thresholds': thresholds,
             'specialists': results,
-            'all_passed': all(r['passed'] for r in results.values()),
+            'all_passed': artifacts_present and all(r['passed'] for r in results.values()),
+            'artifacts_present': artifacts_present,
             'model_hashes': self._specialist_model_hashes(),
+            'artifact_hashes': artifact_hashes,
         }
         try:
             path = _Path(self.policy_validation_path)
@@ -167,11 +188,18 @@ class AIController:
 
         recorded = report.get('model_hashes') or {}
         current = self._specialist_model_hashes()
-        for name, digest in recorded.items():
-            if current.get(name) != digest:
+        for name in self._OOS_SPECIALISTS:
+            digest = recorded.get(name)
+            if not digest or not current.get(name) or current.get(name) != digest:
                 logger.warning(
                     "[OOS] '%s' mudou desde a validacao: aprovacao invalidada.", name
                 )
+                return False
+        recorded_artifacts = report.get('artifact_hashes') or {}
+        current_artifacts = self._specialist_artifact_hashes()
+        for filename, digest in current_artifacts.items():
+            if not digest or recorded_artifacts.get(filename) != digest:
+                logger.warning('[OOS] Artefato ausente, alterado ou nao validado: %s', filename)
                 return False
         return True
 
@@ -2980,7 +3008,17 @@ class AIController:
                 current_shape = expert_observation.shape
                 logger.debug(f" [DEBUG SHAPE] Specialist: {expert_key} | Current: {current_shape} | Target: {target_shape}")
 
-                if target_shape and current_shape != target_shape:
+                _prepared_live = hasattr(active_specialist, 'prepare_live_observation')
+                if _prepared_live:
+                    try:
+                        expert_observation = active_specialist.prepare_live_observation(
+                            df_fully_enriched, agent_state
+                        )
+                    except Exception as exc:
+                        logger.error('[LIVE CONTRACT] %s blocked: %s', expert_key, exc)
+                        continue
+
+                if not _prepared_live and target_shape and current_shape != target_shape:
                     logger.info(f" [AI SHAPE FIX] Adaptando observao ({current_shape[0]} -> {target_shape[0]}) para {active_specialist.__class__.__name__}")
                     missing_dims = target_shape[0] - current_shape[0]
                     
@@ -3095,7 +3133,12 @@ class AIController:
                 # Gerar sinal para o especialista especfico
                 try:
                     specialist_display_name = active_specialist.__class__.__name__
-                    strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row)
+                    if _prepared_live:
+                        strategic_signal_ind = active_specialist.decide_action(
+                            expert_observation, latest_row, observation_is_normalized=True
+                        )
+                    else:
+                        strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row)
                     if strategic_signal_ind:
                         if strategic_signal_ind.explanation is not None:
                             strategic_signal_ind.explanation['specialist'] = specialist_display_name

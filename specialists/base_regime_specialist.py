@@ -538,11 +538,13 @@ class BaseRegimeSpecialist(TrendSpecialist):
             'avg_trade_duration': float(summary.get('avg_trade_duration', 0.0) or 0.0),
         }
 
-    def decide_action(self, observation: np.ndarray, df_row: pd.Series) -> Optional[Signal]:
+    def decide_action(self, observation: np.ndarray, df_row: pd.Series,
+                      observation_is_normalized: bool = False) -> Optional[Signal]:
         """
         [FIX PRODUÇÃO] Sobrescreve decide_action para aplicar filtros de direção específicos de cada regime.
         """
-        signal = super().decide_action(observation, df_row)
+        signal = super().decide_action(observation, df_row,
+                                      observation_is_normalized=observation_is_normalized)
         if signal is None:
             return None
 
