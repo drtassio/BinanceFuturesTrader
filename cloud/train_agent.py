@@ -87,6 +87,7 @@ def main() -> None:
     train_df, eval_df = df.iloc[:cutoff].copy(), df.iloc[cutoff:].copy()
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True
+    os.environ.setdefault("TREND_SKIP_OPTUNA", "1")
     # Isolate both models AND validation checkpoints; never silently resume a
     # checkpoint distributed in the repository during a fresh cloud run.
     run_name = args.agent if args.resume else f"{args.agent}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"

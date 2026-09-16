@@ -5101,7 +5101,13 @@ class TrendSpecialist:
                 logger.info(f"[FASE 2] Hiperparâmetros carregados de '{self.hyperparams_path}'. Pulando otimização.")
             
             # Só roda otimização se: modo granular OU forçado OU não tem hyperparams
-            should_run_phase2 = self.force_optuna_retrain or (not self._hyperparams_loaded_from_file and not os.path.exists(self.hyperparams_path))
+            skip_optuna = os.environ.get('TREND_SKIP_OPTUNA', '0').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+            should_run_phase2 = (not skip_optuna) and (
+                self.force_optuna_retrain or
+                (not self._hyperparams_loaded_from_file and not os.path.exists(self.hyperparams_path))
+            )
+            if skip_optuna:
+                logger.info("[FASE 2] Optuna desabilitado por TREND_SKIP_OPTUNA; usando hiperparâmetros estáveis.")
             if should_run_phase2:
                 setup_phase_logger("TrendSpecialist_Phase2_Hyperparams", logger.name)
                 logger.info("[FASE 2] Iniciando otimizaÃƒÂ§ÃƒÂ£o de hiperparÃƒÂ¢metros SAC...")
