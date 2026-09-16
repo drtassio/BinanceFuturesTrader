@@ -103,6 +103,15 @@ class ClippedSAC(BaseSAC):
     Suporta FP16 Mixed Precision para aceleração na GPU.
     """
 
+    # Dados da professora usados pelo regularizador de clonagem vivem so durante
+    # o treino. Sem esta exclusao, salvar o modelo embutiria ~120 MB de
+    # observacoes no .zip que o bot carrega.
+    _BC_RUNTIME_ATTRIBUTES = ("bc_observations", "bc_actions", "bc_sample_weights",
+                              "bc_weight", "actor_frozen")
+
+    def _excluded_save_params(self):
+        return list(super()._excluded_save_params()) + list(self._BC_RUNTIME_ATTRIBUTES)
+
     def __init__(self, *args, max_grad_norm: Optional[float] = 1.0, use_fp16: bool = False,
                  learning_monitor: Optional["LearningMonitor"] = None, **kwargs):
         self.max_grad_norm = None
@@ -207,8 +216,31 @@ class ClippedSAC(BaseSAC):
                 q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi), dim=1)
                 min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
                 actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+
+                # Regularizador de clonagem (estilo TD3+BC), desligado por padrao.
+                # Mantem a politica deterministica perto de uma professora
+                # lucrativa enquanto o critico ainda aprende; sem ele, os primeiros
+                # gradientes de um critico sem treino apagam o que a clonagem
+                # ensinou e a politica volta a oscilar em torno do limiar.
+                bc_observations = getattr(self, 'bc_observations', None)
+                bc_weight = float(getattr(self, 'bc_weight', 0.0) or 0.0)
+                if bc_observations is not None and bc_weight > 0.0:
+                    pick = torch.randint(0, bc_observations.shape[0], (batch_size,),
+                                         device=bc_observations.device)
+                    predicted = self.actor(bc_observations[pick], deterministic=True)
+                    sample_weight = self.bc_sample_weights[pick]
+                    per_sample = ((predicted - self.bc_actions[pick]) ** 2).mean(dim=1)
+                    bc_loss = (sample_weight * per_sample).sum() / sample_weight.sum()
+                    actor_loss = actor_loss + bc_weight * bc_loss
             actor_losses.append(actor_loss.detach())
-            
+
+            if getattr(self, 'actor_frozen', False):
+                # Aquecimento do critico: so os valores Q aprendem.
+                if gradient_step % self.target_update_interval == 0:
+                    polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+                    polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+                continue
+
             # Actor backward com scaler
             self.actor.optimizer.zero_grad(set_to_none=True)
             if use_amp:

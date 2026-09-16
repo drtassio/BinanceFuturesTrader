@@ -42,7 +42,8 @@ def sha256(path: Path) -> str:
 
 
 def latest_run(agent: str) -> Path:
-    runs = sorted((ROOT / "cloud" / "artifacts").glob("%s_2*" % agent))
+    # Inclui execucoes guiadas (<agente>_guided_*); a mais recente vence.
+    runs = sorted((ROOT / "cloud" / "artifacts").glob("%s_*" % agent), key=lambda p: p.stat().st_mtime)
     runs = [r for r in runs if (r / "models" / ("%s_specialist_sac.zip" % agent)).exists()]
     if not runs:
         raise SystemExit("nenhuma execucao de %s com modelo salvo em cloud/artifacts" % agent)
