@@ -152,7 +152,7 @@ class DataProvider:
             df['taker_buy_ratio'] = df['taker_buy_base_asset_volume'] / df['volume'].clip(lower=1e-12)
             delta_mean = delta.rolling(32, min_periods=8).mean()
             delta_std = delta.rolling(32, min_periods=8).std().replace(0, np.nan)
-            df['aggressor_delta_z'] = ((delta - delta_mean) / delta_std).fillna(0.0)
+            df['aggressor_delta_z_32'] = ((delta - delta_mean) / delta_std).fillna(0.0).clip(-8, 8).astype('float32')
             
             # 4. Keep close ONLY as reference for position sizing (NOT for training)
             df['close_reference'] = df['close']
@@ -165,7 +165,7 @@ class DataProvider:
                 'hl_range_pct', 'oc_move_pct', 
                 'hc_wick_upper', 'lc_wick_lower',
                 'realized_vol_20', 'realized_vol_100',
-                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z'
+                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z_32'
             ]
             
             # 6. Clean infinities and remaining NaNs
@@ -251,6 +251,9 @@ class DataProvider:
                         series = funding.sort_index()['fundingRate'].astype(float)
                         primary_df = primary_df.copy()
                         primary_df['funding_rate'] = series.reindex(primary_df.index, method='ffill').fillna(0.0)
+                        rates = primary_df['funding_rate']
+                        rate_std = rates.rolling(32, min_periods=4).std().replace(0.0, np.nan)
+                        primary_df['funding_rate_z_32'] = ((rates - rates.rolling(32, min_periods=4).mean()) / rate_std).fillna(0.0).clip(-8, 8).astype('float32')
                         raw_dfs_multi_tf[primary_tf] = primary_df
                 except Exception as exc:
                     logger.warning(f"[DATA PROVIDER] Funding unavailable; using neutral 0: {exc}")

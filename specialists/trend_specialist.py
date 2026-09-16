@@ -351,7 +351,7 @@ class TrendFollowingEnv(gym.Env):
                 logger.warning("[ENV ELITE] Coluna de tendencia EMA nao encontrada no dataset. Gating usara valor neutro.")
         self.mode = mode
         self.disable_time_stop = True  # Agente decide quando sair, sem limite de tempo fixo
-        self.disable_normal_sl = True  # 🔬 SISTEMA 3 CAMADAS: SL normal desativado, agente livre
+        self.disable_normal_sl = False  # Risk protection also applies during learning.
         self.profitability_predictor = profitability_predictor
         self.initial_balance = self.trading_config.INITIAL_CAPITAL
         self.specialist_name = specialist_name
@@ -581,6 +581,17 @@ class TrendFollowingEnv(gym.Env):
             return 0.0
             
         return float(notional * funding_rate * position_sign * boundary_count)
+
+    @staticmethod
+    def _resting_stop_fill(position, stop, candle_open, candle_high, candle_low):
+        """Fill a stop placed before this candle; adverse gaps fill at open."""
+        if stop is None or position == 0:
+            return None
+        if position > 0 and candle_low <= stop:
+            return min(float(stop), float(candle_open))
+        if position < 0 and candle_high >= stop:
+            return max(float(stop), float(candle_open))
+        return None
 
     def set_anti_scalping_config(self, config_params: Dict[str, Any]):
                 # FASE 1 desativada: nenhuma configuracao anti-scalping aplicada
@@ -1651,7 +1662,14 @@ class TrendFollowingEnv(gym.Env):
             prev_timestamp = self.df.index[_ts_prev]
             current_timestamp = self.df.index[_ts_curr]
             delta_hours = max(1e-6, (current_timestamp - prev_timestamp).total_seconds() / 3600.0)
-            funding_cost = self.initial_notional_value * self.trading_config.LEVERAGE_COST_PER_DAY_PCT * (delta_hours / 24.0)
+            if 'funding_rate_15m' in self.df.columns:
+                funding_cost = self._historical_funding_cost(
+                    self.initial_notional_value, float(np.sign(self.position)),
+                    float(current_row.get('funding_rate_15m', 0.0)),
+                    prev_timestamp, current_timestamp,
+                )
+            else:
+                funding_cost = self.initial_notional_value * self.trading_config.LEVERAGE_COST_PER_DAY_PCT * (delta_hours / 24.0)
             self.net_worth -= funding_cost
             # [SCIENTIFIC] Funding reward movido para scientific_corrections.py
         # --- LÃƒâ€œGICA DE DECISÃƒÆ'O "LUZ VERDE" ---
@@ -2284,9 +2302,29 @@ class TrendFollowingEnv(gym.Env):
         trade_was_closed = False
         closed_trade_duration = None
         closed_trade_side = None
+        # Existing protection is checked BEFORE adjusting trailing levels with
+        # this candle. A close-only test misses stop hits followed by rebounds.
+        stop_fill = self._resting_stop_fill(
+            self.position, self.sl_level,
+            current_row.get('open', current_price),
+            current_row.get('high', current_price),
+            current_row.get('low', current_price),
+        )
+        if stop_fill is not None and not self.disable_normal_sl:
+            trade_was_closed = True
+            closed_trade_side = 'long' if self.position > 0 else 'short'
+            close_price = self._simulate_slippage(
+                stop_fill, atr, OrderSide.SELL if self.position > 0 else OrderSide.BUY)
+            pnl_realized = self.initial_notional_value * (
+                (close_price - self.entry_price) / (self.entry_price + 1e-9)
+            ) * np.sign(self.position)
+            self._apply_realized_pnl(pnl_realized)
+            self._prev_unrealized_return = 0.0
+            closed_trade_duration = self.steps_in_position
+            info['exit_reason'] = 'Stop Loss'
         # Stop de CatÃƒÂ¡strofe baseado em ATR (rede de seguranÃƒÂ§a do ambiente)
         # 🔬 [SCIENTIFIC FIX] Catastrophe SL deve SEMPRE estar ativo, mesmo durante o grace period.
-        if self.position != 0:
+        if self.position != 0 and not trade_was_closed:
             catastrophe_multiplier = self._compute_catastrophe_multiplier(atr_pct, self._last_prior_dir_val, int(np.sign(self.position)))
             # [FIX OPTION B] CSL em duas fases — buffer largo para o agente aprender a sair.
             # Fase 1 (+1 ATR): protege apenas breakeven (entry + fees). Sem trail ainda.
@@ -2420,9 +2458,10 @@ class TrendFollowingEnv(gym.Env):
         if self.position != 0 and not trade_was_closed:
             lookback = 22
             atr_mult = 3.0
-            start = max(0, self.current_step - lookback + 1)
-            window_high = float(np.max(self.df['high'].iloc[start:self.current_step + 1])) if 'high' in self.df.columns else current_price
-            window_low = float(np.min(self.df['low'].iloc[start:self.current_step + 1])) if 'low' in self.df.columns else current_price
+            end = self.start_idx + self.current_step + 1
+            start = max(self.start_idx, end - lookback)
+            window_high = float(np.max(self.df['high'].iloc[start:end])) if 'high' in self.df.columns else current_price
+            window_low = float(np.min(self.df['low'].iloc[start:end])) if 'low' in self.df.columns else current_price
             if self.position > 0:
                 chandelier_sl = window_high - atr_mult * atr
                 self.sl_level = max(self.sl_level or -np.inf, chandelier_sl)
@@ -5142,7 +5181,7 @@ class TrendSpecialist:
             for df_tmp in (train_df, eval_df):
                 num_cols_tmp = df_tmp.select_dtypes(include=np.number).columns
                 df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].replace([np.inf, -np.inf], np.nan)
-                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].ffill().bfill().fillna(0)
+                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].ffill().fillna(0)
                 df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].clip(lower=-1e9, upper=1e9)
             
             # [FIX CIENTÍFICO] Define contrato de features ANTES do fit do scaler
@@ -5596,8 +5635,11 @@ class TrendSpecialist:
                     logger.error("[TREND SAC] Falha ao salvar modelo parcial: %s", _save_err)
                 raise  # Re-lança para o shutdown handler do bot processar normalmente
             self.is_trained = True
+            self.last_training_timesteps = self.model.num_timesteps
+            if os.path.exists(best_model_path):
+                self.model = type(self.model).load(best_model_path, env=train_env, device=self.model.device)
             self.model.save(self.model_path)
-            logger.info("[TREND SAC] Treinamento do TrendSpecialist concluido. Total de timesteps: %s" % self.model.num_timesteps)
+            logger.info("[TREND SAC] Best validation checkpoint saved; training steps: %s", self.last_training_timesteps)
 
             # [MONITOR] Verifica circuit breaker apos treino — para o bot se necessario
             try:
@@ -5620,13 +5662,13 @@ class TrendSpecialist:
             # [MONITOR] Avaliação pós-treino e log do relatorio de convergencia
             try:
                 final_mean_reward, _ = evaluate_policy(
-                    self.model, train_env, n_eval_episodes=1, deterministic=True
+                    self.model, eval_env, n_eval_episodes=1, deterministic=True
                 )
                 # Coleta sumário do episodio para extrair metricas de qualidade
                 _sums = []
-                if hasattr(train_env, 'env_method'):
+                if hasattr(eval_env, 'env_method'):
                     try:
-                        _batches = train_env.env_method("consume_episode_summaries")
+                        _batches = eval_env.env_method("consume_episode_summaries")
                         _sums = [s for batch in _batches for s in batch] if _batches else []
                     except Exception:
                         pass
@@ -5650,11 +5692,11 @@ class TrendSpecialist:
             except Exception as _e:
                 logger.debug("[MONITOR] Falha ao registrar episodio pos-treino: %s", _e)
 
-            return self.model.num_timesteps
+            return self.last_training_timesteps
         except Exception as e:
             logger.error(f"[ERRO TREND SAC] Falha catastrofica durante o treinamento: {e}", exc_info=True)
             self.is_trained = False
-            return self.model.num_timesteps if self.model else 0
+            raise
 
     def decide_action(self, observation: np.ndarray, df_row: pd.Series) -> Optional[Signal]:
         if not self.is_trained or self.model is None:
