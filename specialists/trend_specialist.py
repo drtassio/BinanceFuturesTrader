@@ -964,16 +964,12 @@ class TrendFollowingEnv(gym.Env):
 
         # 🔬 Dr. Tensor: Injeção de Física na Observação
         # Calcula em tempo real para o estado atual
-        try:
-            lookback_start = max(0, self.start_idx + self.current_step - 100)
-            lookback_end = self.start_idx + self.current_step + 1
-            chaos_data = self.df.iloc[lookback_start:lookback_end]
-            physics_metrics = get_market_chaos_metrics(chaos_data) if len(chaos_data) >= 30 else {}
-        except Exception:
-            physics_metrics = {}
-
-        market_entropy = float(physics_metrics.get('shannon_entropy', 0.0))
-        market_hurst = float(physics_metrics.get('hurst_exponent', 0.5))
+        # Lidas do dataframe, onde causal_features ja as calculou com a mesma
+        # formula. Antes eram recomputadas a cada passo sobre uma janela de 100
+        # barras — 72% do tempo de CPU do ambiente — e o resultado era perdido,
+        # porque este .get() procurava chaves que a funcao nao devolvia. As duas
+        # dimensoes eram constantes 0.0 e 0.5.
+        market_entropy, market_hurst = self._chaos_metrics(row_all)
         physics_state = np.array([market_entropy, market_hurst], dtype=np.float32)
 
         return np.concatenate([
@@ -984,6 +980,33 @@ class TrendFollowingEnv(gym.Env):
             np.array([prior_dir_val, prior_conf_val], dtype=np.float32),
             physics_state
         ])
+
+    def _chaos_metrics(self, row) -> Tuple[float, float]:
+        """Entropia de Shannon e expoente de Hurst da linha atual.
+
+        Pre-calculados por feature_engineering.causal_features com a mesma
+        formula de utils.physics_sensors. O fallback recomputa a janela apenas
+        quando o dataset nao traz as colunas, o que mantem compatibilidade com
+        parquets antigos ao custo de velocidade.
+        """
+        try:
+            entropy = float(row.get('cz_entropy', np.nan))
+            hurst = float(row.get('cz_hurst', np.nan))
+            if np.isfinite(entropy) and np.isfinite(hurst) and hurst != 0.0:
+                return entropy, hurst
+        except Exception:
+            pass
+        try:
+            start = max(0, self.start_idx + self.current_step - 100)
+            end = self.start_idx + self.current_step + 1
+            window = self.df.iloc[start:end]
+            if len(window) >= 30:
+                metrics = get_market_chaos_metrics(window)
+                return (float(metrics.get('shannon_entropy', 0.0)),
+                        float(metrics.get('hurst_exponent', 0.5)))
+        except Exception:
+            pass
+        return 0.0, 0.5
 
     def _get_ema_trend_value(self, row: _TrendNpRow) -> float:
         # [FIX #6] Removido código morto de _simulate_slippage que estava colado aqui
@@ -3049,24 +3072,15 @@ class TrendFollowingEnv(gym.Env):
             
         # --- Sensores de Física (Dr. Tensor) ---
         # Calcula caos e ruído do mercado para o motor de recompensa
-        physics_metrics = {}
-        try:
-            # Pega os últimos 100 candles a partir do step atual
-            lookback_start = max(0, self.start_idx + self.current_step - 100)
-            lookback_end = self.start_idx + self.current_step + 1
-            chaos_data = self.df.iloc[lookback_start:lookback_end]
-            
-            if len(chaos_data) >= 30:
-                physics_metrics = get_market_chaos_metrics(chaos_data)
-        except Exception:
-            pass
+        # Mesma leitura barata usada em _get_observation.
+        _entropy_now, _hurst_now = self._chaos_metrics(current_row)
 
         info.update({
             'prior_dir_val': prior_dir_val,
             'prior_conf_val': prior_conf_dyn,
             '_regime_mismatch': bool(is_mismatch or info.get('_regime_mismatch', False)),
-            'market_entropy': physics_metrics.get('shannon_entropy', 0.0),
-            'market_hurst': physics_metrics.get('hurst_exponent', 0.5)
+            'market_entropy': _entropy_now,
+            'market_hurst': _hurst_now,
         })
 
         # Retorno econômico causal do passo: calculado após PnL marcado a

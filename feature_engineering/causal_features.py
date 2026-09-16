@@ -127,6 +127,49 @@ def add_trend_structure(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     # Volatility expansion tends to accompany and sustain a directional move.
     put("atr_expansion", atr.rolling(12).mean() / atr.rolling(96).mean().replace(0.0, np.nan))
     put("atr_pct", atr / close)
+
+    # Market "physics": Hurst and Shannon entropy over the last 30 returns,
+    # the same definition utils.physics_sensors uses, precomputed here.
+    #
+    # The environment recomputed these on every step, twice, which was 72% of
+    # its CPU time, and then discarded the result because the caller read keys
+    # the function did not return. Precomputing makes the training loop several
+    # times faster and guarantees training and live see the same number.
+    returns = close.pct_change()
+
+    def _hurst(window: np.ndarray) -> float:
+        n = len(window)
+        if n < 20:
+            return 0.5
+        lags = sorted({max(4, n // 8), max(8, n // 4), max(12, n // 2)})
+        rs_values, valid = [], []
+        for lag in lags:
+            chunks = [window[i:i + lag] for i in range(0, n - lag + 1, lag)]
+            if len(chunks) < 2:
+                continue
+            ratios = []
+            for chunk in chunks:
+                deviation = np.cumsum(chunk - chunk.mean())
+                spread = deviation.max() - deviation.min()
+                sigma = chunk.std(ddof=1)
+                if sigma > 1e-9:
+                    ratios.append(spread / sigma)
+            if ratios:
+                rs_values.append(float(np.mean(ratios)))
+                valid.append(lag)
+        if len(valid) < 2:
+            return 0.5
+        slope = np.polyfit(np.log(valid), np.log(rs_values), 1)[0]
+        return float(np.clip(slope, 0.1, 0.9))
+
+    def _entropy(window: np.ndarray, bins: int = 10) -> float:
+        counts, _ = np.histogram(window, bins=bins)
+        probability = counts / (len(window) + 1e-12)
+        probability = probability[probability > 0]
+        return float(np.clip(-np.sum(probability * np.log2(probability)), 0.0, 5.0))
+
+    put("hurst", returns.rolling(30).apply(_hurst, raw=True))
+    put("entropy", returns.rolling(30).apply(_entropy, raw=True))
     return out, added
 
 
