@@ -2219,11 +2219,16 @@ class TrendFollowingEnv(gym.Env):
         if self.position != 0 and is_in_grace_period:
             should_open_long = False
             should_open_short = False
+        # Histerese: abrir exige |voto| acima do limiar, e fechar exige o voto
+        # cruzar o limiar do lado OPOSTO — nao metade dele. Com meia banda, um
+        # voto que oscila perto de zero abria e fechava a mesma posicao a cada
+        # poucas barras: 2621 trades em 50 mil barras no treino, com o custo
+        # de ida e volta consumindo o edge inteiro.
         if self.position > 0:
-            agent_wants_close = agent_vote_strength <= -(action_threshold * 0.5)
+            agent_wants_close = agent_vote_strength <= -action_threshold
             agent_wants_reverse = agent_vote_strength <= -action_threshold
         elif self.position < 0:
-            agent_wants_close = agent_vote_strength >= (action_threshold * 0.5)
+            agent_wants_close = agent_vote_strength >= action_threshold
             agent_wants_reverse = agent_vote_strength >= action_threshold
         else:
             agent_wants_close = False
@@ -5649,14 +5654,32 @@ class TrendSpecialist:
                 # Substitui o AttentionMLP (seq_len=1 = apenas ponderação de features)
                 # pelo LSTM que agora recebe os últimos N_STACK_FRAMES candles como
                 # sequência temporal genuína — captura tendência, momentum e reversão.
-                from specialists.scientific_corrections import get_hybrid_lstm_policy_kwargs
-                policy_kwargs = get_hybrid_lstm_policy_kwargs(
-                    n_stack=N_STACK_FRAMES,
-                    features_dim=128,
-                    lstm_hidden_size=64,
-                    num_heads=4,
-                    dropout=0.15,
-                )
+                # A capacidade do extractor vem dos hiperparametros, com os
+                # valores atuais como padrao. Sinal fino com 90 mil barras pune
+                # rede grande: o meta-modelo supervisionado sobre os mesmos dados
+                # foi de AUC 0.952 treino / 0.560 holdout com capacidade alta
+                # para 0.725 / 0.574 com capacidade baixa. Poder testar o mesmo
+                # eixo aqui, sem editar codigo, e o que torna a comparacao viavel.
+                # policy_arch="mlp" troca o extractor LSTM+Attention por uma MLP
+                # simples sobre as mesmas observacoes empilhadas. O contrato de
+                # observacao e o de acao nao mudam, entao producao carrega os
+                # dois tipos de modelo sem distincao.
+                policy_arch = str(self.hyperparams.get("policy_arch", "hybrid_lstm")).lower()
+                if policy_arch == "mlp":
+                    width = int(self.hyperparams.get("net_width", 256))
+                    depth = int(self.hyperparams.get("net_depth", 2))
+                    layers = [width] * max(1, depth)
+                    policy_kwargs = {"net_arch": {"pi": list(layers), "qf": list(layers)}}
+                    logger.info("[TREND SAC] Politica MLP %s (pi e qf).", layers)
+                else:
+                    from specialists.scientific_corrections import get_hybrid_lstm_policy_kwargs
+                    policy_kwargs = get_hybrid_lstm_policy_kwargs(
+                        n_stack=N_STACK_FRAMES,
+                        features_dim=int(self.hyperparams.get("features_dim", 128)),
+                        lstm_hidden_size=int(self.hyperparams.get("lstm_hidden_size", 64)),
+                        num_heads=int(self.hyperparams.get("num_heads", 4)),
+                        dropout=float(self.hyperparams.get("dropout", 0.15)),
+                    )
 
                 # 🔬 LINEAR LR DECAY SCHEDULER (evita overshoot no final do treinamento)
                 # LR decai linearmente de valor_inicial até 10% no final
