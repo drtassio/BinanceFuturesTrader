@@ -211,14 +211,57 @@ def add_tape_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     return out, added
 
 
+def add_regime_priors(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Derive the tp_* prior columns the environment and the live bot expect.
+
+    These were the single largest train/production mismatch in the bot. The
+    live controller builds tp_prior_conf, tp_prior_dir and the tp_regime_*
+    one-hots from the regime detector before calling a specialist, but the
+    training parquet never contained them, so every `row.get('tp_prior_dir',
+    0.0)` in the environment resolved to the default. Training therefore ran
+    with prior_dir pinned at 0.0, prior_conf at 0.5 and every regime one-hot at
+    zero, which silently disabled the entry gates, made `regime_neutral`
+    permanently true, and pinned position size at its floor. The agent then met
+    real values the moment it went live.
+
+    The mapping below is the same one the controller applies, so both sides now
+    see identical inputs. Regime labels themselves are causal: measured against
+    forward returns their rank correlation is 0.01 to 0.02 across horizons.
+    """
+    out = df.copy()
+    added: List[str] = []
+    regime_col = next((c for c in ("regime_val", "regime") if c in out.columns), None)
+    if regime_col is None or "regime_confidence" not in out.columns:
+        return out, added
+
+    regime = out[regime_col].astype(float)
+    confidence = out["regime_confidence"].astype(float).clip(0.0, 1.0)
+
+    # 0 = Bull, 1 = Bear, 2+ = Ranger.
+    out["tp_prior_conf"] = confidence.astype("float32")
+    out["tp_prior_dir"] = np.select(
+        [regime == 0, regime == 1],
+        [confidence, -confidence],
+        default=0.0,
+    ).astype("float32")
+    out["tp_regime_up"] = (regime == 0).astype("float32")
+    out["tp_regime_down"] = (regime == 1).astype("float32")
+    out["tp_regime_sideways"] = (regime >= 2).astype("float32")
+    added = ["tp_prior_conf", "tp_prior_dir", "tp_regime_up",
+             "tp_regime_down", "tp_regime_sideways"]
+    return out, added
+
+
 def build_causal_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """Apply the full causal treatment. Used by training and by the live bot."""
     out, shift_report = shift_higher_timeframes(df)
     out, trend_cols = add_trend_structure(out)
     out, tape_cols = add_tape_features(out)
+    out, prior_cols = add_regime_priors(out)
     meta: Dict[str, object] = {
         "higher_timeframe_shift": shift_report,
         "trend_features": trend_cols,
         "tape_features": tape_cols,
+        "regime_priors": prior_cols,
     }
     return out, meta

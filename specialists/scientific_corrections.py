@@ -157,10 +157,22 @@ def compute_scientific_reward(
         economic_reward = float(economic_step_return) * float(
             getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_SCALE', 100.0)
         )
-        # Em modo econômico, o agente otimiza exatamente a variação líquida de
-        # patrimônio. Taxas, funding, slippage e PnL já estão refletidos nela.
+        # Em modo economico, o agente otimiza exatamente a variacao liquida de
+        # patrimonio. Taxas, funding, slippage e PnL ja estao refletidos nela.
+        #
+        # O unico termo somado e o custo de oportunidade de ficar de fora, sem o
+        # qual uma politica parada pontua zero para sempre e o zero vence
+        # qualquer estrategia com variancia. Ele e proporcional a oportunidade
+        # disponivel, entao ficar parado no chop continua saindo de graca.
         if bool(getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_ONLY', True)):
-            return float(np.clip(economic_reward, -20.0, 20.0))
+            economic_only = economic_reward
+            if env.position == 0 and not trade_closed_this_step:
+                opportunity = _available_edge(env, info)
+                if opportunity > 0.0:
+                    economic_only -= (0.005 if _is_ranger else 0.01) * float(
+                        np.tanh(opportunity * 2.5)
+                    )
+            return float(np.clip(economic_only, -20.0, 20.0))
         reward += economic_reward
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -731,7 +743,7 @@ def compute_scientific_reward(
         # chop, participando quando a tendencia se forma.
         opportunity = _available_edge(env, info)
         if opportunity > 0.0:
-            reward -= (0.05 if _is_ranger else 0.12) * float(np.tanh(opportunity * 2.5))
+            reward -= (0.005 if _is_ranger else 0.01) * float(np.tanh(opportunity * 2.5))
 
         if not _is_ranger:
             # Trend: penaliza flat quando sinal forte existe

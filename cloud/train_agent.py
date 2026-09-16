@@ -174,10 +174,20 @@ def main() -> None:
     train_df, val_df, holdout_df = split_chronological(df)
 
     config = AIConfig()
-    # Net equity is the objective. The shaping terms that remain are the
-    # opportunity cost of standing aside and the drawdown control; the bonuses
-    # that used to pay the agent for staying flat are gone.
-    config.ECONOMIC_REWARD_ONLY = False
+    # Net equity, plus the opportunity cost of standing aside, and nothing else.
+    #
+    # The hand-tuned shaping layer was measured against scripted policies on the
+    # strongest uptrend and the worst drawdown in the data. It preferred doing
+    # nothing in all six agent/regime combinations, including the two where the
+    # agent finished +80% and +76% in equity: the Bull scored -913.8 for making
+    # 80% against -195.2 for sitting still. Dozens of bonuses and penalties,
+    # each individually reasonable, summed to an objective that was the opposite
+    # of profit.
+    #
+    # The economic reward agrees with equity in all six cases. It is also
+    # auditable: one term, the change in net worth, with fees, funding and
+    # slippage already inside it.
+    config.ECONOMIC_REWARD_ONLY = True
     os.environ.setdefault("TREND_SKIP_OPTUNA", "1")
 
     run_name = args.agent if args.resume else "%s_%s" % (
