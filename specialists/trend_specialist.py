@@ -3384,12 +3384,15 @@ class TrendSpecialist:
         return {
             "learning_rate": 4.6e-5,
             "buffer_size": 50000,
-            "batch_size": 1024,
+            "batch_size": 256,
             "gamma": 0.982,
             "tau": 0.015,
             "train_freq": 16,
-            "use_sde": True,
-            "ent_coef": 'auto_0.1',
+            # State-dependent exploration was numerically unstable on the
+            # stacked LSTM observations (actor variance became NaN on GPU).
+            # Ordinary squashed Gaussian SAC is stable and still explores.
+            "use_sde": False,
+            "ent_coef": 'auto_0.05',
         }
 
     def _load_hyperparams(self):
