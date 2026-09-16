@@ -178,33 +178,61 @@ def uniqueness_weights(span: np.ndarray) -> np.ndarray:
     return weights / mean if mean > 0 else np.ones(n)
 
 
-def select_feature_columns(df: pd.DataFrame, max_price_corr: float = 0.85) -> List[str]:
-    """Keep stationary, scale-free predictors.
+# Families of predictors the live bot can reproduce exactly from its 852-bar
+# window. Selection is by construction, not by a correlation test, because the
+# failure to avoid is history dependence and that does not show up as price
+# correlation. Measured on this dataset: obv_15m, pvt_1h and adl_15m are
+# cumulative series (adl_15m runs from -8.2e4 to +3.6e6 across the file) yet
+# are barely correlated with close; ema_200_5m is a dollar price level with
+# correlation 0.75, below any sane cut-off. A model trained on either reads a
+# value live that depends on where the live window happens to start.
+_LIVE_REPRODUCIBLE_PREFIXES = ("cz_", "tp_")
+_LIVE_REPRODUCIBLE_EXACT = {"regime", "regime_confidence", "aggressor_imbalance",
+                            "taker_buy_ratio", "funding_rate"}
+_LIVE_REPRODUCIBLE_FAMILIES = (
+    "rsi", "stoch_k", "stoch_d", "williams_r", "cci", "roc", "mfi",
+    "adx", "plus_di", "minus_di", "cmf", "bb_width", "atr_percentage",
+    "realized_vol", "log_return", "hl_range_pct", "oc_move_pct",
+    "hc_wick", "lc_wick", "ema_trend", "aggressor_imbalance",
+    "aggressor_delta_z", "taker_buy_ratio", "funding_rate",
+)
+_HISTORY_DEPENDENT = ("obv", "pvt", "adl", "vwap", "close_reference", "bb_upper",
+                      "bb_lower", "bb_middle", "macd_line", "macd_signal", "psar_value")
 
-    Anything that tracks the price level (moving averages, bands, cumulative
-    volume series) is excluded automatically: such a column tells the model
-    what BTC cost, which does not generalise from a 30k regime to a 100k one.
-    Detection is empirical — correlation of the column with close — rather than
-    a hand-maintained name list that silently rots.
+
+def select_feature_columns(df: pd.DataFrame) -> List[str]:
+    """Predictors that are stationary AND reproducible live.
+
+    Only bounded oscillators, returns, volatility ratios, flow ratios and the
+    causal cz_/tp_ features qualify. Anything expressed as a price level or
+    accumulated since the start of the series is excluded, whatever its
+    correlation with price.
     """
     numeric = df.select_dtypes(include=[np.number])
-    close = df["close"].astype(float)
-    hard_drop = {"open", "high", "low", "close", "volume", "open_time", "close_time", "ignore"}
     keep: List[str] = []
     for col in numeric.columns:
-        if col in hard_drop:
+        name = str(col)
+        if name.startswith("ml_"):
             continue
-        series = numeric[col]
-        if not np.isfinite(series.to_numpy()).any():
+        # cz_/tp_ come from feature_engineering.causal_features, built with
+        # bounded windows by the same code live; cz_vwap_dist, for instance, is
+        # a per-bar ratio despite its name.
+        if name.startswith(_LIVE_REPRODUCIBLE_PREFIXES):
+            allowed = True
+        elif any(token in name for token in _HISTORY_DEPENDENT):
             continue
-        std = float(series.std())
-        if not np.isfinite(std) or std <= 0.0:
+        else:
+            allowed = (
+                name in _LIVE_REPRODUCIBLE_EXACT
+                or any(family in name for family in _LIVE_REPRODUCIBLE_FAMILIES)
+            )
+        if not allowed:
             continue
-        sample = series.iloc[::17]
-        corr = float(np.abs(sample.corr(close.iloc[::17])))
-        if np.isfinite(corr) and corr > max_price_corr:
+        values = numeric[col].to_numpy(dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0 or float(finite.std()) <= 0.0:
             continue
-        keep.append(col)
+        keep.append(name)
     return keep
 
 
@@ -399,6 +427,58 @@ def walk_forward_predict(
     # confident zero.
     out["ml_p_long"] = out["ml_p_long"].astype(float).fillna(0.5)
     out["ml_p_short"] = out["ml_p_short"].astype(float).fillna(0.5)
+    out["ml_edge"] = out["ml_p_long"] - out["ml_p_short"]
+    out["ml_conf"] = out[["ml_p_long", "ml_p_short"]].max(axis=1)
+    out = out.astype(np.float32)
+    out.attrs["selected_features"] = [list(feature_columns)[i] for i in selected]
+    return out
+
+
+def fit_final_bundle(
+    df: pd.DataFrame,
+    labels: pd.DataFrame,
+    selected_features: Sequence[str],
+    cfg: "BarrierConfig",
+    embargo: int,
+) -> Dict[str, object]:
+    """Models for LIVE use, fitted on every bar whose barrier has resolved.
+
+    Never use this to score historical rows: it has seen them. The training
+    columns come from walk_forward_predict; this bundle only exists so the bot
+    can produce the same four columns in real time.
+    """
+    X = df[list(selected_features)].to_numpy(dtype=np.float32)
+    span = labels["span"].to_numpy()
+    weights = uniqueness_weights(span)
+    n = len(df)
+    index = np.arange(n)
+    resolved = index + span < n - embargo
+    bundle: Dict[str, object] = {
+        "features": list(selected_features),
+        "params": dict(MODEL_PARAMS),
+        "barrier": {"profit_atr": cfg.profit_atr, "stop_atr": cfg.stop_atr, "max_bars": cfg.max_bars},
+        "trained_until": str(df.index[resolved][-1]) if resolved.any() else None,
+        "rows": int(resolved.sum()),
+    }
+    for side in ("long", "short"):
+        ret = labels["%s_ret" % side].to_numpy()
+        ok = resolved & np.isfinite(ret)
+        y = labels["y_%s" % side].to_numpy()
+        bundle[side] = _fit_classifier(X[ok], y[ok], weights[ok])
+    return bundle
+
+
+def predict_bundle(bundle: Dict[str, object], frame: pd.DataFrame) -> pd.DataFrame:
+    """The four ml_* columns for live rows. Missing inputs fail loudly."""
+    features = list(bundle["features"])
+    missing = [c for c in features if c not in frame.columns]
+    if missing:
+        raise KeyError("meta-modelo sem as colunas de entrada: %s" % missing[:10])
+    X = frame[features].to_numpy(dtype=np.float32)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    out = pd.DataFrame(index=frame.index)
+    out["ml_p_long"] = bundle["long"].predict_proba(X)[:, 1]
+    out["ml_p_short"] = bundle["short"].predict_proba(X)[:, 1]
     out["ml_edge"] = out["ml_p_long"] - out["ml_p_short"]
     out["ml_conf"] = out[["ml_p_long", "ml_p_short"]].max(axis=1)
     return out.astype(np.float32)

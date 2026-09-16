@@ -251,7 +251,38 @@ class FeatureEngineeringPipeline:
             logger.warning(f"Falha ao adicionar regime labels: {e}")
         
         logger.info(f"Features criadas com sucesso. Shape: {featured_df_combined.shape}")
+        featured_df_combined = self._add_meta_features(featured_df_combined)
         return featured_df_combined
+
+    def _add_meta_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Colunas ml_* ao vivo, com o modelo salvo por build_meta_features.
+
+        Os especialistas foram treinados com ml_p_long, ml_p_short, ml_edge e
+        ml_conf. Sem este passo elas nao existiriam em producao e a observacao
+        receberia zeros no lugar das quatro features mais informativas. Os
+        priors de regime sao recalculados aqui pela mesma funcao do treino,
+        porque o meta-modelo pode usa-los e eles so seriam criados mais adiante.
+        """
+        import os
+        bundle_path = os.path.join(os.getcwd(), "models_ai", "meta_labeler.joblib")
+        if not os.path.exists(bundle_path):
+            logger.error("[META] %s ausente: colunas ml_* nao serao geradas ao vivo.", bundle_path)
+            return df
+        try:
+            import joblib
+            from feature_engineering.causal_features import add_regime_priors
+            from learning.meta_labeler import predict_bundle
+            if not hasattr(self, "_meta_bundle"):
+                self._meta_bundle = joblib.load(bundle_path)
+            scoring_frame, _ = add_regime_priors(df)
+            ml = predict_bundle(self._meta_bundle, scoring_frame)
+            for column in ml.columns:
+                df[column] = ml[column].to_numpy()
+        except Exception as meta_error:
+            # Nao silenciar: sem ml_* a observacao difere da do treino.
+            logger.error("[META] Falha ao gerar colunas ml_*: %s", meta_error, exc_info=True)
+            raise
+        return df
 
     def apply_hidden_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """

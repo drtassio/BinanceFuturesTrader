@@ -1275,9 +1275,14 @@ class AIController:
             df_enriched['tp_prior_dir'] = np.select(conditions, choices, default=0.0)
             
             # Map One-Hot Regimes
-            df_enriched['tp_regime_up'] = (df_enriched['regime_val'] == 0).astype(float)
-            df_enriched['tp_regime_down'] = (df_enriched['regime_val'] == 1).astype(float)
-            df_enriched['tp_regime_sideways'] = (df_enriched['regime_val'] >= 2).astype(float)
+            # Ponderado pela confianca, igual a apply_hidden_features (caminho de
+            # decisao ao vivo) e ao dataset de treino. Antes este ramo gerava 0/1
+            # enquanto o outro gerava a confianca, e o especialista via numeros
+            # diferentes conforme o caminho que chamou.
+            _rc = df_enriched['regime_confidence']
+            df_enriched['tp_regime_up'] = np.where(df_enriched['regime_val'] == 0, _rc, 0.0)
+            df_enriched['tp_regime_down'] = np.where(df_enriched['regime_val'] == 1, _rc, 0.0)
+            df_enriched['tp_regime_sideways'] = np.where(df_enriched['regime_val'] >= 2, _rc, 0.0)
             
             # Legacy/Compat columns
             df_enriched['trend_pred_uptrend'] = df_enriched['tp_regime_up']

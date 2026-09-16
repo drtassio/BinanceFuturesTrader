@@ -52,6 +52,39 @@ def _clean(series: pd.Series) -> pd.Series:
     return series.replace([np.inf, -np.inf], np.nan).astype("float32")
 
 
+# Raw order-flow columns under the one name everything downstream reads. The
+# same quantity arrives under different names depending on where it came from:
+#   training: merged from the Binance flow parquet   -> trade_count, quote_volume
+#   live:     kline API, then suffixed by create_features -> number_of_trades_15m
+# Without this, a specialist trained on "funding_rate" and "aggressor_imbalance"
+# receives zeros live, where only the _15m versions exist.
+FLOW_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "trade_count": ("trade_count", "trade_count_15m", "number_of_trades", "number_of_trades_15m"),
+    "quote_volume": ("quote_volume", "quote_volume_15m", "quote_asset_volume", "quote_asset_volume_15m"),
+    "taker_buy_base_volume": ("taker_buy_base_volume", "taker_buy_base_volume_15m",
+                              "taker_buy_base_asset_volume", "taker_buy_base_asset_volume_15m"),
+    "taker_buy_quote_volume": ("taker_buy_quote_volume", "taker_buy_quote_volume_15m",
+                               "taker_buy_quote_asset_volume", "taker_buy_quote_asset_volume_15m"),
+    "aggressor_imbalance": ("aggressor_imbalance", "aggressor_imbalance_15m"),
+    "taker_buy_ratio": ("taker_buy_ratio", "taker_buy_ratio_15m"),
+    "funding_rate": ("funding_rate", "funding_rate_15m"),
+}
+
+
+def normalize_flow_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Make every raw flow column available under its canonical name."""
+    out = df.copy()
+    created: List[str] = []
+    for canonical, candidates in FLOW_ALIASES.items():
+        if canonical in out.columns:
+            continue
+        source = next((c for c in candidates if c in out.columns), None)
+        if source is not None:
+            out[canonical] = out[source]
+            created.append(canonical)
+    return out, created
+
+
 def shift_higher_timeframes(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Dict[str, int]]]:
     """Expose a higher timeframe bar only once it has closed.
 
@@ -193,11 +226,7 @@ def add_tape_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         std = series.rolling(win, min_periods=win // 4).std().replace(0.0, np.nan)
         return ((series - mean) / std).clip(-6, 6)
 
-    imb_col = None
-    for candidate in ("aggressor_imbalance_15m", "aggressor_imbalance"):
-        if candidate in out.columns:
-            imb_col = candidate
-            break
+    imb_col = "aggressor_imbalance" if "aggressor_imbalance" in out.columns else None
 
     if imb_col is not None:
         # Signed aggression: above zero means buyers lifted more than sellers hit.
@@ -230,9 +259,9 @@ def add_tape_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         put("avg_trade_size_z", zscore(avg_size, 96))
         put("trade_intensity_z", zscore(tc, 96))
 
-    qv = next((c for c in ("quote_volume", "quote_volume_15m") if c in out.columns), None)
-    tbq = next((c for c in ("taker_buy_quote_volume", "taker_buy_quote_volume_15m") if c in out.columns), None)
-    tbb = next((c for c in ("taker_buy_base_volume", "taker_buy_base_volume_15m") if c in out.columns), None)
+    qv = "quote_volume" if "quote_volume" in out.columns else None
+    tbq = "taker_buy_quote_volume" if "taker_buy_quote_volume" in out.columns else None
+    tbb = "taker_buy_base_volume" if "taker_buy_base_volume" in out.columns else None
     if qv and tbq and tbb:
         # Average price paid by aggressive buyers versus aggressive sellers,
         # relative to the bar's own VWAP: who is paying up.
@@ -244,7 +273,7 @@ def add_tape_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         put("sell_price_improve", (sell_vwap - bar_vwap) / (bar_vwap * 1e-4 + 1e-12))
         put("vwap_dist", (close - bar_vwap) / (bar_vwap + 1e-9))
 
-    fr_col = next((c for c in ("funding_rate_15m", "funding_rate") if c in out.columns), None)
+    fr_col = "funding_rate" if "funding_rate" in out.columns else None
     if fr_col is not None:
         fr = out[fr_col].astype(float)
         # Sustained funding is crowd positioning; extremes precede squeezes.
@@ -267,8 +296,8 @@ def add_regime_priors(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     permanently true, and pinned position size at its floor. The agent then met
     real values the moment it went live.
 
-    The mapping below is the same one the controller applies, so both sides now
-    see identical inputs. Regime labels themselves are causal: measured against
+    The mapping below is the one FeatureEngineeringPipeline.apply_hidden_features
+    applies on the live decision path, so both sides see identical inputs. Regime labels themselves are causal: measured against
     forward returns their rank correlation is 0.01 to 0.02 across horizons.
     """
     out = df.copy()
@@ -287,9 +316,13 @@ def add_regime_priors(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         [confidence, -confidence],
         default=0.0,
     ).astype("float32")
-    out["tp_regime_up"] = (regime == 0).astype("float32")
-    out["tp_regime_down"] = (regime == 1).astype("float32")
-    out["tp_regime_sideways"] = (regime >= 2).astype("float32")
+    # Ponderados pela confianca, exatamente como FeatureEngineeringPipeline.
+    # apply_hidden_features, que e o caminho que monta a observacao ao vivo
+    # (ai_controller.py, geracao de sinal). Um one-hot 0/1 aqui divergiria dos
+    # ~0.88 que o bot entrega ao especialista na mesma situacao.
+    out["tp_regime_up"] = np.where(regime == 0, confidence, 0.0).astype("float32")
+    out["tp_regime_down"] = np.where(regime == 1, confidence, 0.0).astype("float32")
+    out["tp_regime_sideways"] = np.where(regime >= 2, confidence, 0.0).astype("float32")
     added = ["tp_prior_conf", "tp_prior_dir", "tp_regime_up",
              "tp_regime_down", "tp_regime_sideways"]
     return out, added
@@ -297,11 +330,13 @@ def add_regime_priors(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
 
 def build_causal_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
     """Apply the full causal treatment. Used by training and by the live bot."""
-    out, shift_report = shift_higher_timeframes(df)
+    out, flow_aliases = normalize_flow_columns(df)
+    out, shift_report = shift_higher_timeframes(out)
     out, trend_cols = add_trend_structure(out)
     out, tape_cols = add_tape_features(out)
     out, prior_cols = add_regime_priors(out)
     meta: Dict[str, object] = {
+        "flow_aliases": flow_aliases,
         "higher_timeframe_shift": shift_report,
         "trend_features": trend_cols,
         "tape_features": tape_cols,

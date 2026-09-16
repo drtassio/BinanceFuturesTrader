@@ -31,6 +31,7 @@ from learning.meta_labeler import (  # noqa: E402
     BarrierConfig,
     build_labels,
     cross_validate,
+    fit_final_bundle,
     select_feature_columns,
     walk_forward_predict,
 )
@@ -49,6 +50,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=15_000)
     parser.add_argument("--step", type=int, default=5_000)
     parser.add_argument("--skip-cv", action="store_true")
+    parser.add_argument("--bundle", type=Path, default=ROOT / "models_ai" / "meta_labeler.joblib",
+                        help="modelo final usado AO VIVO para gerar as colunas ml_*")
     args = parser.parse_args()
     output = args.output or args.data
 
@@ -84,6 +87,19 @@ def main() -> None:
         df[column] = predictions[column].to_numpy()
 
     df.to_parquet(output)
+
+    # O bot precisa produzir as mesmas quatro colunas em tempo real. As colunas
+    # do dataset sao walk-forward (honestas); este pacote e ajustado em todo o
+    # historico resolvido e serve SO para inferencia ao vivo — nunca para
+    # pontuar linhas historicas, que ele ja viu.
+    import joblib
+    selected = predictions.attrs.get("selected_features") or []
+    bundle = fit_final_bundle(df, labels, selected, cfg, embargo=cfg.max_bars + 96)
+    args.bundle.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, args.bundle)
+    print("modelo ao vivo salvo em %s (%d features, treinado ate %s)"
+          % (args.bundle, len(selected), bundle["trained_until"]))
+
     meta = {
         "barrier": {"profit_atr": cfg.profit_atr, "stop_atr": cfg.stop_atr, "max_bars": cfg.max_bars},
         "predictors": len(features),
@@ -91,6 +107,8 @@ def main() -> None:
         "step": args.step,
         "cross_validation": report,
         "columns_added": list(predictions.columns),
+        "selected_features": list(selected),
+        "live_bundle": str(args.bundle),
     }
     Path(str(output) + ".meta_model.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
 

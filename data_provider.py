@@ -190,7 +190,10 @@ class DataProvider:
             df.set_index('timestamp', inplace=True)
             
             # Convert OHLCV and Binance's taker-buy field to numeric.
-            for col in ['open', 'high', 'low', 'close', 'volume', 'taker_buy_base_asset_volume']:
+            # A API devolve tudo como texto; as colunas de fluxo mantidas mais
+            # abaixo precisam ser numericas para as features de tape.
+            for col in ['open', 'high', 'low', 'close', 'volume', 'taker_buy_base_asset_volume',
+                        'quote_asset_volume', 'number_of_trades', 'taker_buy_quote_asset_volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
             df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
@@ -239,7 +242,14 @@ class DataProvider:
                 'hl_range_pct', 'oc_move_pct', 
                 'hc_wick_upper', 'lc_wick_lower',
                 'realized_vol_20', 'realized_vol_100',
-                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z_32'
+                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z_32',
+                # Colunas brutas do tape. Sao elas que alimentam as features de
+                # fluxo (tamanho medio de trade, intensidade, price improvement
+                # de compradores e vendedores) no modulo causal compartilhado com
+                # o treino. Descarta-las aqui zerava cinco features ao vivo que o
+                # especialista viu com valores reais durante todo o treino.
+                'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume',
             ]
             
             # 6. Clean infinities and remaining NaNs
