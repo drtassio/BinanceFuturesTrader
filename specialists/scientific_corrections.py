@@ -113,7 +113,14 @@ def compute_scientific_reward(
     # O crescimento real do patrimônio líquido (mark-to-market + taxas) é a métrica mestra.
     economic_step_return = info.get('economic_step_return', None)
     if economic_step_return is not None and np.isfinite(economic_step_return):
-        reward += float(economic_step_return) * 100.0
+        economic_reward = float(economic_step_return) * float(
+            getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_SCALE', 100.0)
+        )
+        # Em modo econômico, o agente otimiza exatamente a variação líquida de
+        # patrimônio. Taxas, funding, slippage e PnL já estão refletidos nela.
+        if bool(getattr(getattr(env, 'config', None), 'ECONOMIC_REWARD_ONLY', True)):
+            return float(np.clip(economic_reward, -20.0, 20.0))
+        reward += economic_reward
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMPONENTE 1A: GRAVITY WELL + MOMENTUM + RETREAT SIGNAL (AFLM Ch.3)

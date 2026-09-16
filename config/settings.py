@@ -345,6 +345,12 @@ class AIConfig(Config):
     REWARD_MAX_CLIP = float(os.environ.get('REWARD_MAX_CLIP', 15.0))
     REWARD_MIN_CLIP = float(os.environ.get('REWARD_MIN_CLIP', -15.0))
 
+    # O objetivo primário do RL deve ser o retorno líquido da carteira após
+    # taxas, funding e slippage.  Os componentes auxiliares de reward shaping
+    # são úteis para diagnóstico, mas não podem competir com o PnL ao treinar.
+    ECONOMIC_REWARD_ONLY = os.environ.get('ECONOMIC_REWARD_ONLY', 'True').lower() in ('true', '1', 't')
+    ECONOMIC_REWARD_SCALE = float(os.environ.get('ECONOMIC_REWARD_SCALE', 100.0))
+
     # Vote Misalignment: penalidade proporcional à confiança do predictor
     # Quando predictor diz BULL com 100% confiança e agente vota SHORT: penalidade máxima
     VOTE_MISALIGN_BASE_PENALTY = float(os.environ.get('VOTE_MISALIGN_BASE_PENALTY', 2.0))

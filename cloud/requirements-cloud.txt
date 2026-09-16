@@ -1,0 +1,17 @@
+numpy
+pandas
+pyarrow
+scipy
+scikit-learn==1.6.1
+joblib
+python-dotenv
+torch
+stable-baselines3
+gymnasium
+optuna
+statsmodels
+hmmlearn
+ta
+shap
+tensorboard
+binance-futures-connector

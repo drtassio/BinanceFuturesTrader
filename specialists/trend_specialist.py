@@ -2915,6 +2915,16 @@ class TrendFollowingEnv(gym.Env):
             'market_entropy': physics_metrics.get('shannon_entropy', 0.0),
             'market_hurst': physics_metrics.get('hurst_exponent', 0.5)
         })
+
+        # Retorno econômico causal do passo: calculado após PnL marcado a
+        # mercado, fees, funding e eventual fechamento. Este é o sinal que a
+        # política deve maximizar; não depende do futuro.
+        _economic_base = max(abs(float(prev_net_worth)), 1e-9)
+        info['economic_step_return'] = float(
+            (float(self.net_worth) - float(prev_net_worth)) / _economic_base
+        )
+        if bool(getattr(self.config, 'ECONOMIC_REWARD_ONLY', True)):
+            reward = 0.0
         
         # Se o trade fechou AGORA, passamos os dados dele. Senão, 0.0.
         pnl_to_pass = float(getattr(self, '_last_pnl_realized', 0.0))

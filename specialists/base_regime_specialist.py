@@ -413,11 +413,11 @@ class BaseRegimeSpecialist(TrendSpecialist):
         """
         logger.info(f"🎯 {self.name}: Iniciando treinamento...")
 
-        # Filtra dados pelo regime
-        df_filtered = self.filter_data_by_regime(df)
-
-        # [TEMPORAL WEIGHTING] Aplica downweight a amostras recentes
-        df_filtered = self._apply_temporal_weighting(df_filtered)
+        # Preserva a sequência completa de candles. Remover candles de outros
+        # regimes cria saltos de horas ou dias e faz o ambiente simular preços
+        # que nunca foram adjacentes. O regime continua como feature/gate do
+        # especialista, mas a trajetória econômica permanece causal.
+        df_filtered = df.sort_index().copy()
 
         if df_filtered is None or df_filtered.empty:
             logger.error(f"❌ {self.name}: Sem dados suficientes para treinamento")

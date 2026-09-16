@@ -3,6 +3,8 @@
 # -----------------------------------------------------------------------------
 
 import asyncio
+import json
+import os
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -58,6 +60,8 @@ class TapeEngine:
         self._msg_received_count = 0
         self._last_vol_sync = datetime.utcnow()
         self._current_min_vol = {s: 0.0 for s in self.symbols}
+        self._tape_dataset_path = os.path.join(os.getcwd(), 'data', 'tape_snapshots.jsonl')
+        self._last_snapshot_at: Dict[str, datetime] = {}
 
     async def start(self):
         if self.is_running: return
@@ -155,11 +159,38 @@ class TapeEngine:
                     
                     # 3. FALLBACK OBI: Se o OBI via WS está parado, busca via REST (rpiDepth)
                     await self._fetch_rest_depth(symbol)
+                    self._record_snapshot(symbol)
                         
                 await asyncio.sleep(3) # Intervalo seguro para não estourar limite de peso da API
             except Exception as e:
                 logger.error(f"Erro no loop de análise: {e}")
                 await asyncio.sleep(5)
+
+    def _record_snapshot(self, symbol: str) -> None:
+        """Persist a causal tape snapshot for later training validation."""
+        now = datetime.utcnow()
+        previous = self._last_snapshot_at.get(symbol)
+        if previous and (now - previous).total_seconds() < 15:
+            return
+        pulse = self.get_market_pulse(symbol)
+        if pulse.get('pulse') == 'WARMUP...':
+            return
+        row = {
+            'timestamp': now.isoformat(timespec='seconds') + 'Z', 'symbol': symbol,
+            'tape_score': pulse['score'], 'tape_obi': pulse['obi'],
+            'tape_vpin': pulse['vpin'], 'tape_delta': pulse['delta'],
+            'tape_relative_volume': pulse['relative_volume'],
+            'tape_depth_quality': pulse['depth_quality'],
+            'tape_zone_imbalance_near': pulse['zone_imbalance_near'],
+            'tape_zone_imbalance_mid': pulse['zone_imbalance_mid'],
+        }
+        try:
+            os.makedirs(os.path.dirname(self._tape_dataset_path), exist_ok=True)
+            with open(self._tape_dataset_path, 'a', encoding='utf-8') as handle:
+                handle.write(json.dumps(row, separators=(',', ':')) + '\n')
+            self._last_snapshot_at[symbol] = now
+        except OSError as exc:
+            logger.warning(f"[TAPE] snapshot persistence failed: {exc}")
 
     async def _poll_rest_trades(self, symbol: str):
         """Busca trades recentes via REST se o WebSocket falhar."""

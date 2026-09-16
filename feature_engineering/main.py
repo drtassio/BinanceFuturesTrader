@@ -183,15 +183,30 @@ class FeatureEngineeringPipeline:
         # Estratégia correta:
         #   1. ffill() → propaga o último valor conhecido de cada TF (ex: valor 4h é válido
         #                até o próximo bar 4h; merge_asof já faz isso, mas pode falhar na borda)
-        #   2. bfill() → preenche o início absoluto (primeiras linhas sem barra anterior)
+        #   2. não usar bfill(): ele preenche uma linha passada com informação
+        #      de uma barra futura e contamina o treino/backtest.
         #   3. dropna(subset=OHLCV) → só remove linhas sem dados de preço (impossível operar)
         #   4. fillna(0) → NaN residuais em indicadores viram 0 (neutro)
         #
         # Resultado esperado: ~600 linhas ao invés de ~40 → AE e especialistas funcionam.
         required_ohlcv = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in featured_df_combined.columns]
-        featured_df_combined = featured_df_combined.ffill().bfill()
+        featured_df_combined = featured_df_combined.ffill()
         featured_df_combined.dropna(subset=required_ohlcv, inplace=True)
         featured_df_combined = featured_df_combined.fillna(0.0)
+
+        # A live tape snapshot belongs only to the latest bar. Applying it to
+        # historical rows would leak future order-book state into features.
+        if tape_metrics:
+            tape_map = {
+                'score': 'tape_score', 'obi': 'tape_obi', 'vpin': 'tape_vpin',
+                'delta': 'tape_delta', 'relative_volume': 'tape_relative_volume',
+                'depth_quality': 'tape_depth_quality',
+                'zone_imbalance_near': 'tape_zone_imbalance_near',
+                'zone_imbalance_mid': 'tape_zone_imbalance_mid',
+            }
+            for source, target in tape_map.items():
+                featured_df_combined[target] = 0.0
+                featured_df_combined.loc[featured_df_combined.index[-1], target] = float(tape_metrics.get(source, 0.0))
 
         rows_before = len(featured_df_combined)
         if featured_df_combined.empty:
