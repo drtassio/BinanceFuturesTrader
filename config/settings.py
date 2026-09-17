@@ -358,6 +358,12 @@ class AIConfig(Config):
     # Alterar aqui exige retreinar os agentes.
     TRAINING_LEVERAGE_CAP = float(os.environ.get('TRAINING_LEVERAGE_CAP', 3.0))
 
+    # Legacy profit/EMA exits exist only in the Ranger simulator. Disable
+    # them by default: learned exits must come from policy votes, while
+    # ordinary stops and emergency protection remain active. Opt-in is only
+    # for explicit legacy experiments and invalidates operational approval.
+    ENABLE_RANGER_RULE_BASED_EXITS = os.environ.get('ENABLE_RANGER_RULE_BASED_EXITS', 'False').lower() in ('true', '1', 't')
+
     # Limiar de |voto| para converter a saida continua do SAC em BUY/SELL.
     # Precisa acompanhar train_base_threshold do ambiente de treino: se
     # producao exigir mais conviccao que o treino, a politica opera menos do
