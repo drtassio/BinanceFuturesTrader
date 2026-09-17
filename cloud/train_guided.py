@@ -149,6 +149,41 @@ def _balanced_agreement(model, obs_t, act_t, sides):
     return 0.5 * (recall + specificity), recall, 1.0 - specificity
 
 
+def collect_dagger(model, agent_name, frame, rule, vec_env):
+    """The clone acts; the teacher labels every state the clone reaches.
+
+    Plain cloning only trains on states the teacher visits. A small mistake
+    takes the clone somewhere the teacher never went, where it errs again:
+    measured on validation, the clone matched the teacher's trade count (50 vs
+    51) and profit factor (1.94 vs 1.93) yet made +4.52% against +23.96%,
+    because it left trends early and the rule's hysteresis then kept it out.
+    DAgger (Ross, Gordon and Bagnell, 2011) labels the clone's own trajectory
+    with the teacher's decision for the position the clone actually holds, so
+    the next round of cloning covers exactly those states.
+    """
+    raw = _raw_env(vec_env)
+    observations, labels = [], []
+    obs = vec_env.reset()
+    start = int(getattr(raw, "start_idx", 0) or 0)
+    for _ in range(len(frame)):
+        row = frame.iloc[min(start + raw.current_step, len(frame) - 1)]
+        teacher = edge_action(row, raw.position, agent_name, rule)[None, :]
+        clone, _ = model.predict(obs, deterministic=True)
+        next_obs, reward, done, infos = vec_env.step(clone)
+        buffer_next = next_obs.copy()
+        if bool(done[0]) and "terminal_observation" in infos[0]:
+            buffer_next[0] = infos[0]["terminal_observation"]
+        # On-policy transitions also teach the critic what the clone's own
+        # mistakes cost, which the teacher's trajectory cannot show.
+        model.replay_buffer.add(obs, buffer_next, model.policy.scale_action(clone), reward, done, infos)
+        observations.append(obs[0].copy())
+        labels.append(model.policy.scale_action(teacher)[0].copy())
+        obs = next_obs
+        if bool(done[0]):
+            break
+    return np.asarray(observations, dtype=np.float32), np.asarray(labels, dtype=np.float32)
+
+
 def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
                     val_observations=None, val_actions=None, batch_size=512, patience=6):
     """Imitate the teacher without learning its incidental correlates.
@@ -219,6 +254,8 @@ def main() -> int:
     parser.add_argument("--data", type=Path, default=ROOT / "data" / "featured_data_causal.parquet")
     parser.add_argument("--rule", type=Path, help="padrao: models_ai/<agente>_edge_rule.json")
     parser.add_argument("--bc-epochs", type=int, default=30)
+    parser.add_argument("--dagger-iters", type=int, default=3)
+    parser.add_argument("--dagger-epochs", type=int, default=12)
     parser.add_argument("--critic-warmup", type=int, default=5000)
     parser.add_argument("--finetune-steps", type=int, default=60000)
     parser.add_argument("--eval-every", type=int, default=20000)
@@ -276,6 +313,18 @@ def main() -> int:
     model = agent.model
     model.set_logger(configure(folder=None, format_strings=[]))
 
+    # A professora so pode usar acoes que o agente consegue executar. A grade
+    # chegou a escolher sl_mult=5 com o espaco de acao limitado a 3: o agente
+    # cortava o stop e a comparacao entre os dois deixava de ser justa.
+    from dataclasses import replace as _replace
+    low, high = model.action_space.low, model.action_space.high
+    feasible = _replace(rule, sl_mult=float(np.clip(rule.sl_mult, low[1], high[1])),
+                        leverage=float(np.clip(rule.leverage, low[2], high[2])))
+    if feasible != rule:
+        print("professora ajustada ao espaco de acao: sl_mult %.1f->%.1f alavancagem %.1f->%.1f" % (
+            rule.sl_mult, feasible.sl_mult, rule.leverage, feasible.leverage))
+        rule = feasible
+
     # 1) Teacher on validation, for reference.
     teacher_val = {}
     try:
@@ -320,6 +369,26 @@ def main() -> int:
     best = {"label": "clonada", "score": score(cloned), "metrics": cloned}
     best_path = run_dir / "models" / "best_validation.zip"
     model.save(best_path)
+
+    for iteration in range(1, args.dagger_iters + 1):
+        print("DAgger %d: clone em malha fechada no treino, rotulado pela professora..." % iteration)
+        extra_obs, extra_act = collect_dagger(model, args.agent, train_df, rule, train_env)
+        observations = np.concatenate([observations, extra_obs])
+        actions = np.concatenate([actions, extra_act])
+        obs_t, act_t, weights = behaviour_clone(
+            model, observations, actions, args.dagger_epochs, SIDES[args.agent], keep_mask,
+            val_observations=val_observations, val_actions=val_actions)
+        metrics = evaluate(agent, val_df, args.agent, deterministic=True)
+        print("DAgger %d na validacao: %s" % (iteration, summarize(metrics)))
+        if score(metrics) > best["score"]:
+            best.update(label="DAgger %d" % iteration, score=score(metrics), metrics=metrics)
+            model.save(best_path)
+            print("    -> novo melhor na validacao")
+    if best["label"] != "clonada":
+        # O ajuste fino por RL parte da melhor politica imitada.
+        from specialists.trend_specialist import ClippedSAC as _Loader
+        model.actor.load_state_dict(_Loader.load(str(best_path), device=model.device).actor.state_dict())
+    cloned = best["metrics"]
 
     # 4) Critic warm-up with the actor frozen.
     print("aquecendo o critico (%d passos, ator congelado)..." % args.critic_warmup)

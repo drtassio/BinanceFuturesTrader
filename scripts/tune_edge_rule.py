@@ -73,15 +73,15 @@ def _load_split(which):
 
 
 def _worker(job):
-    agent, rule_dict = job
+    agent, rule_dict, split = job
     from learning.edge_policy import EdgeRule
     rule = EdgeRule(**rule_dict)
-    return rule_dict, run_rule(_load_split("train"), agent, rule)
+    return rule_dict, run_rule(_load_split(split), agent, rule)
 
 
-def score(result):
+def score(result, min_trades=MIN_TRAIN_TRADES):
     """Net return per unit of drawdown, only for rules that actually trade."""
-    if result["trades"] < MIN_TRAIN_TRADES or result["net_return"] <= 0:
+    if result["trades"] < min_trades or result["net_return"] <= 0:
         return -np.inf
     return result["net_return"] / max(result["max_drawdown"], 0.02)
 
@@ -92,21 +92,37 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent", choices=("bull", "bear", "ranger"), required=True)
     parser.add_argument("--workers", type=int, default=6)
+    # A selecao no treino e o padrao. O Bear e a excecao documentada: o bloco
+    # de treino (ago/2023 a jun/2025) e quase todo de alta e nenhuma regra
+    # short acumula trades suficientes ali. Para ele a regra e escolhida na
+    # validacao, o unico trecho de baixa antes do holdout, que continua
+    # intocado para o veredito final.
+    parser.add_argument("--select-on", choices=("train", "validation"), default="train")
+    parser.add_argument("--min-trades", type=int, default=MIN_TRAIN_TRADES)
+    # Os limiares de probabilidade precisam estar na escala de cada lado. O
+    # meta-modelo short tem taxa-base de 26.5%: p_short >= 0.50 fica acima do
+    # percentil 99 e a grade original so encontrava 3 a 5 trades por bloco.
+    parser.add_argument("--probabilities", default=None,
+                        help="lista separada por virgula; padrao por agente")
+    parser.add_argument("--edges", default="0.05,0.10,0.20")
     args = parser.parse_args()
+    default_probabilities = {"bull": "0.50,0.55,0.60", "bear": "0.30,0.35,0.40", "ranger": "0.35,0.45,0.55"}
+    probabilities = tuple(float(x) for x in (args.probabilities or default_probabilities[args.agent]).split(","))
+    edges = tuple(float(x) for x in args.edges.split(","))
 
     grid = []
     for p, e_in, e_out, regime, sl in itertools.product(
-            (0.50, 0.55, 0.60), (0.05, 0.10, 0.20), (-0.05, 0.0), (True, False), (3.0, 5.0)):
+            probabilities, edges, (-0.05, 0.0), (True, False), (3.0, 5.0)):
         if e_out >= e_in:
             continue
         grid.append(EdgeRule(enter_probability=p, enter_edge=e_in, exit_edge=e_out,
                              require_regime=regime, sl_mult=sl).as_dict())
-    print("%s: %d regras no treino, %d processos" % (args.agent, len(grid), args.workers))
+    print("%s: %d regras em %s, %d processos" % (args.agent, len(grid), args.select_on, args.workers))
 
     with Pool(args.workers) as pool:
-        results = pool.map(_worker, [(args.agent, g) for g in grid])
+        results = pool.map(_worker, [(args.agent, g, args.select_on) for g in grid])
 
-    results.sort(key=lambda item: score(item[1]), reverse=True)
+    results.sort(key=lambda item: score(item[1], args.min_trades), reverse=True)
     print("\n%-58s %7s %9s %6s %7s %6s %6s" % ("regra (treino)", "trades", "retorno", "PF", "maxDD", "acerto", "dur"))
     for rule, r in results[:10]:
         label = "p>=%.2f in>=%.2f out>%.2f reg=%s sl=%.0f" % (
@@ -115,10 +131,13 @@ def main() -> int:
             label, r["trades"], r["net_return"] * 100, r["profit_factor"], r["max_drawdown"] * 100, r["win_rate"], r["avg_duration"]))
 
     best_rule, best_train = results[0]
-    if not np.isfinite(score(best_train)):
-        print("\nNenhuma regra lucrativa com trades suficientes no treino.")
+    if not np.isfinite(score(best_train, args.min_trades)):
+        print("\nNenhuma regra lucrativa com trades suficientes em %s." % args.select_on)
         return 1
-    validation = run_rule(_load_split("validation"), args.agent, EdgeRule(**best_rule))
+    if args.select_on == "validation":
+        validation = dict(best_train)
+    else:
+        validation = run_rule(_load_split("validation"), args.agent, EdgeRule(**best_rule))
     print("\nescolhida: %s" % best_rule)
     print("validacao (vista uma vez): trades=%d retorno=%+.2f%% PF=%.2f maxDD=%.1f%% acerto=%.1f%%" % (
         validation["trades"], validation["net_return"] * 100, validation["profit_factor"],
@@ -126,7 +145,7 @@ def main() -> int:
 
     out = ROOT / "models_ai" / ("%s_edge_rule.json" % args.agent)
     out.write_text(json.dumps({"agent": args.agent, "rule": best_rule, "train": best_train,
-                               "validation": validation, "selected_on": "train_only"}, indent=2), encoding="utf-8")
+                               "validation": validation, "selected_on": args.select_on}, indent=2), encoding="utf-8")
     print("salvo em %s" % out)
     return 0
 
