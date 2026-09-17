@@ -491,47 +491,28 @@ class BaseRegimeSpecialist(TrendSpecialist):
         lucro 3.8 enquanto a politica deterministica jamais abriu posicao: quem
         negociava era o ruido de exploracao, e em producao ele nao existe.
         """
-        from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
-        from specialists.bull_specialist import BullTradingEnv
-        from specialists.bear_specialist import BearTradingEnv
-        from specialists.ranger_specialist import RangerTradingEnv
-
         if self.model is None or holdout_df is None or len(holdout_df) < 100:
             return {'num_trades': 0, 'net_return': 0.0, 'sharpe_ratio': 0.0,
                     'profit_factor': 0.0, 'max_drawdown': 1.0,
                     'reason': 'modelo ausente ou holdout curto'}
 
-        env_class = {'bull': BullTradingEnv, 'bear': BearTradingEnv,
-                     'ranger': RangerTradingEnv}.get(self.regime_type, TrendFollowingEnv)
         frame = holdout_df.sort_index().ffill().fillna(0.0)
-        raw = self._make_trend_env(frame, mode='training', env_class=env_class,
-                                   feature_columns=self.feature_columns)
-        raw.max_steps = len(frame) - 1
-        env = VecNormalize(VecFrameStack(DummyVecEnv([lambda: raw]), n_stack=4),
-                           norm_obs=False, norm_reward=False, training=False)
         summary = {}
         try:
-            observation = env.reset()
-            for _ in range(len(frame)):
-                action, _ = self.model.predict(observation, deterministic=True)
-                observation, _, done, _ = env.step(action)
-                if bool(done[0]):
-                    break
-            summaries = env.env_method('consume_episode_summaries')[0]
-            if summaries:
-                summary = dict(summaries[-1])
+            # One evaluator owns phase-3 mechanics, chronological replay,
+            # terminal equity and annualized DAILY Sharpe in both workflows.
+            from cloud.train_agent import evaluate
+            summary = evaluate(self, frame, self.regime_type, deterministic=True)
         except Exception as exc:
             logger.error("%s: falha ao avaliar holdout: %s", self.name, exc, exc_info=True)
             return {'num_trades': 0, 'net_return': 0.0, 'sharpe_ratio': 0.0,
                     'profit_factor': 0.0, 'max_drawdown': 1.0, 'reason': str(exc)}
-        finally:
-            env.close()
 
         # Traduz os nomes do snapshot do ambiente para os que o portao espera.
         return {
             'num_trades': int(summary.get('num_trades', 0) or 0),
             'net_return': float(summary.get('total_return_pct', 0.0) or 0.0),
-            'sharpe_ratio': float(summary.get('trade_sharpe', 0.0) or 0.0),
+            'sharpe_ratio': float(summary.get('sharpe_ratio', 0.0) or 0.0),
             'profit_factor': float(summary.get('profit_factor', 0.0) or 0.0),
             'max_drawdown': float(summary.get('max_drawdown_pct', 1.0) or 0.0),
             'win_rate_pct': float(summary.get('win_rate_pct', 0.0) or 0.0),
@@ -562,7 +543,7 @@ class BaseRegimeSpecialist(TrendSpecialist):
         elif direction == 'short_only' and signal.action == Action.BUY:
             mismatch = True
 
-        if mismatch:
+        if mismatch and not self._is_position_exit(observation, signal.action):
             if signal.explanation is None:
                 signal.explanation = {}
             

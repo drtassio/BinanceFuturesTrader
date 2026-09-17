@@ -485,6 +485,14 @@ class ExecutionEngine:
             logger.error(f"❌ [ERRO EXEC] Tentativa de submeter objeto não-Signal. Ignorando: {signal}")
             return
 
+        if (signal.explanation or {}).get('position_exit'):
+            current = self.portfolio.positions.get(signal.symbol)
+            quantity = float(current.quantity) if current is not None else 0.0
+            if not ((quantity > 0 and signal.action == Action.SELL)
+                    or (quantity < 0 and signal.action == Action.BUY)):
+                logger.warning('[EXEC] Stale position-exit vote rejected: %s', signal.symbol)
+                return
+
         # [POSITION LIMIT] Verifica se já existe uma posição aberta
         has_position = await self._check_position_limit(signal.symbol)
         current_pos = self.portfolio.positions.get(signal.symbol)

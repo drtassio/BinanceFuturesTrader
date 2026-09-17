@@ -39,12 +39,15 @@ AGENTS = {"bull": BullSpecialist, "bear": BearSpecialist, "ranger": RangerSpecia
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=Path, default=ROOT / "data" / "featured_data_causal.parquet")
-    parser.add_argument("--holdout-fraction", type=float, default=0.15)
+    parser.add_argument("--holdout-fraction", type=float, default=None,
+                        help="legacy option: only 0.15 is supported; uses the trainer's embargoed split")
     args = parser.parse_args()
+    if args.holdout_fraction is not None and args.holdout_fraction != 0.15:
+        parser.error('use the canonical embargoed training/validation/holdout split')
 
     frame = pd.read_parquet(args.data).sort_index().ffill().fillna(0.0)
-    cut = int(len(frame) * (1.0 - args.holdout_fraction))
-    holdout = frame.iloc[cut:].copy()
+    from cloud.train_agent import split_chronological
+    _, _, holdout = split_chronological(frame)
     print("holdout: %s -> %s (%d barras)" % (holdout.index.min(), holdout.index.max(), len(holdout)))
     close = holdout["close"].astype(float)
     print("buy & hold no periodo: %+.2f%%\n" % ((close.iloc[-1] / close.iloc[0] - 1.0) * 100))

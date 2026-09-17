@@ -5947,6 +5947,17 @@ class TrendSpecialist:
             raise ValueError('Non-finite live observation')
         return observation
 
+    @staticmethod
+    def _is_position_exit(observation: np.ndarray, action: Action) -> bool:
+        # The newest frame ends in agent_state(3), time(4), prior(2), physics(2).
+        # Its position sign is raw (only market features are scaled).
+        values = np.asarray(observation).reshape(-1)
+        if values.size < 11 or not np.isfinite(values[-11]):
+            return False
+        side = float(values[-11])
+        return ((side == 1.0 and action == Action.SELL)
+                or (side == -1.0 and action == Action.BUY))
+
     def decide_action(self, observation: np.ndarray, df_row: pd.Series,
                       observation_is_normalized: bool = False) -> Optional[Signal]:
         if not self.is_trained or self.model is None:
@@ -6102,16 +6113,24 @@ class TrendSpecialist:
             # Bull: apenas BUY (long_only). Bear: apenas SELL (short_only).
             # Se o modelo gerar sinal contrário à especialidade, converte em HOLD.
             specialist_direction = getattr(self, '_specialist_direction', None)  # 'long_only' | 'short_only' | None
-            if specialist_direction == 'long_only' and final_action == Action.SELL:
+            closing_position = self._is_position_exit(observation, final_action)
+            if specialist_direction == 'long_only' and final_action == Action.SELL and not closing_position:
                 logger.info(f"🐂 [REGIME FILTER] BullSpecialist: SELL bloqueado → HOLD (long_only em produção)")
                 final_action = Action.HOLD
                 explanation['reason'] = 'BullSpecialist: sinal SELL bloqueado (long_only)'
                 confidence = 0.0
-            elif specialist_direction == 'short_only' and final_action == Action.BUY:
+            elif specialist_direction == 'short_only' and final_action == Action.BUY and not closing_position:
                 logger.info(f"🐻 [REGIME FILTER] BearSpecialist: BUY bloqueado → HOLD (short_only em produção)")
                 final_action = Action.HOLD
                 explanation['reason'] = 'BearSpecialist: sinal BUY bloqueado (short_only)'
                 confidence = 0.0
+
+            if closing_position:
+                # ExecutionEngine closes the exact opposite position with
+                # reduceOnly when size >= .9; never open/reverse with this vote.
+                position_size_pct = 1.0
+                confidence = 1.0
+                explanation['position_exit'] = True
 
             return Signal(
                 symbol=self.trading_config.PRIMARY_PAIR, action=final_action, confidence=confidence, 
