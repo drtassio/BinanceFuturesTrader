@@ -149,7 +149,8 @@ def main() -> int:
             break
     if contract_path is None:
         raise SystemExit("sem feature_contract.json na execucao: impossivel provar que scaler e politica combinam")
-    trained = [str(c) for c in json.loads(contract_path.read_text(encoding="utf-8")).get("feature_columns", [])]
+    run_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    trained = [str(c) for c in run_contract.get("feature_columns", [])]
     if trained != names:
         missing = [c for c in trained if c not in names]
         unexpected = [c for c in names if c not in trained]
@@ -163,7 +164,11 @@ def main() -> int:
 
     # Confirma tambem pelo proprio ambiente, quando o dataset esta disponivel:
     # e ele que decide o tamanho real da observacao em producao.
-    dataset = ROOT / "data" / "featured_data_causal.parquet"
+    # The environment's observation depends on the stop scale and on which
+    # columns the training frame had, both recorded by the trainer.
+    dataset = Path(run_contract.get("dataset") or ROOT / "data" / "featured_data_causal.parquet")
+    if not dataset.is_absolute():
+        dataset = ROOT / dataset
     if dataset.exists():
         import os
         import pandas as pd
@@ -175,7 +180,10 @@ def main() -> int:
         from specialists.ranger_specialist import RangerTradingEnv
 
         env_class = {"bull": BullTradingEnv, "bear": BearTradingEnv, "ranger": RangerTradingEnv}[agent]
+        AIConfig.ENV_STOP_ATR_TIMEFRAME = run_contract.get("stop_atr_timeframe", "15m")
         sample = pd.read_parquet(dataset).sort_index().iloc[-600:].ffill().fillna(0.0)
+        if run_contract.get("training_frame_columns"):
+            sample = sample[run_contract["training_frame_columns"]]
         env = env_class(df=sample, config=AIConfig(), mode="training",
                         feature_columns=names, specialist_name="%s_specialist" % agent)
         expected = int(env.observation_space.shape[0]) * N_STACK
@@ -206,6 +214,10 @@ def main() -> int:
         "model_sha256": sha256(args.dest / model_name),
         "scaler_sha256": sha256(args.dest / scaler_name),
     }
+    # The live mirror needs the stop scale and frame the model was trained on.
+    for key in ("stop_atr_timeframe", "training_frame_columns", "dataset"):
+        if key in run_contract:
+            contract[key] = run_contract[key]
     (args.dest / ("%s_feature_contract.json" % agent)).write_text(json.dumps(contract, indent=2), encoding="utf-8")
 
     print("\npromovido para %s" % args.dest)
