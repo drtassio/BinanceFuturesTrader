@@ -151,8 +151,9 @@ def add_trend_structure(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     # funding included); the 100-bar channel above is a 25-hour trend and chops.
     # Positive breakout_up: the close cleared the prior highs; negative
     # breakout_down: it lost the prior lows. shift(1) keeps the current bar out
-    # of its own reference.
-    for win in (240, 480):
+    # of its own reference. 32 and 192 serve the fast rally teacher (a 48-hour
+    # high on expanding volatility with buyers in control, out on an 8-hour low).
+    for win in (32, 192, 240, 480):
         prior_high = high.rolling(win).max().shift(1)
         prior_low = low.rolling(win).min().shift(1)
         put("breakout_up_%d" % win, (close - prior_high) / atr)

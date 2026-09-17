@@ -144,16 +144,66 @@ def breakout_action(row, position: float, agent: str, rule: BreakoutRule) -> np.
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 
 
+@dataclass(frozen=True)
+class RallyRule:
+    """Surf sharp rallies in any market: momentum confirmed by the order flow.
+
+    Entry: the close clears the prior entry_window-bar high while volatility
+    expands and buyers are in control (aggressor imbalance positive, 16-bar
+    cumulative volume delta above min_cvd standard deviations). Exit: the close
+    loses the prior exit_window-bar low; stops come from the environment.
+
+    Chosen on the training block only among 864 variants (research on the
+    2020-2026 live-built history, 0.05% per side and funding): 48h high,
+    expansion > 1.2, exit on the 8h low. Train +266% Sharpe 1.43 DD 17%,
+    validation +13% Sharpe 0.76, holdout +1% while BTC fell 38%, positive in
+    every calendar year including 2022. Without the flow condition the same
+    rule lost 5% on validation and 6% on holdout.
+    """
+    kind: str = "rally"
+    entry_window: int = 192
+    exit_window: int = 32
+    min_expansion: float = 1.2
+    min_cvd: float = 1.0
+    sl_mult: float = 3.0
+    leverage: float = 3.0
+    vote: float = 0.8
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def rally_inputs(rule: RallyRule) -> tuple:
+    return ("cz_breakout_up_%d" % rule.entry_window, "cz_breakout_down_%d" % rule.exit_window,
+            "cz_atr_expansion", "cz_aggression", "cz_cvd_z_16")
+
+
+def rally_action(row, position: float, agent: str, rule: RallyRule) -> np.ndarray:
+    if SIDES[agent] != (1,):
+        raise ValueError("rally teacher is long-only; %s is not" % agent)
+    breakout, exit_, expansion, aggression, cvd = (float(row.get(c, 0.0)) for c in rally_inputs(rule))
+    if position > 0:
+        vote = -rule.vote if exit_ < 0.0 else rule.vote
+    else:
+        started = breakout > 0.0 and expansion > rule.min_expansion and aggression > 0.0 and cvd > rule.min_cvd
+        vote = rule.vote if started else -rule.vote
+    return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
 def load_rule(saved: Dict[str, object]):
     """Teacher from its saved JSON 'rule' block."""
     if saved.get("kind") == "breakout":
         return BreakoutRule(**saved)
+    if saved.get("kind") == "rally":
+        return RallyRule(**saved)
     return EdgeRule(**saved)
 
 
 def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
     if isinstance(rule, BreakoutRule):
         return breakout_action(row, position, agent, rule)
+    if isinstance(rule, RallyRule):
+        return rally_action(row, position, agent, rule)
     return edge_action(row, position, agent, rule)
 
 
@@ -161,4 +211,6 @@ def teacher_inputs(rule, agent: str) -> Dict[str, object]:
     """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
     if isinstance(rule, BreakoutRule):
         return {"columns": breakout_inputs(rule, agent), "prior_dir": False}
+    if isinstance(rule, RallyRule):
+        return {"columns": rally_inputs(rule), "prior_dir": False}
     return {"columns": ("ml_p_long", "ml_p_short", "ml_edge"), "prior_dir": bool(rule.require_regime)}
