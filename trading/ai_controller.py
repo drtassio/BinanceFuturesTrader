@@ -2657,6 +2657,19 @@ class AIController:
                         float(frame["ml_edge"].iloc[-1]), float(frame["tp_prior_dir"].iloc[-1]),
                         " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))
         shadows = self._teacher_cache[1]
+        return self._mirror_to_signal(shadows, bar, teacher.POLICY_NAME, "EdgeTeacher")
+
+    def _mirror_to_signal(self, shadows, bar, policy_name: str, label: str) -> Signal:
+        """Order that makes the account hold what the replayed environments hold."""
+        import time as _time
+        from trading import teacher_policy as teacher
+
+        symbol = self.config_trading.PRIMARY_PAIR
+
+        def hold(reason, **extra):
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": reason, "specialist": label,
+                                       "regime": label.upper(), "policy": policy_name, **extra})
 
         position = self.portfolio.positions.get(symbol)
         live_side = int(np.sign(position.quantity)) if position is not None and position.quantity else 0
@@ -2672,8 +2685,8 @@ class AIController:
 
         cfg = self.config_trading
         action = Action.BUY if decision.side > 0 else Action.SELL
-        explanation = {"reason": decision.reason, "specialist": "EdgeTeacher", "regime": "TEACHER",
-                       "policy": teacher.POLICY_NAME, **details}
+        explanation = {"reason": decision.reason, "specialist": label, "regime": label.upper(),
+                       "policy": policy_name, **details}
         if decision.action == "close":
             # position_size_pct >= 0.9 faz o ExecutionEngine fechar a quantidade
             # exata com reduceOnly.
@@ -2705,10 +2718,70 @@ class AIController:
         if not approved:
             return hold("vetado pelo risco: %s" % reason, **details)
         self._teacher_last_order = (key, _time.monotonic())
-        logger.info("[TEACHER] %s %s | margem %.1f%% x %.0fx | stop de catastrofe %.2f%% | %s",
+        logger.info("[%s] %s %s | margem %.1f%% x %.0fx | stop de catastrofe %.2f%% | %s", label,
                     decision.action, action.value, signal.position_size_pct * 100, signal.leverage,
                     (signal.stop_loss or 0.0) * 100, decision.reason)
         return signal
+
+    async def prepare_agent_mirror(self) -> bool:
+        """Load the approved specialists and make sure the replay history is complete."""
+        from trading import agent_mirror as mirror
+
+        model_dir = Path(str(self.config_ai.MODEL_DIR))
+        names = [a.strip() for a in str(getattr(self.config_trading, 'LIVE_AGENTS', 'bull')).split(',') if a.strip()]
+        approved, detail = mirror.approval_is_valid(model_dir)
+        if not approved and bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            logger.critical("[MIRROR] Especialistas sem aprovacao valida (%s). Nenhuma ordem sera enviada.", detail)
+            self.teacher_ready = False
+            return False
+        self.mirror_agents = {}
+        for name in names:
+            try:
+                self.mirror_agents[name] = mirror.load_specialist(name, model_dir)
+            except Exception as exc:
+                logger.critical("[MIRROR] Nao foi possivel carregar %s: %s", name, exc)
+                self.teacher_ready = False
+                return False
+        self.mirror_history = mirror.LiveHistory()
+        newest = pd.Timestamp.now(tz="UTC").floor("15min") - mirror.BAR
+        missing = self.mirror_history.missing_since(newest)
+        if missing is not None:
+            logger.info("[MIRROR] Reconstruindo historico de candles fechados desde %s...", missing)
+            await mirror.rebuild(self.mirror_history, missing, newest + mirror.BAR)
+        self.teacher_ready = True
+        self.is_trained = True
+        logger.info("[MIRROR] Especialistas prontos: %s | historico %d barras ate %s", list(self.mirror_agents),
+                    len(self.mirror_history.frame), self.mirror_history.frame.index[-1])
+        return True
+
+    async def _agent_mirror_decision(self, recent_market_df: pd.DataFrame) -> Signal:
+        from trading import agent_mirror as mirror
+
+        symbol = self.config_trading.PRIMARY_PAIR
+        if not self.teacher_ready or not self.risk_manager or not self.portfolio:
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": "espelho indisponivel", "policy": mirror.POLICY_NAME})
+        now = pd.Timestamp.now(tz="UTC")
+        frame = recent_market_df.copy()
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        newest = self.mirror_history.append_newest(frame, now)
+        if not self.mirror_history.is_complete(newest):
+            start = self.mirror_history.missing_since(newest)
+            logger.warning("[MIRROR] Historico incompleto desde %s: reconstruindo antes de decidir.", start)
+            await mirror.rebuild(self.mirror_history, start, newest + mirror.BAR)
+            if not self.mirror_history.is_complete(newest):
+                return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "historico incompleto", "policy": mirror.POLICY_NAME})
+        if self._teacher_cache is None or self._teacher_cache[0] != newest:
+            history = self.mirror_history.frame.loc[:newest]
+            shadows = []
+            for name, (agent, contract) in self.mirror_agents.items():
+                shadows.append(await asyncio.to_thread(mirror.replay, agent, contract, history, name))
+            self._teacher_cache = (newest, shadows)
+            logger.info("[MIRROR] barra %s | %s", newest,
+                        " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))
+        return self._mirror_to_signal(self._teacher_cache[1], newest, mirror.POLICY_NAME, "AgentMirror")
 
     async def generate_trading_decision(self, recent_market_df: pd.DataFrame) -> Signal:
         """
@@ -2716,6 +2789,14 @@ class AIController:
         Orquestra o pipeline de deciso completo: features, verificao de drift,
         anlise de regime, seleo de especialista, modulao e risco.
         """
+        if self.live_policy == 'agent_mirror':
+            try:
+                return await self._agent_mirror_decision(recent_market_df)
+            except Exception as exc:
+                logger.critical("[MIRROR] Falha ao decidir: %s", exc, exc_info=True)
+                return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "falha do espelho: %s" % exc, "policy": "agent_mirror"})
+
         if self.live_policy == 'edge_teacher':
             try:
                 return await self._teacher_decision(recent_market_df)
