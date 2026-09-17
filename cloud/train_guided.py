@@ -66,7 +66,9 @@ def score(metrics: dict) -> float:
     dd = float(metrics.get("max_drawdown_pct", 1.0) or 0.0)
     # Do not prefer a high ratio from eight trades over a validated policy
     # that actually meets the bot's minimum activity and drawdown criteria.
-    if trades < int(AIConfig.OOS_MIN_TRADES) or net <= 0.0 or pf < 1.2 or dd > float(AIConfig.OOS_MAX_DRAWDOWN):
+    if not all(np.isfinite(value) for value in (net, pf, dd)):
+        return -np.inf
+    if trades < int(AIConfig.OOS_MIN_TRADES) or net <= 0.0 or pf < 1.2 or not 0.0 <= dd <= float(AIConfig.OOS_MAX_DRAWDOWN):
         return -np.inf
     return net / max(dd, 0.02)
 
@@ -426,6 +428,11 @@ def main() -> int:
     from specialists.trend_specialist import ClippedSAC
     agent.model = ClippedSAC.load(str(best_path), device=model.device)
     print("\nescolhida pela validacao: %s (%s)" % (best["label"], summarize(best["metrics"])))
+    # Training reward and imitation accuracy are not financial performance.
+    # Measure the selected deterministic agent on train too, without learning
+    # or changing checkpoint selection; only then touch the final holdout.
+    trained = evaluate(agent, train_df, args.agent, deterministic=True)
+    print("TREINO (politica deterministica selecionada): %s" % summarize(trained))
     holdout = evaluate(agent, holdout_df, args.agent, deterministic=True)
     verdict = judge(holdout, buy_and_hold_return(holdout_df))
     print("HOLDOUT: %s | buy&hold %+.2f%%" % (summarize(holdout), verdict["buy_and_hold_return"] * 100))
@@ -439,6 +446,11 @@ def main() -> int:
         "teacher_rule": rule.as_dict(), "teacher_validation": teacher_val,
         "cloned_validation": cloned, "selected": best["label"],
         "selected_validation": best["metrics"], "holdout_metrics": holdout, "verdict": verdict,
+        "train_metrics": trained,
+        "settings": {"bc_epochs": args.bc_epochs, "dagger_iters": args.dagger_iters,
+                     "dagger_epochs": args.dagger_epochs, "critic_warmup": args.critic_warmup,
+                     "finetune_steps": args.finetune_steps, "eval_every": args.eval_every,
+                     "max_bars": args.max_bars},
         "periods": {"train": [str(train_df.index.min()), str(train_df.index.max())],
                     "validation": [str(val_df.index.min()), str(val_df.index.max())],
                     "holdout": [str(holdout_df.index.min()), str(holdout_df.index.max())]},
