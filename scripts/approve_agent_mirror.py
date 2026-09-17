@@ -83,7 +83,7 @@ def main() -> int:
         "holdout: DD <= 15%": hold["dd"] <= 0.15,
         "holdout: >= 20 trades": hold["trades"] >= 20,
         "holdout: bate buy and hold": hold["net"] > benchmark,
-        ("holdout: perda <= 5% (mercado %+.0f%% contra o lado)" % (100 * benchmark) if adverse
+        ("holdout: perda <= 5%% (mercado %+.0f%% contra o lado)" % (100 * benchmark) if adverse
          else "holdout: retorno > 0"): hold["net"] >= -0.05 if adverse else hold["net"] > 0,
     }
     approved = all(checks.values())
