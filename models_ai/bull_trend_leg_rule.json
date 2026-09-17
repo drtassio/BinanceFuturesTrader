@@ -1,7 +1,7 @@
 {
   "agent": "bull",
   "rule": {
-    "kind": "rally",
+    "kind": "trend_leg",
     "entry_window": 192,
     "exit_window": 32,
     "min_expansion": 1.2,

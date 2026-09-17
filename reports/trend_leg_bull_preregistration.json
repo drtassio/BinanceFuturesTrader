@@ -1,7 +1,7 @@
 {
   "registered_at": "2026-09-17T10:43:12Z",
   "agent": "bull",
-  "teacher": "models_ai/bull_rally_rule.json (chosen on train only), ENV_STOP_ATR_TIMEFRAME=1h (chosen on train: +182% vs +79% for 4h)",
+  "teacher": "models_ai/bull_trend_leg_rule.json, formerly bull_rally_rule.json (chosen on train only), ENV_STOP_ATR_TIMEFRAME=1h (chosen on train: +182% vs +79% for 4h)",
   "candidate": "the checkpoint cloud/train_guided.py selects on validation in the run under cloud/artifacts/rally started at this time",
   "approval": "scripts/approve_agent_mirror.py criteria as committed in 930ff58 (unchanged), plus mirror parity 20/20 on the promoted files",
   "comparison_with_trend_bull": "the rally Bull replaces the approved trend Bull only if it also passes approval; between two approved Bulls the choice is made on VALIDATION net return per unit drawdown, never on holdout",

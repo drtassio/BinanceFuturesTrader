@@ -145,8 +145,12 @@ def breakout_action(row, position: float, agent: str, rule: BreakoutRule) -> np.
 
 
 @dataclass(frozen=True)
-class RallyRule:
-    """Surf sharp rallies in any market: momentum confirmed by the order flow.
+class TrendLegRule:
+    """Follow a trend leg from its start until it loses strength, in any market.
+
+    Not a regime bet: the leg can last hours to a few days and happens inside
+    bull and bear markets alike (strong rebounds included). Order flow confirms
+    that the leg is real.
 
     Entry: the close clears the prior entry_window-bar high while volatility
     expands and buyers are in control (aggressor imbalance positive, 16-bar
@@ -160,7 +164,7 @@ class RallyRule:
     every calendar year including 2022. Without the flow condition the same
     rule lost 5% on validation and 6% on holdout.
     """
-    kind: str = "rally"
+    kind: str = "trend_leg"
     entry_window: int = 192
     exit_window: int = 32
     min_expansion: float = 1.2
@@ -173,15 +177,15 @@ class RallyRule:
         return asdict(self)
 
 
-def rally_inputs(rule: RallyRule) -> tuple:
+def trend_leg_inputs(rule: "TrendLegRule") -> tuple:
     return ("cz_breakout_up_%d" % rule.entry_window, "cz_breakout_down_%d" % rule.exit_window,
             "cz_atr_expansion", "cz_aggression", "cz_cvd_z_16")
 
 
-def rally_action(row, position: float, agent: str, rule: RallyRule) -> np.ndarray:
+def trend_leg_action(row, position: float, agent: str, rule: "TrendLegRule") -> np.ndarray:
     if SIDES[agent] != (1,):
-        raise ValueError("rally teacher is long-only; %s is not" % agent)
-    breakout, exit_, expansion, aggression, cvd = (float(row.get(c, 0.0)) for c in rally_inputs(rule))
+        raise ValueError("trend-leg teacher is long-only; %s is not" % agent)
+    breakout, exit_, expansion, aggression, cvd = (float(row.get(c, 0.0)) for c in trend_leg_inputs(rule))
     if position > 0:
         vote = -rule.vote if exit_ < 0.0 else rule.vote
     else:
@@ -194,16 +198,16 @@ def load_rule(saved: Dict[str, object]):
     """Teacher from its saved JSON 'rule' block."""
     if saved.get("kind") == "breakout":
         return BreakoutRule(**saved)
-    if saved.get("kind") == "rally":
-        return RallyRule(**saved)
+    if saved.get("kind") in ("trend_leg", "rally"):  # "rally": earlier name of the same rule
+        return TrendLegRule(**{**saved, "kind": "trend_leg"})
     return EdgeRule(**saved)
 
 
 def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
     if isinstance(rule, BreakoutRule):
         return breakout_action(row, position, agent, rule)
-    if isinstance(rule, RallyRule):
-        return rally_action(row, position, agent, rule)
+    if isinstance(rule, TrendLegRule):
+        return trend_leg_action(row, position, agent, rule)
     return edge_action(row, position, agent, rule)
 
 
@@ -211,6 +215,10 @@ def teacher_inputs(rule, agent: str) -> Dict[str, object]:
     """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
     if isinstance(rule, BreakoutRule):
         return {"columns": breakout_inputs(rule, agent), "prior_dir": False}
-    if isinstance(rule, RallyRule):
-        return {"columns": rally_inputs(rule), "prior_dir": False}
+    if isinstance(rule, TrendLegRule):
+        return {"columns": trend_leg_inputs(rule), "prior_dir": False}
     return {"columns": ("ml_p_long", "ml_p_short", "ml_edge"), "prior_dir": bool(rule.require_regime)}
+
+
+# Earlier name, kept so runs and reports saved under it still load.
+RallyRule = TrendLegRule

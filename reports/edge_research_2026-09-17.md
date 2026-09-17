@@ -10,8 +10,8 @@ set/2024–set/2025, holdout out/2025–set/2026 (BTC −38%). Regras e parâmet
 |---|---|---|---|
 | Tendência longa (Donchian 480/240, stops ATR 4h) — professora | +94,3%, PF 2,60 | +15,1% | −3,2% |
 | Agente de tendência (DAgger 2), aprovado | +83,7%, PF 4,41 | +18,9%, PF 4,84, DD 7,5% | −2,7%, PF 2,31 |
-| **Rally com fluxo** (rompe topo 48h + expansão de volatilidade + agressão/CVD compradores, sai no fundo de 8h) — pesquisa vetorizada | +266%, Sharpe 1,43, DD 17% | +13%, Sharpe 0,76 | +1% |
-| **Rally com fluxo** — professora no ambiente, stops ATR 1h | **+182,1%**, PF 4,02, DD 10,4% | **+17,4%**, PF 1,86, DD 8,0% | **+10,1%**, PF 2,47, DD 10,5% |
+| **Perna de tendência com fluxo** (rompe topo 48h + expansão de volatilidade + agressão/CVD compradores, sai no fundo de 8h) — pesquisa vetorizada | +266%, Sharpe 1,43, DD 17% | +13%, Sharpe 0,76 | +1% |
+| **Perna de tendência com fluxo** — professora no ambiente, stops ATR 1h | **+182,1%**, PF 4,02, DD 10,4% | **+17,4%**, PF 1,86, DD 8,0% | **+10,1%**, PF 2,47, DD 10,5% |
 
 A regra de rally foi positiva em todos os anos (2020 +45%, 2021 +27%, 2022 +11%, 2023 +29%, 2024 +39%, 2025 +3%, 2026 +15%).
 Sem a condição de fluxo, a mesma regra perdeu 5% na validação e 6% no holdout: o tape é o que dá o edge.
