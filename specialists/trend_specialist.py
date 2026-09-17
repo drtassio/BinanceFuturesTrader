@@ -1204,34 +1204,39 @@ class TrendFollowingEnv(gym.Env):
     def _init_dynamic_risk_controls(self) -> None:
         """Calcula valores de refer?ncia din?micos para car?ncia e SL a partir do dataset."""
         # BUG N6 FIX: Calcular baseline sobre o episódio atual, e não sobre o dataset inteiro.
-        start_idx = getattr(self, 'start_idx', 0)
-        end_idx = min(len(self.df), start_idx + getattr(self, 'max_steps', len(self.df)))
-        episode_df = self.df.iloc[start_idx:end_idx]
+        # Risk calibration may only see bars available at the current decision.
+        # Episode-wide percentiles leaked future volatility/duration into stops
+        # and made identical bars behave differently in a live replay window.
+        start_idx = getattr(self, 'start_idx', 0) + getattr(self, 'current_step', 0)
+        # Cache causal rolling statistics once: no pandas slicing/quantiles on
+        # every training step, particularly important on a CPU-only machine.
+        if not hasattr(self, '_causal_risk_cache'):
+            cached = {}
+            if 'tp_duration_median' in self.df.columns:
+                values = pd.to_numeric(self.df['tp_duration_median'], errors='coerce').replace([np.inf, -np.inf], np.nan)
+                rolling = values.rolling(256, min_periods=1)
+                cached['duration'] = [rolling.quantile(q).to_numpy() for q in (0.25, 0.5, 0.75)]
+            if self.atr_col in self.df.columns and 'close' in self.df.columns:
+                atr_values = pd.to_numeric(self.df[self.atr_col], errors='coerce')
+                close_values = pd.to_numeric(self.df['close'], errors='coerce').replace(0.0, np.nan)
+                values = (atr_values / close_values).replace([np.inf, -np.inf], np.nan)
+                cached['atr'] = values.rolling(256, min_periods=1).median().to_numpy()
+            self._causal_risk_cache = cached
 
-        durations = None
-        if 'tp_duration_median' in episode_df.columns:
-            try:
-                durations = pd.to_numeric(episode_df['tp_duration_median'], errors='coerce')
-            except Exception:
-                durations = None
-        if durations is not None:
-            valid = durations[np.isfinite(durations)]
-            if not valid.empty:
-                self._grace_floor = max(5, int(np.nanpercentile(valid, 25)))
-                self._grace_median = max(self.scalp_penalty_min_duration, int(np.nanmedian(valid)))
-                self._grace_cap = max(self._grace_median + 5, int(np.nanpercentile(valid, 75) * 1.5))
-                self.scalp_penalty_min_duration = int(self._grace_median)
-        if self.atr_col in episode_df.columns and 'close' in episode_df.columns:
-            try:
-                atr_series = pd.to_numeric(episode_df[self.atr_col], errors='coerce')
-                close_series = pd.to_numeric(episode_df['close'], errors='coerce').replace(0.0, np.nan)
-                atr_pct_series = (atr_series / close_series).replace([np.inf, -np.inf], np.nan).dropna()
-                if not atr_pct_series.empty:
-                    self._atr_pct_baseline = float(np.nanmedian(atr_pct_series))
-            except Exception:
-                pass
+        self._grace_floor = 10
+        self._grace_median = self.scalp_penalty_min_duration
+        self._grace_cap = max(90, self.scalp_penalty_min_duration * 2)
+        self._atr_pct_baseline = 0.01
+        duration = self._causal_risk_cache.get('duration')
+        if duration is not None and all(np.isfinite(values[start_idx]) for values in duration):
+            q25, median, q75 = (values[start_idx] for values in duration)
+            self._grace_floor = max(5, int(q25))
+            self._grace_median = max(self.scalp_penalty_min_duration, int(median))
+            self._grace_cap = max(self._grace_median + 5, int(q75 * 1.5))
+        atr_baseline = self._causal_risk_cache.get('atr')
+        if atr_baseline is not None and np.isfinite(atr_baseline[start_idx]):
+            self._atr_pct_baseline = float(atr_baseline[start_idx])
         self._atr_pct_baseline = max(self._atr_pct_baseline, 1e-3)
-        self._active_grace_period = 0
 
     def _compute_trade_grace_period(self, atr_pct: float, duration_hint: float, prior_strength: float, trend_bias: float) -> int:
         base = max(self._grace_floor, min(self._grace_cap, int(round(duration_hint)) if duration_hint > 0 else self._grace_median))
@@ -1601,6 +1606,7 @@ class TrendFollowingEnv(gym.Env):
         if np.isnan(atr) or atr <= 1e-9:
             atr = current_price * 0.01
         atr_pct = float(atr / (current_price + 1e-9)) if current_price else 0.0
+        self._init_dynamic_risk_controls()
         # Ajuste din?mico dos multiplicadores de SL conforme volatilidade
         sl_min_bound, sl_max_bound = self._dynamic_sl_bounds(atr_pct)
         sl_mult = float(np.clip(sl_mult_raw, sl_min_bound, sl_max_bound))

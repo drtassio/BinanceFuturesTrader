@@ -109,6 +109,8 @@ def evaluate(agent, frame: pd.DataFrame, agent_name: str, deterministic: bool = 
     """Run the policy over a whole block and report what it actually did."""
     env = _episode_environment(agent, frame, agent_name)
     actions = []
+    initial_worth = float(env.get_attr('initial_balance')[0])
+    equity = [initial_worth]
     try:
         observation = env.reset()
         summary = None
@@ -116,9 +118,12 @@ def evaluate(agent, frame: pd.DataFrame, agent_name: str, deterministic: bool = 
             action, _ = agent.model.predict(observation, deterministic=deterministic)
             actions.append(float(np.asarray(action).reshape(-1)[0]))
             observation, _, done, _ = env.step(action)
+            equity.append(float(env.get_attr('net_worth')[0]))
             if bool(done[0]):
                 summaries = env.env_method("consume_episode_summaries")[0]
                 summary = summaries[-1] if summaries else None
+                if summary:
+                    equity[-1] = float(summary.get('final_net_worth', float('nan')))
                 break
         if summary is None:
             summaries = env.env_method("consume_episode_summaries")[0]
@@ -134,6 +139,10 @@ def evaluate(agent, frame: pd.DataFrame, agent_name: str, deterministic: bool = 
     summary["vote_mean"] = float(votes.mean()) if votes.size else 0.0
     summary["vote_std"] = float(votes.std()) if votes.size else 0.0
     summary["vote_abs_mean"] = float(np.abs(votes).mean()) if votes.size else 0.0
+    index = pd.DatetimeIndex([frame.index[0] - pd.Timedelta(minutes=15),
+                             *frame.index[:len(equity) - 1]])
+    daily = pd.Series(equity, index=index).resample('1D').last().pct_change().dropna()
+    summary['sharpe_ratio'] = float(daily.mean() / daily.std() * np.sqrt(365)) if daily.std() > 0 else 0.0
     return summary
 
 
@@ -142,24 +151,29 @@ def buy_and_hold_return(frame: pd.DataFrame) -> float:
     return float(close.iloc[-1] / close.iloc[0] - 1.0)
 
 
-def judge(holdout: dict, benchmark: float) -> dict:
+def judge(holdout: dict, benchmark: float, config=None) -> dict:
     """Decide whether this model may trade real money, and say why."""
     # Os nomes vêm de TrendFollowingEnv._build_financial_snapshot. Ler uma chave
     # inexistente devolveria o default silenciosamente e o veredito aprovaria um
     # modelo com base em zeros.
+    config = config or AIConfig()
     trades = int(holdout.get("num_trades", 0) or 0)
     net = float(holdout.get("total_return_pct", 0.0) or 0.0)
-    drawdown = float(holdout.get("max_drawdown_pct", 0.0) or 0.0)
+    drawdown = float(holdout.get("max_drawdown_pct", float('nan')))
+    pf = float(holdout.get('profit_factor', float('nan')))
+    sharpe = float(holdout.get('sharpe_ratio', float('nan')))
     checks = {
-        "deterministic_policy_trades": trades >= MIN_HOLDOUT_TRADES,
-        "net_return_positive": net > 0.0,
+        "deterministic_policy_trades": bool(holdout.get('deterministic')) and trades >= int(config.OOS_MIN_TRADES),
+        "net_return_positive": np.isfinite(net) and net > max(0.0, float(config.OOS_MIN_NET_RETURN)),
         "beats_buy_and_hold": net > benchmark,
-        "drawdown_under_35pct": drawdown < 0.35,
+        "drawdown_within_limit": np.isfinite(drawdown) and 0.0 <= drawdown <= float(config.OOS_MAX_DRAWDOWN),
+        "profit_factor": np.isfinite(pf) and pf >= float(config.OOS_MIN_PROFIT_FACTOR),
+        "sharpe": np.isfinite(sharpe) and sharpe >= float(config.OOS_MIN_SHARPE),
         "policy_not_constant": float(holdout.get("vote_std", 0.0)) > 0.01,
     }
     return {
-        "checks": checks,
-        "approved_for_live_trading": all(checks.values()),
+        "checks": {key: bool(value) for key, value in checks.items()},
+        "approved_for_live_trading": bool(all(checks.values())),
         "holdout_trades": trades,
         "holdout_net_return": net,
         "holdout_max_drawdown": drawdown,
