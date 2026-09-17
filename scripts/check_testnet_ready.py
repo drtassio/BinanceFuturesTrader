@@ -103,13 +103,34 @@ async def main() -> int:
     # ── Artefatos de modelo ──────────────────────────────────────────────────
     print("\n4. Modelos e aprovacao")
     model_dir = Path(str(ai_config.MODEL_DIR))
-    for name in ("bull", "bear", "ranger"):
+    policy = str(getattr(trading_config, "LIVE_POLICY", "sac"))
+    record(True, "politica de operacao", policy)
+    if policy == "agent_mirror":
+        from trading import agent_mirror as mirror
+        agents = [a.strip() for a in str(trading_config.LIVE_AGENTS).split(",") if a.strip()]
+        for name in agents:
+            for filename in ("%s_specialist_sac.zip" % name, "%s_specialist_scaler.joblib" % name,
+                             "%s_feature_contract.json" % name):
+                record((model_dir / filename).exists(), "%s presente" % filename)
+        ok, detail = mirror.approval_is_valid(model_dir)
+        record(ok, "aprovacao do espelho valida para os arquivos", detail)
+        try:
+            parity = json.loads((model_dir / "agent_mirror_parity.json").read_text(encoding="utf-8"))
+            current = mirror.artifact_hashes(model_dir, agents)
+            same = all(parity["artifact_hashes"].get(k) == v for k, v in current.items())
+            record(bool(parity.get("all_passed")) and same, "replay do espelho = backtest",
+                   "" if same else "paridade medida em outros arquivos")
+        except (OSError, ValueError, KeyError):
+            record(False, "replay do espelho = backtest", "rode scripts/verify_agent_mirror_parity.py")
+    for name in (() if policy == "agent_mirror" else ("bull", "bear", "ranger")):
         path = model_dir / ("%s_specialist_sac.zip" % name)
         record(path.exists(), "politica %s presente" % name,
                "%.1f MB" % (path.stat().st_size / 1e6) if path.exists() else "ausente")
 
     approval = model_dir / "policy_oos_validation.json"
-    if approval.exists():
+    if policy == "agent_mirror":
+        pass
+    elif approval.exists():
         try:
             report = json.loads(approval.read_text(encoding="utf-8"))
             controller = object.__new__(AIController)
