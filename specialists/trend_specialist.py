@@ -847,6 +847,7 @@ class TrendFollowingEnv(gym.Env):
         self._current_trade_aligned = None  # [FIX] rastreia alinhamento da entrada atual
         # tp_level removido (seguidor de tendÃƒÂªncia nÃƒÂ£o define take profit fixo)
         self.sl_level = None
+        self._stop_was_trailed = False
         self.time_stop_step = None
         # [TRAILING CATASTROPHE SL] Rastreia pico de preço para ratchet do CSL
         self._peak_price_since_entry = None
@@ -857,6 +858,8 @@ class TrendFollowingEnv(gym.Env):
         self.episode_trades = 0
         self.episode_wins = 0
         self.exit_reason_counts = {"agent": 0, "stop_loss": 0, "catastrophe": 0, "time_stop": 0, "ruin": 0, "other": 0}  # Track exit reasons
+        self.policy_exit_requests = {'requested_steps': 0, 'blocked_by_grace_steps': 0,
+                                     'eligible_steps': 0}
         self.regime_counters = {"up": {"wins": 0, "trades": 0}, "down": {"wins": 0, "trades": 0}, "side": {"wins": 0, "trades": 0}}
         self._trend_regime_sum = {"up": 0.0, "down": 0.0, "side": 0.0}
         self._trend_sample_count = 0
@@ -1544,11 +1547,16 @@ class TrendFollowingEnv(gym.Env):
         # NAO reseta _episode_trades_log — chamado no eval_env que persiste entre trials
 
     def _store_episode_summary(self) -> None:
+        # The matrix logger clears its trade buffer; capture before logging.
+        from learning.exit_diagnostics import summarize_exits
+        exit_diagnostics = summarize_exits(self._episode_trades_log)
         # Imprime matriz de trades antes de resetar os dados
         self._log_episode_matrix()
         summary = self._build_financial_snapshot(list(self._current_episode_returns), self._current_episode_durations)
         summary['episode_reward'] = float(self._episode_reward_accumulator)
         summary['exit_reason_counts'] = self.get_exit_reason_counts()
+        summary['exit_diagnostics'] = exit_diagnostics
+        summary['policy_exit_requests'] = dict(getattr(self, 'policy_exit_requests', {}))
         logger.debug("[FASE 1 DEBUG] Episode summary -> trades=%s avg_duration=%.2f", summary.get('num_trades'), summary.get('avg_trade_duration', 0.0))
         self._last_episode_summary = summary
         self._episode_summaries.append(summary)
@@ -2361,6 +2369,10 @@ class TrendFollowingEnv(gym.Env):
             should_open_short = False
 
         agent_confirms_close = (agent_wants_close or agent_wants_reverse) and not is_in_grace_period
+        if self.position != 0 and (agent_wants_close or agent_wants_reverse):
+            self.policy_exit_requests['requested_steps'] += 1
+            key = 'eligible_steps' if agent_confirms_close else 'blocked_by_grace_steps'
+            self.policy_exit_requests[key] += 1
         closing_due_to_prior = bool(prior_penalty > 0 and agent_confirms_close)
         closing_due_to_agent = agent_confirms_close
         is_closing_trade = agent_confirms_close and (self.position != 0)
@@ -2439,6 +2451,7 @@ class TrendFollowingEnv(gym.Env):
             self._prev_unrealized_return = 0.0
             closed_trade_duration = self.steps_in_position
             info['exit_reason'] = 'Stop Loss'
+            info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
         # Stop de CatÃƒÂ¡strofe baseado em ATR (rede de seguranÃƒÂ§a do ambiente)
         # 🔬 [SCIENTIFIC FIX] Catastrophe SL deve SEMPRE estar ativo, mesmo durante o grace period.
         if self.position != 0 and not trade_was_closed:
@@ -2540,6 +2553,7 @@ class TrendFollowingEnv(gym.Env):
                     closed_trade_duration = self.steps_in_position
                     closed_trade_side = 'long'
                     info['exit_reason'] = 'Stop Loss'
+                    info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
             else:
                 if self.sl_level is not None and current_price >= self.sl_level:  # [FIX #1] condição restaurada
                     trade_was_closed = True
@@ -2550,6 +2564,7 @@ class TrendFollowingEnv(gym.Env):
                     closed_trade_duration = self.steps_in_position
                     closed_trade_side = 'short'
                     info['exit_reason'] = 'Stop Loss'
+                    info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
         
         # [NEW] Ranger Quick Exit Logic
         if not trade_was_closed and self.position != 0:
@@ -2584,6 +2599,7 @@ class TrendFollowingEnv(gym.Env):
         initial_risk_pct = float(getattr(self, '_initial_risk_pct', 0.0) or 0.0)
         r_multiple = (self.pnl_since_entry / initial_risk_pct) if initial_risk_pct > 1e-9 else 0.0
         may_tighten = self.position != 0 and not trade_was_closed and r_multiple >= 1.0
+        stop_before_tightening = self.sl_level
 
         if may_tighten:
             # Trailing proporcional ao risco assumido, nao a metade dele.
@@ -2630,6 +2646,8 @@ class TrendFollowingEnv(gym.Env):
                         self._psar_af = min(self._psar_af + 0.02, 0.2)
                     self._psar = self._psar + self._psar_af * (self._psar_ep - self._psar)
                     self.sl_level = min(self.sl_level or np.inf, self._psar)
+        if may_tighten and self.sl_level != stop_before_tightening:
+            self._stop_was_trailed = True
         # Time-based stop: respeita o per?odo de car?ncia e s? fecha por neutralidade ou invers?o clara do EMA
         if self.position != 0 and not trade_was_closed and (not getattr(self, 'disable_time_stop', False)) and self.time_stop_step is not None and self.current_step >= self.time_stop_step and not is_in_grace_period:
             row_curr = self.df.iloc[self.start_idx + self.current_step]
@@ -2767,6 +2785,7 @@ class TrendFollowingEnv(gym.Env):
                 # 🔬 Dr. Tensor: Reduzido de 2.5x para 1.5x (era 2.5x na auditoria)
                 # para evitar que perdas isoladas destruam o PnL do episódio.
                 sl_base_multiplier = sl_mult * 1.5 
+                self._stop_was_trailed = False
                 
                 if self.position > 0:
                     self.sl_level = self.entry_price - atr * sl_base_multiplier
@@ -2872,7 +2891,7 @@ class TrendFollowingEnv(gym.Env):
                         logger.debug('[FASE 1 DEBUG] Entries disabled - trades limit atingido')
                 exit_reason = info.get('exit_reason', 'Agent Decision')
                 # Track exit reasons for diagnostics
-                if exit_reason == 'Agent Decision':
+                if str(exit_reason).startswith('Agent Decision'):
                     self.exit_reason_counts["agent"] += 1
                 elif exit_reason == 'Stop Loss':
                     self.exit_reason_counts["stop_loss"] += 1
@@ -2926,6 +2945,7 @@ class TrendFollowingEnv(gym.Env):
                     'pnl_usd': float(pnl_realized),
                     'pnl_pct': float(trade_return_pct) * 100.0,
                     'exit_reason': exit_reason or 'Agent Decision',
+                    'stop_protection_kind': info.get('stop_protection_kind'),
                     'net_worth': float(self.net_worth),
                 })
             else:
@@ -5987,6 +6007,7 @@ class TrendSpecialist:
 
             action_values, _ = self.model.predict(observation, deterministic=True)
             position_action_raw, sl_mult_raw, desired_leverage_raw = action_values
+            learned_position_vote = float(position_action_raw)
             
             # [DEBUG] Log raw model outputs to detect policy collapse
             logger.info(f"[DEBUG MODEL] Raw outputs: pos={position_action_raw:.4f}, sl={sl_mult_raw:.4f}, lev={desired_leverage_raw:.4f}")
@@ -6108,6 +6129,16 @@ class TrendSpecialist:
             if gating_active and abs(position_action_raw) < (action_threshold * 1.5):
                 final_action = Action.HOLD
                 position_size_pct = float(self.trading_config.MAX_POSITION_SIZE_PERCENT * confidence * 0.5)  # Reduce size
+
+            # Entry priors must not veto the actor's decision to reduce risk.
+            # Use the unmodified policy vote and the configured inference
+            # threshold, not the entry-only regime/prior modulation above.
+            exit_action = (Action.BUY if learned_position_vote > base_threshold
+                           else Action.SELL if learned_position_vote < -base_threshold
+                           else Action.HOLD)
+            if self._is_position_exit(observation, exit_action):
+                final_action = exit_action
+                explanation['reason'] = 'Learned policy requested position close'
                 
             # [FIX PRODUÇÃO] Filtro de direção — replica _specialist_long_only do ambiente de treino.
             # Bull: apenas BUY (long_only). Bear: apenas SELL (short_only).

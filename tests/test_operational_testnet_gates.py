@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
+import pytest
 
 from config.settings import TradingConfig
 from data_provider import DataProvider
@@ -200,11 +201,13 @@ def test_oos_gate_approves_and_binds_report_to_model_hashes(tmp_path):
             'profit_factor': 1.30,
             'num_trades': 25,
             'net_return': 0.05,
+            'deterministic': True,
+            'vote_std': .2,
         }
         for name in ('bull', 'bear', 'ranger')
     }
     controller = _controller_for_oos_gate(tmp_path, passing)
-    frame = pd.DataFrame(index=pd.date_range('2024-01-01', periods=100, freq='15min'))
+    frame = pd.DataFrame({'close': [100.] * 100}, index=pd.date_range('2024-01-01', periods=100, freq='15min'))
 
     report = controller._validate_specialists_oos(frame)
 
@@ -222,13 +225,33 @@ def test_oos_gate_rejects_unprofitable_specialist(tmp_path):
         'profit_factor': 1.30,
         'num_trades': 25,
         'net_return': 0.05,
+        'deterministic': True,
+        'vote_std': .2,
     }
     metrics = {name: dict(passing_metrics) for name in ('bull', 'bear', 'ranger')}
     metrics['ranger']['net_return'] = -0.01
     controller = _controller_for_oos_gate(tmp_path, metrics)
-    frame = pd.DataFrame(index=pd.date_range('2024-01-01', periods=100, freq='15min'))
+    frame = pd.DataFrame({'close': [100.] * 100}, index=pd.date_range('2024-01-01', periods=100, freq='15min'))
 
     report = controller._validate_specialists_oos(frame)
 
     assert report['all_passed'] is False
     assert report['specialists']['ranger']['checks']['net_return'] is False
+
+
+@pytest.mark.parametrize('changes', [
+    {'net_return': 0.}, {'max_drawdown': -.01},
+    {'max_drawdown': float('nan')}, {'profit_factor': float('inf')},
+    {'deterministic': False}, {'vote_std': 0.}, {'num_trades': 8},
+])
+def test_local_approval_does_not_bypass_cloud_requirements(tmp_path, changes):
+    valid = dict(sharpe_ratio=.8, max_drawdown=.1, profit_factor=1.3,
+                 num_trades=25, net_return=.05, deterministic=True, vote_std=.2)
+    metrics = {name: dict(valid) for name in ('bull', 'bear', 'ranger')}
+    metrics['bull'].update(changes)
+    controller = _controller_for_oos_gate(tmp_path, metrics)
+    frame = pd.DataFrame({'close': [100.] * 100},
+                         index=pd.date_range('2024-01-01', periods=100, freq='15min'))
+    report = controller._validate_specialists_oos(frame)
+    assert report['all_passed'] is False
+    assert report['specialists']['bull']['passed'] is False

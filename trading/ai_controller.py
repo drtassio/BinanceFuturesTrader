@@ -129,13 +129,23 @@ class AIController:
                 results[name] = {'passed': False, 'reason': 'evaluate falhou: %s' % exc, 'metrics': {}}
                 continue
 
-            checks = {
-                'sharpe': float(metrics.get('sharpe_ratio', 0.0)) >= thresholds['min_sharpe'],
-                'profit_factor': float(metrics.get('profit_factor', 0.0)) >= thresholds['min_profit_factor'],
-                'drawdown': float(metrics.get('max_drawdown', 1.0)) <= thresholds['max_drawdown'],
-                'net_return': float(metrics.get('net_return', -1.0)) >= thresholds['min_net_return'],
-                'trades': int(metrics.get('num_trades', 0)) >= thresholds['min_trades'],
-            }
+            # One authoritative gate for cloud and local approvals. Missing
+            # deterministic/vote evidence, invalid risk metrics, and zero
+            # return must not pass a weaker local implementation.
+            from cloud.train_agent import judge, buy_and_hold_return
+            canonical = dict(metrics)
+            canonical['total_return_pct'] = metrics.get('net_return', float('nan'))
+            canonical['max_drawdown_pct'] = metrics.get('max_drawdown', float('nan'))
+            try:
+                verdict = judge(canonical, buy_and_hold_return(holdout_df), cfg)
+                checks = dict(verdict['checks'])
+                checks['net_return'] = checks.pop('net_return_positive')
+                checks['drawdown'] = checks.pop('drawdown_within_limit')
+                checks['trades'] = checks.pop('deterministic_policy_trades')
+            except (ValueError, TypeError, KeyError, IndexError) as exc:
+                results[name] = {'passed': False, 'reason': 'invalid evaluation: %s' % exc,
+                                 'metrics': metrics}
+                continue
             failed = [k for k, ok in checks.items() if not ok]
             results[name] = {
                 'passed': not failed,
@@ -146,14 +156,17 @@ class AIController:
 
         artifact_hashes = self._specialist_artifact_hashes()
         artifacts_present = all(artifact_hashes.values())
+        from trading.policy_runtime import runtime_fingerprint
+        runtime_hashes = runtime_fingerprint(self.config_ai, getattr(self, 'config_trading', None))
         report = {
             'generated_at': _dt.now(_tz.utc).isoformat(),
             'thresholds': thresholds,
             'specialists': results,
-            'all_passed': artifacts_present and all(r['passed'] for r in results.values()),
+            'all_passed': artifacts_present and all(runtime_hashes.values()) and all(r['passed'] for r in results.values()),
             'artifacts_present': artifacts_present,
             'model_hashes': self._specialist_model_hashes(),
             'artifact_hashes': artifact_hashes,
+            'runtime_hashes': runtime_hashes,
         }
         try:
             path = _Path(self.policy_validation_path)
@@ -201,6 +214,11 @@ class AIController:
             if not digest or recorded_artifacts.get(filename) != digest:
                 logger.warning('[OOS] Artefato ausente, alterado ou nao validado: %s', filename)
                 return False
+        from trading.policy_runtime import runtime_fingerprint
+        current_runtime = runtime_fingerprint(self.config_ai, getattr(self, 'config_trading', None))
+        if not all(current_runtime.values()) or report.get('runtime_hashes') != current_runtime:
+            logger.warning('[OOS] Execution code or effective settings changed: approval invalidated.')
+            return False
         return True
 
     def __init__(self, config: AIConfig, trading_config: TradingConfig, system_state: Dict[str, Any]):
@@ -3404,6 +3422,17 @@ class AIController:
                     }
                 )
             
+            # A close agreed by the ensemble reduces an existing position;
+            # entry confidence/market-context vetoes must not turn it into HOLD.
+            from trading.policy_exit import preserve_policy_exit
+            exit_position = self.portfolio.positions.get(strategic_signal.symbol)
+            strategic_signal = preserve_policy_exit(
+                strategic_signal, expert_signals,
+                getattr(exit_position, 'quantity', 0.0))
+            if (strategic_signal.explanation or {}).get('position_exit'):
+                # ExecutionEngine revalidates the position and uses reduceOnly.
+                return strategic_signal
+
             # 4. Explicar a deciso (Apenas se no estivermos em uma chamada recursiva do SHAP)
             if strategic_signal.action == Action.HOLD and not getattr(self, '_is_explaining', False):
                 try:

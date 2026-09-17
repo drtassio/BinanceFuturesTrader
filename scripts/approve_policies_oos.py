@@ -58,6 +58,7 @@ def main() -> int:
 
     controller = object.__new__(AIController)
     controller.config_ai = config
+    controller.config_trading = trading_config
     controller.policy_validation_path = str(Path(config.MODEL_DIR) / "policy_oos_validation.json")
     controller.policy_oos_approved = False
     controller.last_oos_validation = {}

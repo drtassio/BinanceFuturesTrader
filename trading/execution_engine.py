@@ -497,6 +497,17 @@ class ExecutionEngine:
         has_position = await self._check_position_limit(signal.symbol)
         current_pos = self.portfolio.positions.get(signal.symbol)
         is_reducing = False
+        if (signal.explanation or {}).get('position_exit'):
+            # The awaited exchange check may refresh/remove the position.
+            # A policy close must always remain reduceOnly, even if that check
+            # returns False while the portfolio still contains a position.
+            live_quantity = float(getattr(current_pos, 'quantity', 0.0))
+            if not math.isfinite(live_quantity) or not (
+                    (live_quantity > 0 and signal.action == Action.SELL)
+                    or (live_quantity < 0 and signal.action == Action.BUY)):
+                logger.warning('[EXEC] Position changed while validating policy close: %s', signal.symbol)
+                return
+            has_position = True
         
         if has_position:
             if signal.action == Action.CLOSE:

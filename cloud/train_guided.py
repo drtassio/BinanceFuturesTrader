@@ -209,10 +209,8 @@ def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
     obs_t = torch.as_tensor(observations, device=device)
     act_t = torch.as_tensor(actions, device=device)
     nuisance = torch.as_tensor(~keep_mask, device=device)
-    teacher_on = _on_position(act_t[:, 0], sides)
-    share = float(teacher_on.float().mean().item())
-    boost = min(8.0, 1.0 / max(share, 1e-3))
-    weights = torch.where(teacher_on, torch.full_like(act_t[:, 0], boost), torch.ones_like(act_t[:, 0]))
+    from learning.policy_imitation import imitation_weights, imitation_fidelity
+    weights = imitation_weights(obs_t, act_t, sides)
     optimizer = torch.optim.Adam(model.actor.parameters(), lr=3e-4, weight_decay=1e-5)
     have_val = val_observations is not None and len(val_observations) > 0
     if have_val:
@@ -221,7 +219,9 @@ def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
     best = (-1.0, None, -1)
     n = obs_t.shape[0]
     for epoch in range(epochs):
-        order = torch.randperm(n, device=device)
+        # Balance semantic decisions, including rare position exits. Applying
+        # entry-only weights conflated flat waiting with closing a held trade.
+        order = torch.multinomial(weights, n, replacement=True)
         total = 0.0
         for start in range(0, n, batch_size):
             idx = order[start:start + batch_size]
@@ -230,7 +230,7 @@ def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
             batch[:, nuisance] = shuffled[:, nuisance]
             predicted = model.actor(batch, deterministic=True)
             per_sample = ((predicted - act_t[idx]) ** 2).mean(dim=1)
-            loss = (weights[idx] * per_sample).sum() / weights[idx].sum()
+            loss = per_sample.mean()  # sampling already balances the classes
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -241,6 +241,14 @@ def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
         if have_val:
             val_bal, val_recall, val_false = _balanced_agreement(model, val_obs_t, val_act_t, sides)
             line += " validacao[recall=%.1f%% falso+=%.2f%%]" % (100 * val_recall, 100 * val_false)
+            with torch.no_grad():
+                fidelity = imitation_fidelity(val_obs_t, val_act_t[:, 0],
+                    model.actor(val_obs_t, deterministic=True)[:, 0], sides)
+            val_bal = fidelity['macro_recall']
+            exit_text = ('%.1f%%' % (100 * fidelity['exit_recall'])
+                         if fidelity['exit_recall'] is not None else 'sem exemplos')
+            line += ' decisoes[macro=%.1f%% saidas=%s n=%d]' % (
+                100 * val_bal, exit_text, fidelity['exit_count'])
             if val_bal > best[0]:
                 best = (val_bal, copy.deepcopy(model.actor.state_dict()), epoch)
         print(line)
@@ -268,9 +276,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "cloud" / "artifacts")
     parser.add_argument("--max-bars", type=int, default=0, help="so para teste de fumaca: encurta cada bloco")
     parser.add_argument("--bootstrap-from", type=Path, help="execucao anterior cujo modelo e scaler sao reaproveitados")
+    parser.add_argument('--cpu-threads', type=int, default=1, help='limite de threads PyTorch no processador')
+    parser.add_argument('--seed', type=int, default=42, help='semente fixa, sem busca de hiperparametros')
     args = parser.parse_args()
+    if args.cpu_threads < 1:
+        parser.error('--cpu-threads must be positive')
 
     import torch
+    import random
+    torch.set_num_threads(args.cpu_threads)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
     from stable_baselines3.common.callbacks import BaseCallback
     from stable_baselines3.common.logger import configure
 
@@ -451,6 +468,8 @@ def main() -> int:
                      "dagger_epochs": args.dagger_epochs, "critic_warmup": args.critic_warmup,
                      "finetune_steps": args.finetune_steps, "eval_every": args.eval_every,
                      "max_bars": args.max_bars},
+        'imitation_objective': 'position_aware_class_balancing_and_macro_recall',
+        'seed': args.seed, 'cpu_threads': args.cpu_threads,
         "periods": {"train": [str(train_df.index.min()), str(train_df.index.max())],
                     "validation": [str(val_df.index.min()), str(val_df.index.max())],
                     "holdout": [str(holdout_df.index.min()), str(holdout_df.index.max())]},

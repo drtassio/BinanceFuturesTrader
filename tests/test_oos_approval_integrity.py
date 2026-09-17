@@ -12,6 +12,7 @@ from trading.ai_controller import AIController
     ("changed", False), ("missing", False), ("null", False),
     ("scaler_changed", False), ("contract_changed", False),
     ("artifacts_unrecorded", False),
+    ("runtime_unrecorded", False), ("runtime_changed", False), ("settings_changed", False),
 ])
 def test_approval_requires_all_current_policies(tmp_path, case, approved):
     controller = object.__new__(AIController)
@@ -26,6 +27,8 @@ def test_approval_requires_all_current_policies(tmp_path, case, approved):
         (tmp_path / f"{name}_specialist_scaler.joblib").write_bytes(b"scaler")
         (tmp_path / f"{name}_feature_contract.json").write_text("{}")
     artifact_hashes = controller._specialist_artifact_hashes()
+    from trading.policy_runtime import runtime_fingerprint
+    runtime_hashes = runtime_fingerprint(controller.config_ai)
     if case == "empty":
         hashes = {}
     elif case == "partial":
@@ -43,8 +46,15 @@ def test_approval_requires_all_current_policies(tmp_path, case, approved):
         (tmp_path / "bull_feature_contract.json").write_text('{"changed": true}')
     elif case == "artifacts_unrecorded":
         artifact_hashes = {}
+    elif case == "runtime_unrecorded":
+        runtime_hashes = {}
+    elif case == "runtime_changed":
+        runtime_hashes['trading/execution_engine.py'] = 'old-code'
+    elif case == "settings_changed":
+        controller.config_ai.TRAINING_LEVERAGE_CAP = 15
     (tmp_path / "approval.json").write_text(json.dumps({
         "all_passed": True, "model_hashes": hashes, "artifact_hashes": artifact_hashes,
+        "runtime_hashes": runtime_hashes,
     }), encoding="utf-8")
 
     assert controller._load_policy_oos_approval() is approved
