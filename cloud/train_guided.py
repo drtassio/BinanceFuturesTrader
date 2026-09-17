@@ -64,7 +64,9 @@ def score(metrics: dict) -> float:
     net = float(metrics.get("total_return_pct", 0.0) or 0.0)
     pf = float(metrics.get("profit_factor", 0.0) or 0.0)
     dd = float(metrics.get("max_drawdown_pct", 1.0) or 0.0)
-    if trades < 8 or net <= 0.0 or pf < 1.2:
+    # Do not prefer a high ratio from eight trades over a validated policy
+    # that actually meets the bot's minimum activity and drawdown criteria.
+    if trades < int(AIConfig.OOS_MIN_TRADES) or net <= 0.0 or pf < 1.2 or dd > float(AIConfig.OOS_MAX_DRAWDOWN):
         return -np.inf
     return net / max(dd, 0.02)
 
@@ -379,6 +381,7 @@ def main() -> int:
             model, observations, actions, args.dagger_epochs, SIDES[args.agent], keep_mask,
             val_observations=val_observations, val_actions=val_actions)
         metrics = evaluate(agent, val_df, args.agent, deterministic=True)
+        model.save(run_dir / 'models' / ('dagger_%d_validation.zip' % iteration))
         print("DAgger %d na validacao: %s" % (iteration, summarize(metrics)))
         if score(metrics) > best["score"]:
             best.update(label="DAgger %d" % iteration, score=score(metrics), metrics=metrics)
@@ -407,6 +410,7 @@ def main() -> int:
             model.bc_weight = args.bc_weight_start + (args.bc_weight_end - args.bc_weight_start) * progress
             if self.num_timesteps % args.eval_every == 0:
                 metrics = evaluate(agent, val_df, args.agent, deterministic=True)
+                model.save(run_dir / 'models' / ('finetune_%d_validation.zip' % self.num_timesteps))
                 current = score(metrics)
                 print("  passo %d (bc=%.2f) validacao: %s" % (self.num_timesteps, model.bc_weight, summarize(metrics)))
                 if current > best["score"]:

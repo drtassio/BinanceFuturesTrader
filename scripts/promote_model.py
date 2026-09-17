@@ -59,6 +59,32 @@ def locate(run: Path, name: str, fallback: Path | None = None) -> Path:
     raise SystemExit("arquivo ausente na execucao: %s" % name)
 
 
+def safe_extract(tar: tarfile.TarFile, destination: Path) -> None:
+    """Archives are untrusted: reject traversal, links and special devices."""
+    destination = destination.resolve()
+    members = tar.getmembers()
+    for member in members:
+        target = (destination / member.name).resolve()
+        if not target.is_relative_to(destination) or not (member.isfile() or member.isdir()):
+            raise SystemExit('unsafe archive member: %s' % member.name)
+    tar.extractall(destination, members=members)
+
+
+def archive_run(directory: Path, agent: str) -> Path:
+    """Support root packages and nested Kaggle exports without guessing a run."""
+    name = '%s_specialist_sac.zip' % agent
+    candidates = []
+    for model in directory.rglob(name):
+        run = model.parent.parent if model.parent.name == 'models' else model.parent
+        if ((run / 'feature_contract.json').exists()
+                and any((run / suffix / ('%s_specialist_scaler.joblib' % agent)).exists()
+                        for suffix in ('models', ''))):
+            candidates.append(run)
+    if len(candidates) != 1:
+        raise SystemExit('archive needs exactly one complete %s run; found %d' % (agent, len(candidates)))
+    return candidates[0]
+
+
 def observation_size(model_path: Path) -> int:
     """Read the policy's observation size without building its extractor."""
     import zipfile
@@ -88,8 +114,8 @@ def main() -> int:
     if args.archive:
         workdir = Path(tempfile.mkdtemp(prefix="promote_"))
         with tarfile.open(args.archive) as tar:
-            tar.extractall(workdir)
-        run = workdir
+            safe_extract(tar, workdir)
+        run = archive_run(workdir, agent)
     else:
         run = args.run.resolve() if args.run else latest_run(agent)
     print("origem: %s" % run)
