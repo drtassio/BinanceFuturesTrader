@@ -105,18 +105,27 @@ def main() -> int:
     parser.add_argument("--probabilities", default=None,
                         help="lista separada por virgula; padrao por agente")
     parser.add_argument("--edges", default="0.05,0.10,0.20")
+    parser.add_argument("--short-probabilities", default="0.30,0.35",
+                        help="so Ranger: limiares do lado short, na escala do meta-modelo short")
+    # O agente emite sl_mult no maximo 3.0; um stop maior na grade seria
+    # cortado no treino e a professora deixaria de ser imitavel.
+    parser.add_argument("--stops", default="2.0,3.0")
     args = parser.parse_args()
-    default_probabilities = {"bull": "0.50,0.55,0.60", "bear": "0.30,0.35,0.40", "ranger": "0.35,0.45,0.55"}
+    default_probabilities = {"bull": "0.50,0.55,0.60", "bear": "0.30,0.35,0.40", "ranger": "0.50,0.55"}
     probabilities = tuple(float(x) for x in (args.probabilities or default_probabilities[args.agent]).split(","))
     edges = tuple(float(x) for x in args.edges.split(","))
+    stops = tuple(float(x) for x in args.stops.split(","))
+    shorts = (tuple(float(x) for x in args.short_probabilities.split(","))
+              if args.agent == "ranger" else (None,))
 
     grid = []
-    for p, e_in, e_out, regime, sl in itertools.product(
-            probabilities, edges, (-0.05, 0.0), (True, False), (3.0, 5.0)):
+    for p, p_short, e_in, e_out, regime, sl in itertools.product(
+            probabilities, shorts, edges, (-0.05, 0.0), (True, False), stops):
         if e_out >= e_in:
             continue
         grid.append(EdgeRule(enter_probability=p, enter_edge=e_in, exit_edge=e_out,
-                             require_regime=regime, sl_mult=sl).as_dict())
+                             require_regime=regime, sl_mult=sl,
+                             enter_probability_short=p_short).as_dict())
     print("%s: %d regras em %s, %d processos" % (args.agent, len(grid), args.select_on, args.workers))
 
     with Pool(args.workers) as pool:
@@ -127,6 +136,8 @@ def main() -> int:
     for rule, r in results[:10]:
         label = "p>=%.2f in>=%.2f out>%.2f reg=%s sl=%.0f" % (
             rule["enter_probability"], rule["enter_edge"], rule["exit_edge"], rule["require_regime"], rule["sl_mult"])
+        if rule.get("enter_probability_short") is not None:
+            label += " ps>=%.2f" % rule["enter_probability_short"]
         print("%-58s %7d %8.2f%% %6.2f %6.1f%% %5.1f%% %6.1f" % (
             label, r["trades"], r["net_return"] * 100, r["profit_factor"], r["max_drawdown"] * 100, r["win_rate"], r["avg_duration"]))
 

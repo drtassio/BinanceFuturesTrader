@@ -80,6 +80,9 @@ class Config:
 
 class TradingConfig(Config):
     """ConfiguraÃ§Ãµes especÃ­ficas para o sistema de trading e gerenciamento de risco."""
+    # Operate learned specialists by default, never silently replace them
+    # with the demonstration teacher used during guided training.
+    LIVE_POLICY = os.environ.get('LIVE_POLICY', 'sac').strip().lower()
     INITIAL_CAPITAL = float(os.environ.get('INITIAL_CAPITAL', 100.0))
     if INITIAL_CAPITAL <= 0:
         logger.error("â Œ [ERRO CONFIG] INITIAL_CAPITAL deve ser um valor positivo. Usando padrÃ£o 100000.0.")

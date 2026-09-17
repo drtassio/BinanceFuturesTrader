@@ -238,6 +238,16 @@ class AIController:
         self.policy_oos_approved = False
         self.last_oos_validation: Dict[str, Any] = {}
 
+        # Politica que opera: 'edge_teacher' (meta-modelo + regra, espelhando o
+        # ambiente de backtest) ou 'sac' (especialistas de RL via MoE).
+        self.live_policy = str(getattr(trading_config, 'LIVE_POLICY', 'sac')).strip().lower()
+        if self.live_policy not in ('sac', 'edge_teacher'):
+            raise ValueError('LIVE_POLICY must be sac or edge_teacher')
+        self.teacher_rules: Dict[str, Any] = {}
+        self.teacher_ready = False
+        self._teacher_cache = None
+        self._teacher_last_order = None
+
         # --- Componentes de Deciso ---
         # self.profitability_predictor = None # Removido: Mdulo obsoleto (substitudo pelo HRLMaster)
         # self.trend_predictor = None          # Removido: Mdulo obsoleto
@@ -2589,12 +2599,131 @@ class AIController:
             return np.zeros(X.shape[0])
 
    
+    def prepare_teacher_policy(self) -> bool:
+        """Load the edge teacher and check its OOS approval still holds."""
+        from trading import teacher_policy as teacher
+
+        model_dir = Path(str(self.config_ai.MODEL_DIR))
+        try:
+            self.teacher_rules = teacher.load_rules(model_dir)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.critical("[TEACHER] Regras da professora ilegiveis: %s", exc)
+            self.teacher_ready = False
+            return False
+        approved = teacher.approval_is_valid(model_dir)
+        if not approved and bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            logger.critical("[TEACHER] Sem aprovacao OOS valida para os arquivos em disco "
+                            "(rode scripts/approve_teacher_oos.py). Nenhuma ordem sera enviada.")
+            self.teacher_ready = False
+            return False
+        self.teacher_ready = True
+        self.is_trained = True
+        logger.info("[TEACHER] Professora pronta: %s", {k: v.as_dict() for k, v in self.teacher_rules.items()})
+        return True
+
+    async def _teacher_decision(self, recent_market_df: pd.DataFrame) -> Signal:
+        """Mirror the position the backtest environment holds on the last closed bar."""
+        import time as _time
+        from trading import teacher_policy as teacher
+
+        symbol = self.config_trading.PRIMARY_PAIR
+
+        def hold(reason, **extra):
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": reason, "specialist": "EdgeTeacher",
+                                       "regime": "TEACHER", "policy": teacher.POLICY_NAME, **extra})
+
+        if not self.teacher_ready or not self.risk_manager or not self.portfolio:
+            return hold("professora indisponivel (aprovacao OOS, risco ou portfolio ausente)")
+
+        frame = self.feature_pipeline.apply_hidden_features(recent_market_df)
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        frame = teacher.closed_bars(frame, pd.Timestamp.now(tz="UTC"))
+        missing = [c for c in ("close", "ml_p_long", "ml_p_short", "ml_edge", "tp_prior_dir") if c not in frame.columns]
+        if missing:
+            return hold("entradas da professora ausentes: %s" % missing)
+        if len(frame) < teacher.MIN_REPLAY_BARS:
+            return hold("janela curta: %d barras fechadas" % len(frame))
+
+        bar = frame.index[-1]
+        if self._teacher_cache is None or self._teacher_cache[0] != bar:
+            shadows = []
+            for agent, rule in self.teacher_rules.items():
+                shadows.append(await asyncio.to_thread(teacher.replay, frame, agent, rule))
+            self._teacher_cache = (bar, shadows)
+            logger.info("[TEACHER] barra %s | p_long=%.3f p_short=%.3f edge=%+.3f prior=%+.2f | %s", bar,
+                        float(frame["ml_p_long"].iloc[-1]), float(frame["ml_p_short"].iloc[-1]),
+                        float(frame["ml_edge"].iloc[-1]), float(frame["tp_prior_dir"].iloc[-1]),
+                        " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))
+        shadows = self._teacher_cache[1]
+
+        position = self.portfolio.positions.get(symbol)
+        live_side = int(np.sign(position.quantity)) if position is not None and position.quantity else 0
+        decision = teacher.mirror(shadows, live_side)
+        details = {"bar": str(bar), "shadows": {s.agent: s.side for s in shadows}}
+        if decision.action == "hold":
+            return hold(decision.reason, **details)
+
+        key = (bar, decision.action, decision.side)
+        if self._teacher_last_order and self._teacher_last_order[0] == key \
+                and _time.monotonic() - self._teacher_last_order[1] < 180:
+            return hold("ordem desta barra ja enviada; aguardando execucao", **details)
+
+        cfg = self.config_trading
+        action = Action.BUY if decision.side > 0 else Action.SELL
+        explanation = {"reason": decision.reason, "specialist": "EdgeTeacher", "regime": "TEACHER",
+                       "policy": teacher.POLICY_NAME, **details}
+        if decision.action == "close":
+            # position_size_pct >= 0.9 faz o ExecutionEngine fechar a quantidade
+            # exata com reduceOnly.
+            signal = Signal(symbol=symbol, action=action, confidence=1.0, position_size_pct=1.0,
+                            leverage=float(getattr(position, 'leverage', 1.0) or 1.0),
+                            stop_loss=0.0, take_profit=0.0, explanation=explanation)
+        else:
+            shadow = decision.shadow
+            fraction = float(shadow.notional_fraction)
+            # O ambiente limita o nocional, nao a margem. Na corretora a margem
+            # por posicao e limitada (MAX_POSITION_SIZE_PERCENT), entao a
+            # alavancagem da ordem e a menor que acomoda o MESMO nocional do
+            # backtest; o risco continua sendo nocional x distancia do stop.
+            max_margin = float(cfg.MAX_POSITION_SIZE_PERCENT) * 0.95
+            leverage = float(np.clip(np.ceil(fraction / max_margin), max(1.0, float(cfg.MIN_LEVERAGE_PER_TRADE)),
+                                     float(cfg.MAX_LEVERAGE_PER_TRADE)))
+            size_pct = float(np.clip(fraction / leverage, 0.0, max_margin))
+            # A saida real e a do ambiente, avaliada no fechamento da barra. O
+            # stop na corretora so cobre o bot parado: fica ao dobro da
+            # distancia do stop do ambiente.
+            stop_distance = abs((shadow.stop_price or 0.0) - shadow.entry_price) / max(shadow.entry_price, 1e-9)
+            catastrophe = float(np.clip(2.0 * stop_distance, 0.01, 0.20))
+            explanation.update(notional_fraction=fraction, env_stop_price=shadow.stop_price,
+                               env_entry_price=shadow.entry_price)
+            signal = Signal(symbol=symbol, action=action, confidence=1.0, position_size_pct=size_pct,
+                            leverage=leverage, stop_loss=catastrophe, take_profit=0.0, explanation=explanation)
+
+        approved, reason = self.risk_manager.check_trade_approval(signal)
+        if not approved:
+            return hold("vetado pelo risco: %s" % reason, **details)
+        self._teacher_last_order = (key, _time.monotonic())
+        logger.info("[TEACHER] %s %s | margem %.1f%% x %.0fx | stop de catastrofe %.2f%% | %s",
+                    decision.action, action.value, signal.position_size_pct * 100, signal.leverage,
+                    (signal.stop_loss or 0.0) * 100, decision.reason)
+        return signal
+
     async def generate_trading_decision(self, recent_market_df: pd.DataFrame) -> Signal:
         """
         [VERSO FINAL COMPLETA - COM DRIFT DETECTOR]
         Orquestra o pipeline de deciso completo: features, verificao de drift,
         anlise de regime, seleo de especialista, modulao e risco.
         """
+        if self.live_policy == 'edge_teacher':
+            try:
+                return await self._teacher_decision(recent_market_df)
+            except Exception as exc:
+                logger.critical("[TEACHER] Falha ao decidir: %s", exc, exc_info=True)
+                return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "falha da professora: %s" % exc, "policy": "edge_teacher"})
+
         if not self.is_trained or not all([self.specialists, self.risk_manager, self.portfolio]): # drift_detector opcional
             
             # [DEBUG GRANULAR] Diagnstico de falha

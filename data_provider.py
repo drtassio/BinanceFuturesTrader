@@ -311,7 +311,14 @@ class DataProvider:
                     combined_df = pd.concat([self.data_cache[cache_key], latest_klines_df])
                     self.data_cache[cache_key] = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
 
-                data_for_features = self.data_cache[cache_key].tail(required_data_points)
+                # Only closed candles become features. The regime detector decodes
+                # its whole window, so a still-forming candle at the end changed the
+                # regime and meta-model values of the last CLOSED bar on about 10%
+                # of bars (measured against a strictly causal rebuild), and the
+                # specialists were trained on closed candles only.
+                cached = self.data_cache[cache_key]
+                closed_mask = (cached.index.asi8 // 10**6 + interval_ms) <= current_time
+                data_for_features = cached.loc[closed_mask].tail(required_data_points)
                 if len(data_for_features) > 0:
                     raw_dfs_multi_tf[interval] = data_for_features
 

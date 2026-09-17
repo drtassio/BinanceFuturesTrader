@@ -17,7 +17,7 @@ the earlier reference made 18 short trades.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -33,6 +33,14 @@ class EdgeRule:
     sl_mult: float = 3.0
     leverage: float = 3.0
     vote: float = 0.8
+    # The two meta-models live on different scales (short base rate 26.5%), so
+    # a two-sided specialist needs its own bar for shorts. None: same as long.
+    enter_probability_short: Optional[float] = None
+
+    def entry_probability(self, side: int) -> float:
+        if side < 0 and self.enter_probability_short is not None:
+            return self.enter_probability_short
+        return self.enter_probability
 
     def as_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -65,7 +73,7 @@ def edge_action(row, position: float, agent: str, rule: EdgeRule) -> np.ndarray:
         return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 
     for side in SIDES[agent]:
-        if (probability[side] >= rule.enter_probability
+        if (probability[side] >= rule.entry_probability(side)
                 and side * edge >= rule.enter_edge
                 and (not rule.require_regime or _regime_allows(row, side))):
             return np.array([side * rule.vote, rule.sl_mult, rule.leverage], dtype=np.float32)

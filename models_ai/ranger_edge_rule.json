@@ -1,0 +1,30 @@
+{
+  "agent": "ranger",
+  "rule": {
+    "enter_probability": 0.5,
+    "enter_edge": 0.1,
+    "exit_edge": 0.0,
+    "require_regime": true,
+    "sl_mult": 2.0,
+    "leverage": 3.0,
+    "vote": 0.8,
+    "enter_probability_short": 0.3
+  },
+  "train": {
+    "trades": 329,
+    "net_return": 0.6060264338843048,
+    "profit_factor": 1.2954612367188085,
+    "max_drawdown": 0.2491906059612299,
+    "win_rate": 61.09422492401215,
+    "avg_duration": 25.41033434650456
+  },
+  "validation": {
+    "trades": 122,
+    "net_return": 0.20246702823994378,
+    "profit_factor": 1.7314185801802295,
+    "max_drawdown": 0.2723604124382788,
+    "win_rate": 63.934426229508205,
+    "avg_duration": 25.704918032786885
+  },
+  "selected_on": "train"
+}

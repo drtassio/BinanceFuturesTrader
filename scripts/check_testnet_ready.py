@@ -123,6 +123,10 @@ async def main() -> int:
         record(False, "aprovacao OOS registrada",
                "rode scripts/approve_policies_oos.py apos treinar")
 
+    from feature_engineering.crypto_regime_detector import canonical_detector_matches
+    detector_ok, detector_detail = canonical_detector_matches()
+    record(detector_ok, "detector de regime = o que rotulou o treino", detector_detail)
+
     dataset = ROOT / "data" / "featured_data_causal.parquet"
     record(dataset.exists() if dataset.exists() else None, "dataset causal presente",
            "" if dataset.exists() else "rode scripts/build_causal_dataset.py")

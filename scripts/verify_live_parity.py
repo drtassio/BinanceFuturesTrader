@@ -53,7 +53,11 @@ async def build_live_frame(end: pd.Timestamp, skip_meta: bool = False) -> pd.Dat
             frame = await provider._fetch_and_format_data(symbol, interval, limit=points, end_ts=end_ms)
             if frame is None or frame.empty:
                 raise RuntimeError("sem klines para %s" % interval)
-            raw[interval] = frame
+            # O bot so transforma em feature o candle ja fechado em 'end'
+            # (DataProvider.get_latest_features). Na busca historica o candle
+            # aberto em 'end' vem completo: mante-lo seria olhar o futuro.
+            interval_ms = provider._get_interval_milliseconds(interval)
+            raw[interval] = frame.loc[(frame.index.asi8 // 10**6 + interval_ms) <= end_ms]
         primary = trading_config.PRIMARY_TIMEFRAME_TRADING
         primary_df = raw[primary].copy()
         start_ms = int((primary_df.index.min() - pd.Timedelta(days=1)).timestamp() * 1000)

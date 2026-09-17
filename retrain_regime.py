@@ -6,6 +6,18 @@ import joblib
 from feature_engineering.crypto_regime_detector import CryptoRegimeDetector, RegimeConfig
 
 def main():
+    import sys
+    # Sobrescrever o detector muda o regime que o bot ao vivo calcula, mas nao o
+    # regime com que o dataset, o meta-modelo e os especialistas foram feitos.
+    # Isso ja aconteceu uma vez sem que nada falhasse. So com --force, e
+    # sabendo que tudo a jusante precisa ser refeito.
+    if "--force" not in sys.argv:
+        print("Recusado: este script sobrescreve models_ai/crypto_regime_detector.pkl, "
+              "o detector com que o dataset foi rotulado (hash fixado em "
+              "models_ai/crypto_regime_detector.sha256). Depois dele e preciso reconstruir "
+              "o dataset causal e o meta-modelo, retreinar os especialistas e atualizar o hash. "
+              "Rode com --force para prosseguir.")
+        return
     print("🧠 [RE-TREINAMENTO] Atualizando CryptoRegimeDetector com Alpha-Mapping...")
     
     # 1. Carregar dados históricos para treino

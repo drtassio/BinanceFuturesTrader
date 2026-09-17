@@ -5935,6 +5935,10 @@ class TrendSpecialist:
         name = self.specialist_name.lower()
         env_class = (BullTradingEnv if 'bull' in name else
                      BearTradingEnv if 'bear' in name else RangerTradingEnv)
+        # The live frame carries columns training never had; left in, they
+        # shrink the observation's extras and change stops (training_schema).
+        from feature_engineering.training_schema import align_to_training_frame
+        frame = align_to_training_frame(frame)
         raw = self._make_trend_env(frame.tail(100).copy(), mode='training',
                                    env_class=env_class, feature_columns=self.feature_columns)
         try:
