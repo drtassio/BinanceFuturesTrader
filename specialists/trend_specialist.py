@@ -370,7 +370,14 @@ class TrendFollowingEnv(gym.Env):
         self._feature_scaler = feature_scaler
         # <<< CORREÃƒâ€¡ÃƒÆ'O: Torna o ambiente ciente do timeframe >>>
         self.primary_tf = self.trading_config.PRIMARY_TIMEFRAME_TRADING
-        self.atr_col = f'atr_{self.primary_tf}'
+        # Stops, trailing, grace, sizing and slippage are all measured in this
+        # ATR. On 15m ATR a 4-day trend is closed by the first 1% pullback
+        # (Donchian 480/240 teacher: 32-bar trades, validation -1.5%); on 4h ATR
+        # the same teacher holds ~300 bars (validation +11.6%, forward +8.1%).
+        stop_tf = str(getattr(self.config, 'ENV_STOP_ATR_TIMEFRAME', '') or self.primary_tf)
+        self.atr_col = f'atr_{stop_tf}'
+        if self.atr_col not in self.df.columns:
+            raise ValueError(f'ENV_STOP_ATR_TIMEFRAME={stop_tf}: coluna {self.atr_col} ausente do dataset')
         ema_candidate = f'ema_trend_{self.primary_tf}'
         if ema_candidate in self.df.columns:
             self.ema_trend_col = ema_candidate

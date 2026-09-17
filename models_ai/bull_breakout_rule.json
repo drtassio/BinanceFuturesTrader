@@ -1,0 +1,13 @@
+{
+  "agent": "bull",
+  "rule": {
+    "kind": "breakout",
+    "entry_window": 480,
+    "exit_window": 240,
+    "sl_mult": 3.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "stop_atr_timeframe": "4h",
+  "selected_on": "none: classic Donchian 30/15 on 4h expressed in 15m bars, fixed before any split was evaluated"
+}

@@ -36,7 +36,7 @@ def _env_class(agent):
 def run_rule(frame, agent, rule):
     """Drive the environment with the rule over a whole block."""
     from config.settings import AIConfig
-    from learning.edge_policy import edge_action
+    from learning.edge_policy import teacher_action
 
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True
@@ -50,7 +50,7 @@ def run_rule(frame, agent, rule):
     summary = None
     for _ in range(env.max_steps + 1):
         index = min(start + env.current_step, len(frame) - 1)
-        action = edge_action(frame.iloc[index], env.position, agent, rule)
+        action = teacher_action(frame.iloc[index], env.position, agent, rule)
         _, _, done, truncated, _ = env.step(action)
         if done or truncated:
             break

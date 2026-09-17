@@ -26,7 +26,7 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
-from learning.edge_policy import EdgeRule, edge_action
+from learning.edge_policy import EdgeRule, load_rule, teacher_action
 
 POLICY_NAME = "edge_teacher"
 AGENTS = ("bull", "bear")
@@ -93,7 +93,7 @@ def trajectory(frame: pd.DataFrame, agent: str, rule: EdgeRule, config=None) -> 
     previous = 0
     for _ in range(env.max_steps + 1):
         index = min(start + env.current_step, len(frame) - 1)
-        action = edge_action(frame.iloc[index], env.position, agent, rule)
+        action = teacher_action(frame.iloc[index], env.position, agent, rule)
         _, _, done, truncated, _ = env.step(action)
         side = int(np.sign(env.position))
         records.append({
@@ -173,7 +173,7 @@ def load_rules(model_dir: Path, agents: Iterable[str] = AGENTS) -> Dict[str, Edg
     rules = {}
     for agent in agents:
         saved = json.loads((Path(model_dir) / ("%s_edge_rule.json" % agent)).read_text(encoding="utf-8"))
-        rules[agent] = EdgeRule(**saved["rule"])
+        rules[agent] = load_rule(saved["rule"])
     return rules
 
 

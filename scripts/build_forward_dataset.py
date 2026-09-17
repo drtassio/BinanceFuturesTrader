@@ -204,12 +204,13 @@ async def build(start: pd.Timestamp, end: pd.Timestamp, step: int, overlap: int,
     return block, worst, stable
 
 
-def validate_against_live(block: pd.DataFrame, checked: set, samples: int, seed: int, tolerance: float) -> dict:
+def validate_against_live(block: pd.DataFrame, checked: set, samples: int, seed: int, tolerance: float,
+                          compare_regime: bool = True) -> dict:
     from scripts.verify_live_parity import build_live_frame
     from trading.teacher_policy import closed_bars
 
-    columns = sorted(c for c in checked | {"regime_confidence", "tp_prior_conf", "tp_prior_dir", "ml_p_long",
-                                             "ml_p_short", "ml_edge", "ml_conf"} if c in block.columns)
+    extra = {"regime_confidence", "tp_prior_conf", "tp_prior_dir", "ml_p_long", "ml_p_short", "ml_edge", "ml_conf"}
+    columns = sorted(c for c in (checked | extra if compare_regime else checked) if c in block.columns)
     scale = block[columns].astype(float).std().replace(0.0, 1e-9)
     rng = np.random.default_rng(seed)
     chosen = sorted(rng.choice(block.index, size=min(samples, len(block)), replace=False))
@@ -221,14 +222,13 @@ def validate_against_live(block: pd.DataFrame, checked: set, samples: int, seed:
         live = closed_bars(live, bar + BAR)
         if live.index[-1] != bar:
             raise RuntimeError("pipeline ao vivo terminou em %s, esperado %s" % (live.index[-1], bar))
-        same_regime = int(live.loc[bar, "regime"]) == int(block.loc[bar, "regime"])
+        same_regime = (not compare_regime) or int(live.loc[bar, "regime"]) == int(block.loc[bar, "regime"])
         regime_equal += same_regime
         diff = (live.loc[bar, columns].astype(float) - block.loc[bar, columns].astype(float)).abs() / scale
         if same_regime:
             for column, value in diff.items():
                 worst[column] = max(worst.get(column, 0.0), float(value))
-        bars.append({"bar": str(bar), "regime_live": int(live.loc[bar, "regime"]),
-                     "regime_block": int(block.loc[bar, "regime"]), "max_std": float(diff.max())})
+        bars.append({"bar": str(bar), "same_regime": bool(same_regime), "max_std": float(diff.max())})
     top = dict(sorted(worst.items(), key=lambda kv: -kv[1])[:8])
     share = regime_equal / max(len(chosen), 1)
     accepted = share >= 0.95 and all(v <= tolerance for v in worst.values())
@@ -254,6 +254,11 @@ def main() -> int:
     parser.add_argument("--validate-samples", type=int, default=40)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--validate-only", action="store_true", help="so revalida um bloco ja montado")
+    # Regime e meta-modelo nao mostraram poder preditivo (IC ~0.01; AUC ~0.5 em
+    # validacao, holdout e no bloco futuro) e o regime causal por barra custa
+    # ~0.3s cada. Para montar historicos longos eles podem ser omitidos: as
+    # colunas derivadas ficam NaN para que nada as use por engano.
+    parser.add_argument("--skip-regime", action="store_true")
     parser.add_argument("--contract", action="append", default=[],
                         help="feature_contract.json de uma execucao; repetivel")
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "forward_live.parquet")
@@ -277,16 +282,25 @@ def main() -> int:
     first = int(np.searchsorted(stitched.index, start))
     if first < REGIME_WINDOW - 1:
         raise RuntimeError("historico insuficiente antes de %s para o regime causal" % start)
-    block = causal_regime(stitched, first, args.workers, Path(str(args.output) + ".stitched.parquet"))
+    if args.skip_regime:
+        block = stitched.iloc[first:].copy()
+        derived = [c for c in block.columns if str(c).startswith(REGIME_DERIVED_PREFIXES)]
+        block[derived] = np.nan
+    else:
+        block = causal_regime(stitched, first, args.workers, Path(str(args.output) + ".stitched.parquet"))
     gaps = block.index.to_series().diff().dropna()
     missing_bars = int((gaps > BAR).sum())
     block.to_parquet(args.output)
-    validation = validate_against_live(block, checked, args.validate_samples, args.seed, args.tolerance)
+    validation = validate_against_live(block, checked, args.validate_samples, args.seed, args.tolerance,
+                                       compare_regime=not args.skip_regime)
     stable = bool(validation["accepted"])
+    if args.skip_regime:
+        print("regime omitido: colunas %s ficaram NaN" % (REGIME_DERIVED_PREFIXES,))
     worst_columns = dict(sorted(worst.items(), key=lambda kv: -kv[1])[:10])
     meta = {"start": str(block.index[0]), "end": str(block.index[-1]), "rows": len(block),
             "gaps": missing_bars, "overlap_worst_columns_in_std": worst_columns, "stable": stable,
-            "regime": "causal: newest bar of the %d closed bars ending on each bar" % REGIME_WINDOW,
+            "regime": ("omitted (NaN)" if args.skip_regime else
+                       "causal: newest bar of the %d closed bars ending on each bar" % REGIME_WINDOW),
             "checked_columns": len(checked), "contracts": [str(c) for c in args.contract],
             "live_validation": validation,
             "built_at": pd.Timestamp.now(tz="UTC").isoformat(), "source": "live pipeline (read-only)"}

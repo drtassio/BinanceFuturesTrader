@@ -30,9 +30,13 @@ def training_columns() -> List[str]:
     return list(json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))["columns"])
 
 
-def align_to_training_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Same columns, same order as training; fails if one is missing."""
-    columns = training_columns()
+def align_to_training_frame(frame: pd.DataFrame, columns: List[str] = None) -> pd.DataFrame:
+    """Same columns, same order as training; fails if one is missing.
+
+    A model trained on another dataset passes that dataset's columns, recorded
+    in its run's feature_contract.json as training_frame_columns.
+    """
+    columns = list(columns) if columns else training_columns()
     missing = [c for c in columns if c not in frame.columns]
     if missing:
         raise ValueError("frame sem %d colunas do treino: %s" % (len(missing), missing[:10]))

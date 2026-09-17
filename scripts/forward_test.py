@@ -103,7 +103,11 @@ def main() -> int:
     args = parser.parse_args()
 
     from feature_engineering.training_schema import align_to_training_frame
-    frame = align_to_training_frame(pd.read_parquet(args.data).sort_index())
+    contract = json.loads((args.run_dir / "feature_contract.json").read_text(encoding="utf-8"))
+    # The model is only valid under the stop scale and the frame it trained on.
+    AIConfig.ENV_STOP_ATR_TIMEFRAME = contract.get("stop_atr_timeframe", "15m")
+    frame = align_to_training_frame(pd.read_parquet(args.data).sort_index().ffill().fillna(0.0),
+                                    contract.get("training_frame_columns"))
     meta = json.loads(Path(str(args.data) + ".meta.json").read_text(encoding="utf-8"))
     if not meta.get("stable") or meta.get("gaps"):
         print("BLOQUEADO: bloco futuro instavel ou com lacunas: %s" % meta)
@@ -114,7 +118,7 @@ def main() -> int:
         print("BLOQUEADO: %d colunas do contrato ausentes no bloco futuro: %s" % (len(missing), missing[:10]))
         return 1
 
-    print("bloco futuro %s -> %s (%d barras) | buy&hold %+.2f%%" % (
+    print("stops em ATR de %s | bloco %s -> %s (%d barras) | buy&hold %+.2f%%" % (AIConfig.ENV_STOP_ATR_TIMEFRAME,
         frame.index[0], frame.index[-1], len(frame), buy_and_hold_return(frame) * 100))
     metrics, curve = run_policy(agent, frame, args.agent)
     verdict = judge(metrics, buy_and_hold_return(frame))
@@ -125,11 +129,14 @@ def main() -> int:
 
     teacher = {}
     try:
-        from learning.edge_policy import EdgeRule
+        from dataclasses import replace
+        from learning.edge_policy import load_rule
         from tune_edge_rule import run_rule
-        saved = json.loads((ROOT / "models_ai" / ("%s_edge_rule.json" % args.agent)).read_text(encoding="utf-8"))
+        report_path = args.run_dir / ("%s_guided_report.json" % args.agent)
+        saved = json.loads(report_path.read_text(encoding="utf-8"))["teacher_rule"]
         low, high = agent.model.action_space.low, agent.model.action_space.high
-        rule = EdgeRule(**{**saved["rule"], "sl_mult": float(np.clip(saved["rule"]["sl_mult"], low[1], high[1]))})
+        rule = load_rule(saved)
+        rule = replace(rule, sl_mult=float(np.clip(rule.sl_mult, low[1], high[1])))
         teacher = run_rule(frame, args.agent, rule)
         print("PROFESSORA : trades=%d retorno=%+.2f%% PF=%.2f maxDD=%.1f%%" % (
             teacher["trades"], teacher["net_return"] * 100, teacher["profit_factor"], teacher["max_drawdown"] * 100))

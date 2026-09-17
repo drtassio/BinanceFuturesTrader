@@ -145,6 +145,19 @@ def add_trend_structure(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         put("bars_since_low_%d" % win,
             (win - low.rolling(win).apply(np.argmin, raw=True) - 1) / win)
 
+    # Distance past the prior N-bar extreme, in ATR. On 15m bars 480 is about a
+    # 30-bar Donchian on 4h, the horizon on which trend following on BTC
+    # perpetuals held up from 2020 to 2026 (Sharpe ~1 long-only, costs and
+    # funding included); the 100-bar channel above is a 25-hour trend and chops.
+    # Positive breakout_up: the close cleared the prior highs; negative
+    # breakout_down: it lost the prior lows. shift(1) keeps the current bar out
+    # of its own reference.
+    for win in (240, 480):
+        prior_high = high.rolling(win).max().shift(1)
+        prior_low = low.rolling(win).min().shift(1)
+        put("breakout_up_%d" % win, (close - prior_high) / atr)
+        put("breakout_down_%d" % win, (close - prior_low) / atr)
+
     logret = np.log(close).diff()
     base_vol = logret.rolling(384).std()
     for win in (24, 96, 384):

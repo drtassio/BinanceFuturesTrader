@@ -47,7 +47,7 @@ from cloud.train_agent import (  # noqa: E402
     load_dataset, split_chronological,
 )
 from config.settings import AIConfig, TradingConfig  # noqa: E402
-from learning.edge_policy import EdgeRule, edge_action  # noqa: E402
+from learning.edge_policy import load_rule, teacher_action, teacher_inputs  # noqa: E402
 
 
 def _raw_env(vec_env):
@@ -90,7 +90,7 @@ def collect_teacher(model, agent_name, frame, rule, vec_env, fill_buffer=True):
     start = int(getattr(raw, "start_idx", 0) or 0)
     for _ in range(len(frame)):
         row = frame.iloc[min(start + raw.current_step, len(frame) - 1)]
-        action = edge_action(row, raw.position, agent_name, rule)[None, :]
+        action = teacher_action(row, raw.position, agent_name, rule)[None, :]
         scaled = model.policy.scale_action(action)
         next_obs, reward, done, infos = vec_env.step(action)
         buffer_next = next_obs.copy()
@@ -115,7 +115,7 @@ def _on_position(votes, sides):
     return torch.sign(votes) == float(sides[0])
 
 
-def rule_input_mask(agent, obs_dim, n_stack=4):
+def rule_input_mask(agent, obs_dim, rule, agent_name, n_stack=4):
     """Observation positions the teacher rule actually reads, in the newest frame.
 
     Frame layout (TrendFollowingEnv._get_observation): market features in
@@ -128,7 +128,8 @@ def rule_input_mask(agent, obs_dim, n_stack=4):
     columns = list(agent.feature_columns)
     keep = _np.zeros(obs_dim, dtype=bool)
     offset = (n_stack - 1) * frame_dim
-    for name in ("ml_p_long", "ml_p_short", "ml_edge"):
+    inputs = teacher_inputs(rule, agent_name)
+    for name in inputs["columns"]:
         if name not in columns:
             raise KeyError("observacao sem a entrada da professora: %s" % name)
         keep[offset + columns.index(name)] = True
@@ -138,7 +139,8 @@ def rule_input_mask(agent, obs_dim, n_stack=4):
     # prior(2) = [tp_prior_dir, tp_prior_conf], physics(2). tp_prior_dir e
     # removido das features de mercado pelo ambiente, mas chega aqui.
     keep[tail + 0] = True  # sign(position)
-    keep[tail + 7] = True  # tp_prior_dir
+    if inputs["prior_dir"]:
+        keep[tail + 7] = True  # tp_prior_dir
     return keep
 
 
@@ -171,7 +173,7 @@ def collect_dagger(model, agent_name, frame, rule, vec_env):
     start = int(getattr(raw, "start_idx", 0) or 0)
     for _ in range(len(frame)):
         row = frame.iloc[min(start + raw.current_step, len(frame) - 1)]
-        teacher = edge_action(row, raw.position, agent_name, rule)[None, :]
+        teacher = teacher_action(row, raw.position, agent_name, rule)[None, :]
         clone, _ = model.predict(obs, deterministic=True)
         next_obs, reward, done, infos = vec_env.step(clone)
         buffer_next = next_obs.copy()
@@ -292,7 +294,8 @@ def main() -> int:
     from stable_baselines3.common.logger import configure
 
     rule_path = args.rule or ROOT / "models_ai" / ("%s_edge_rule.json" % args.agent)
-    rule = EdgeRule(**json.loads(rule_path.read_text(encoding="utf-8"))["rule"])
+    rule = load_rule(json.loads(rule_path.read_text(encoding="utf-8"))["rule"])
+    print("stops do ambiente em ATR de %s" % AIConfig.ENV_STOP_ATR_TIMEFRAME)
     print("professora: %s" % rule.as_dict())
 
     df = load_dataset(args.data)
@@ -381,7 +384,7 @@ def main() -> int:
     val_env = _episode_environment(agent, val_df, args.agent)
     val_observations, val_actions = collect_teacher(model, args.agent, val_df, rule, val_env, fill_buffer=False)
     val_env.close()
-    keep_mask = rule_input_mask(agent, observations.shape[1])
+    keep_mask = rule_input_mask(agent, observations.shape[1], rule, args.agent)
     obs_t, act_t, weights = behaviour_clone(
         model, observations, actions, args.bc_epochs, SIDES[args.agent], keep_mask,
         val_observations=val_observations, val_actions=val_actions)
@@ -457,7 +460,10 @@ def main() -> int:
     final_path = run_dir / "models" / ("%s_specialist_sac.zip" % args.agent)
     agent.model.save(str(final_path))
     (run_dir / "feature_contract.json").write_text(
-        json.dumps({"feature_columns": list(agent.feature_columns)}, indent=2), encoding="utf-8")
+        json.dumps({"feature_columns": list(agent.feature_columns),
+                    "stop_atr_timeframe": AIConfig.ENV_STOP_ATR_TIMEFRAME,
+                    "training_frame_columns": list(df.columns),
+                    "dataset": str(args.data)}, indent=2), encoding="utf-8")
     report = {
         "agent": args.agent, "method": "behaviour_cloning+td3bc_finetune",
         "teacher_rule": rule.as_dict(), "teacher_validation": teacher_val,

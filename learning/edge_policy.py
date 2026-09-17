@@ -90,3 +90,75 @@ def edge_action(row, position: float, agent: str, rule: EdgeRule) -> np.ndarray:
     sides = SIDES[agent]
     flat_vote = 0.0 if len(sides) > 1 else -sides[0] * rule.vote
     return np.array([flat_vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
+@dataclass(frozen=True)
+class BreakoutRule:
+    """Channel breakout: the teacher for multi-day trend following.
+
+    The edge rule above rests on ml_p_long/ml_p_short, and those turned out to
+    carry no information out of sample (AUC 0.505-0.523 on validation and
+    holdout, 0.487-0.491 on bars after the dataset ends). Its backtest profits
+    were the environment's exit mechanics riding whatever the market did.
+    Breakout trend following is the pattern with a record on BTC perpetuals:
+    long-only Donchian 30/15 on 4h made Sharpe ~1 from 2020 to 2026 after costs
+    and funding. On 15m bars that is a 480-bar entry and a 240-bar exit, with
+    stops priced in 4h ATR (ENV_STOP_ATR_TIMEFRAME=4h). Nothing here is tuned:
+    the windows are the classic ones, fixed before looking at any split.
+    """
+    kind: str = "breakout"
+    entry_window: int = 480
+    exit_window: int = 240
+    sl_mult: float = 3.0
+    leverage: float = 3.0
+    vote: float = 0.8
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def breakout_inputs(rule: BreakoutRule, agent: str) -> tuple:
+    side = SIDES[agent][0]
+    if side > 0:
+        return ("cz_breakout_up_%d" % rule.entry_window, "cz_breakout_down_%d" % rule.exit_window)
+    return ("cz_breakout_down_%d" % rule.entry_window, "cz_breakout_up_%d" % rule.exit_window)
+
+
+def breakout_action(row, position: float, agent: str, rule: BreakoutRule) -> np.ndarray:
+    """[vote, sl_mult, leverage]: enter past the long channel, leave past the short one."""
+    if len(SIDES[agent]) != 1:
+        raise ValueError("breakout teacher is directional; %s trades both sides" % agent)
+    side = SIDES[agent][0]
+    entry_column, exit_column = breakout_inputs(rule, agent)
+    entry = float(row.get(entry_column, 0.0))
+    exit_ = float(row.get(exit_column, 0.0))
+    held = int(np.sign(position))
+    if held == side:
+        # Long: out once the close loses the prior exit-window low (negative
+        # distance). Short: out once it clears the prior exit-window high.
+        broken = exit_ < 0.0 if side > 0 else exit_ > 0.0
+        vote = -side * rule.vote if broken else side * rule.vote
+    else:
+        started = entry > 0.0 if side > 0 else entry < 0.0
+        vote = side * rule.vote if started else -side * rule.vote
+    return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
+def load_rule(saved: Dict[str, object]):
+    """Teacher from its saved JSON 'rule' block."""
+    if saved.get("kind") == "breakout":
+        return BreakoutRule(**saved)
+    return EdgeRule(**saved)
+
+
+def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
+    if isinstance(rule, BreakoutRule):
+        return breakout_action(row, position, agent, rule)
+    return edge_action(row, position, agent, rule)
+
+
+def teacher_inputs(rule, agent: str) -> Dict[str, object]:
+    """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
+    if isinstance(rule, BreakoutRule):
+        return {"columns": breakout_inputs(rule, agent), "prior_dir": False}
+    return {"columns": ("ml_p_long", "ml_p_short", "ml_edge"), "prior_dir": bool(rule.require_regime)}

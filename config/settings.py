@@ -361,6 +361,11 @@ class AIConfig(Config):
     # Alterar aqui exige retreinar os agentes.
     TRAINING_LEVERAGE_CAP = float(os.environ.get('TRAINING_LEVERAGE_CAP', 3.0))
 
+    # Timeframe whose ATR prices the environment's stops and sizing. A model is
+    # only valid with the value it was trained under; it is recorded in the
+    # run's feature_contract.json.
+    ENV_STOP_ATR_TIMEFRAME = os.environ.get('ENV_STOP_ATR_TIMEFRAME', '15m')
+
     # Legacy profit/EMA exits exist only in the Ranger simulator. Disable
     # them by default: learned exits must come from policy votes, while
     # ordinary stops and emergency protection remain active. Opt-in is only
