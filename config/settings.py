@@ -110,15 +110,18 @@ class TradingConfig(Config):
 
 
     MAX_PORTFOLIO_RISK_PERCENT = float(os.environ.get('MAX_PORTFOLIO_RISK_PERCENT', 0.02)) # Risco por trade como % do portfólio
-    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.15)) # Max % do capital para MARGEM (15%)
-    MAX_TOTAL_EXPOSURE_PERCENT = float(os.environ.get('MAX_TOTAL_EXPOSURE_PERCENT', 2.50)) # Max alavancagem nocional total da conta (ex: 2.50 = 250% do capital nocional)
+    MAX_POSITION_SIZE_PERCENT = float(os.environ.get('MAX_POSITION_SIZE_PERCENT', 0.25)) # Max % do capital para MARGEM (25%)
+    MAX_TOTAL_EXPOSURE_PERCENT = float(os.environ.get('MAX_TOTAL_EXPOSURE_PERCENT', 10.0)) # Max alavancagem nocional total da conta (ate 10x de exposicao)
 
     # --- ConfiguraÃ§Ãµes de Alavancagem DinÃ¢mica ---
     # MAX_LEVERAGE Ã© a alavancagem mÃ¡xima permitida pela exchange ou pelo seu sistema.
     # MAX_LEVERAGE_PER_TRADE Ã© o limite que o agente pode *predizer* ou que o RiskManager pode *permitir*.
     MAX_LEVERAGE = float(os.environ.get('MAX_LEVERAGE', 20.0)) # Maximo de alavancagem permitida pela corretora
-    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 15.0)) # Limite maximo para conviccao extrema
-    MIN_LEVERAGE_PER_TRADE = float(os.environ.get('MIN_LEVERAGE_PER_TRADE', 1.0)) # Minimo de alavancagem
+    MAX_LEVERAGE_PER_TRADE = float(os.environ.get('MAX_LEVERAGE_PER_TRADE', 10.0)) # Limite maximo para conviccao extrema: 10x
+    MIN_LEVERAGE_PER_TRADE = float(os.environ.get('MIN_LEVERAGE_PER_TRADE', 3.0)) # Minimo de alavancagem: 3x
+    DYNAMIC_LEVERAGE_ENABLED = os.environ.get('DYNAMIC_LEVERAGE_ENABLED', 'True').lower() in ('true', '1', 't')
+    DYNAMIC_LEVERAGE_MIN = float(os.environ.get('DYNAMIC_LEVERAGE_MIN', 3.0))
+    DYNAMIC_LEVERAGE_MAX = float(os.environ.get('DYNAMIC_LEVERAGE_MAX', 10.0))
     LEVERAGE_PREDICTION_RANGE = (MIN_LEVERAGE_PER_TRADE, MAX_LEVERAGE_PER_TRADE) # Range para a acao de alavancagem do agente
     LEVERAGE_COST_PER_DAY_PCT = float(os.environ.get('LEVERAGE_COST_PER_DAY_PCT', 0.0003))
 

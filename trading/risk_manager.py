@@ -396,6 +396,54 @@ class RiskManager:
             
         return alerts
 
+    def calculate_dynamic_leverage(
+        self,
+        confidence: float,
+        profit_probability: float = 0.5,
+        flow_conviction: float = 0.0,
+        step_strength: float = 0.0,
+        desired_leverage: Optional[float] = None,
+    ) -> float:
+        """
+        Sistema de Alavancagem Dinâmica: Mínimo 3x, Máximo 10x.
+        
+        - Mínimo: 3.0x (alavancagem base para qualquer trade confirmado).
+        - Escala suavemente até 10.0x apenas quando há extrema confiança:
+          * Confiança do modelo alta (confidence >= 0.85)
+          * Probabilidade de lucro estimada alta (profit_prob >= 0.75)
+          * Convicção do fluxo CVD / agressão forte
+          * Degraus direcionais fortes e acelerados
+        """
+        min_lev = float(getattr(self.config, 'DYNAMIC_LEVERAGE_MIN', 3.0))
+        max_lev = float(getattr(self.config, 'DYNAMIC_LEVERAGE_MAX', 10.0))
+
+        if desired_leverage is not None and desired_leverage >= min_lev:
+            base_lev = min(float(desired_leverage), max_lev)
+        else:
+            base_lev = min_lev
+
+        # Normaliza pontuações de confiança e probabilidade
+        conf_score = float(np.clip((confidence - 0.5) / 0.45, 0.0, 1.0))
+        prob_score = float(np.clip((profit_probability - 0.5) / 0.45, 0.0, 1.0))
+
+        conviction = 0.45 * conf_score + 0.35 * prob_score
+        if flow_conviction > 0.0:
+            conviction += 0.10 * float(np.clip(flow_conviction / 2.0, 0.0, 1.0))
+        if step_strength > 0.0:
+            conviction += 0.10 * float(np.clip(step_strength / 3.0, 0.0, 1.0))
+
+        conviction = float(np.clip(conviction, 0.0, 1.0))
+
+        # Escala dinâmica: com convicção padrão fica próxima a 3x-4x.
+        # Extrema confiança (> 0.75) escala exponencialmente em direção a 10x.
+        dynamic_lev = base_lev + (max_lev - base_lev) * (conviction ** 2.0)
+
+        # Redução suave se o portfólio estiver em drawdown
+        if hasattr(self, 'combined_reduction_factor') and self.combined_reduction_factor < 1.0:
+            dynamic_lev = max(min_lev, dynamic_lev * self.combined_reduction_factor)
+
+        return float(np.clip(round(dynamic_lev, 1), min_lev, max_lev))
+
     def calculate_position_size(self, symbol: str, confidence: float, volatility: float,
                                  profit_probability: float, desired_leverage: float) -> Tuple[float, float]:
         """
@@ -433,9 +481,12 @@ class RiskManager:
         # Este é o valor nocional % do portfólio que deveria ter o risco ajustado.
         position_size_notional_base_pct = adjusted_risk_pct / volatility
 
-        # 3. Determinar a alavancagem final a ser aplicada
-        # A alavancagem final será a alavancagem desejada pelo agente, dentro dos limites configurados.
-        final_leverage_to_apply = np.clip(desired_leverage, self.config.MIN_LEVERAGE_PER_TRADE, self.config.MAX_LEVERAGE_PER_TRADE)
+        # 3. Determinar a alavancagem final dinamicamente (Mínimo 3x, Máximo 10x na extrema confiança)
+        final_leverage_to_apply = self.calculate_dynamic_leverage(
+            confidence=confidence,
+            profit_probability=profit_probability,
+            desired_leverage=desired_leverage
+        )
 
         # 4. Calcular a margem a ser alocada
         # Margem = (Valor Nocional Base) / Alavancagem Final Aplicada

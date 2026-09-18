@@ -2701,8 +2701,16 @@ class AIController:
             # alavancagem da ordem e a menor que acomoda o MESMO nocional do
             # backtest; o risco continua sendo nocional x distancia do stop.
             max_margin = float(cfg.MAX_POSITION_SIZE_PERCENT) * 0.95
-            leverage = float(np.clip(np.ceil(fraction / max_margin), max(1.0, float(cfg.MIN_LEVERAGE_PER_TRADE)),
-                                     float(cfg.MAX_LEVERAGE_PER_TRADE)))
+            base_lev = float(np.clip(np.ceil(fraction / max_margin), float(getattr(cfg, 'MIN_LEVERAGE_PER_TRADE', 3.0)),
+                                     float(getattr(cfg, 'MAX_LEVERAGE_PER_TRADE', 10.0))))
+            if hasattr(self, 'risk_manager') and self.risk_manager and hasattr(self.risk_manager, 'calculate_dynamic_leverage'):
+                leverage = self.risk_manager.calculate_dynamic_leverage(
+                    confidence=1.0,
+                    profit_probability=0.85,
+                    desired_leverage=base_lev
+                )
+            else:
+                leverage = base_lev
             size_pct = float(np.clip(fraction / leverage, 0.0, max_margin))
             # A saida real e a do ambiente, avaliada no fechamento da barra. O
             # stop na corretora so cobre o bot parado: fica ao dobro da
