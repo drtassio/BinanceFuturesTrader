@@ -1129,9 +1129,9 @@ class TrendFollowingEnv(gym.Env):
         _ALWAYS_CONTAINS = ('sdae_recon', 'regime_conf', 'tp_prior')
 
         # 2. Timeframes a EXCLUIR das features técnicas
-        _EXCLUDED_TF = ('_1m', '_5m', '_4h')
+        _EXCLUDED_TF = ('_1m', '_5m')
 
-        # 3. Padrões técnicos aceitos SOMENTE em _15m e _1h
+        # 3. Padrões técnicos aceitos em _15m, _1h e _4h
         _TECH_PATTERNS = (
             'log_return', 'hl_range_pct', 'oc_move_pct', 'close_frac',
             'high_frac', 'low_frac',        # fracdiff de high/low (estacionário)
@@ -3398,9 +3398,9 @@ class TrendSpecialist:
         # Mantém latents independentemente do timeframe
         final_cols = []
         for col in filtered:
-            if 'hidden_feature' in col or 'sdae_recon' in col or 'regime_conf' in col or 'tp_prior' in col:
+            if 'hidden_feature' in col or 'sdae_recon' in col or 'regime_conf' in col or 'tp_prior' in col or col.startswith('cz_') or col.startswith('ml_'):
                 final_cols.append(col)
-            elif '_15m' in col or '_1h' in col:
+            elif '_15m' in col or '_1h' in col or '_4h' in col:
                 final_cols.append(col)
         return final_cols
 

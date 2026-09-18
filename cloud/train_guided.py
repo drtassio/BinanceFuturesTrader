@@ -58,7 +58,7 @@ def _raw_env(vec_env):
     return inner.envs[0]
 
 
-def score(metrics: dict) -> float:
+def score(metrics: dict, min_trades: int = 10) -> float:
     """Return per unit of drawdown, for policies that trade and make money."""
     trades = int(metrics.get("num_trades", 0) or 0)
     net = float(metrics.get("total_return_pct", 0.0) or 0.0)
@@ -68,7 +68,7 @@ def score(metrics: dict) -> float:
     # that actually meets the bot's minimum activity and drawdown criteria.
     if not all(np.isfinite(value) for value in (net, pf, dd)):
         return -np.inf
-    if trades < int(AIConfig.OOS_MIN_TRADES) or net <= 0.0 or pf < 1.2 or not 0.0 <= dd <= float(AIConfig.OOS_MAX_DRAWDOWN):
+    if trades < min_trades or net <= 0.0 or pf < 1.2 or not 0.0 <= dd <= float(AIConfig.OOS_MAX_DRAWDOWN):
         return -np.inf
     return net / max(dd, 0.02)
 
@@ -115,20 +115,21 @@ def _on_position(votes, sides):
     return torch.sign(votes) == float(sides[0])
 
 
-def rule_input_mask(agent, obs_dim, rule, agent_name, n_stack=4):
+def rule_input_mask(agent, obs_dim, rule, agent_name, n_stack=4, all_features=True):
     """Observation positions the teacher rule actually reads, in the newest frame.
 
-    Frame layout (TrendFollowingEnv._get_observation): market features in
-    feature_columns order, extras, then agent_state whose first entry is the
-    sign of the position. VecFrameStack appends the newest frame last.
+    When all_features=True (default), preserves the complete observation vector so the
+    actor learns cross-correlations with the 32 autoencoder latents, aggressor delta,
+    order flow, 1h/4h higher-timeframe features, and position states.
     """
     import numpy as _np
 
+    if all_features:
+        return _np.ones(obs_dim, dtype=bool)
     frame_dim = obs_dim // n_stack
     columns = list(agent.feature_columns)
     inputs = teacher_inputs(rule, agent_name)
     if inputs.get("all_columns"):
-        # A teacher drawn on the finished chart has no known inputs to isolate.
         return _np.ones(obs_dim, dtype=bool)
     keep = _np.zeros(obs_dim, dtype=bool)
     offset = (n_stack - 1) * frame_dim
@@ -281,6 +282,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=ROOT / "cloud" / "artifacts")
     parser.add_argument("--max-bars", type=int, default=0, help="so para teste de fumaca: encurta cada bloco")
     parser.add_argument("--bootstrap-from", type=Path, help="execucao anterior cujo modelo e scaler sao reaproveitados")
+    parser.add_argument("--min-trades", type=int, default=10, help="minimo de trades na validacao para considerar o checkpoint")
+    parser.add_argument("--isolate-teacher-inputs", action="store_true", default=False, help="embaralha dimensoes fora das entradas da professora")
     parser.add_argument('--cpu-threads', type=int, default=1, help='limite de threads PyTorch no processador')
     parser.add_argument('--seed', type=int, default=42, help='semente fixa, sem busca de hiperparametros')
     args = parser.parse_args()
@@ -387,13 +390,13 @@ def main() -> int:
     val_env = _episode_environment(agent, val_df, args.agent)
     val_observations, val_actions = collect_teacher(model, args.agent, val_df, rule, val_env, fill_buffer=False)
     val_env.close()
-    keep_mask = rule_input_mask(agent, observations.shape[1], rule, args.agent)
+    keep_mask = rule_input_mask(agent, observations.shape[1], rule, args.agent, all_features=not args.isolate_teacher_inputs)
     obs_t, act_t, weights = behaviour_clone(
         model, observations, actions, args.bc_epochs, SIDES[args.agent], keep_mask,
         val_observations=val_observations, val_actions=val_actions)
     cloned = evaluate(agent, val_df, args.agent, deterministic=True)
     print("politica clonada na validacao: %s" % summarize(cloned))
-    best = {"label": "clonada", "score": score(cloned), "metrics": cloned}
+    best = {"label": "clonada", "score": score(cloned, min_trades=args.min_trades), "metrics": cloned}
     best_path = run_dir / "models" / "best_validation.zip"
     model.save(best_path)
 
@@ -408,8 +411,9 @@ def main() -> int:
         metrics = evaluate(agent, val_df, args.agent, deterministic=True)
         model.save(run_dir / 'models' / ('dagger_%d_validation.zip' % iteration))
         print("DAgger %d na validacao: %s" % (iteration, summarize(metrics)))
-        if score(metrics) > best["score"]:
-            best.update(label="DAgger %d" % iteration, score=score(metrics), metrics=metrics)
+        current = score(metrics, min_trades=args.min_trades)
+        if current > best["score"]:
+            best.update(label="DAgger %d" % iteration, score=current, metrics=metrics)
             model.save(best_path)
             print("    -> novo melhor na validacao")
     if best["label"] != "clonada":
@@ -436,7 +440,7 @@ def main() -> int:
             if self.num_timesteps % args.eval_every == 0:
                 metrics = evaluate(agent, val_df, args.agent, deterministic=True)
                 model.save(run_dir / 'models' / ('finetune_%d_validation.zip' % self.num_timesteps))
-                current = score(metrics)
+                current = score(metrics, min_trades=args.min_trades)
                 print("  passo %d (bc=%.2f) validacao: %s" % (self.num_timesteps, model.bc_weight, summarize(metrics)))
                 if current > best["score"]:
                     best.update(label="ajuste fino %d" % self.num_timesteps, score=current, metrics=metrics)

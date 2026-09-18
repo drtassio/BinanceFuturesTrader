@@ -248,17 +248,16 @@ class LegConfirmRule:
     1 ATR or more within the last 12 (steps with pauses between them), the close
     past the prior 12h extreme, the current candle and the aggressive flow on its
     side, at least min_steps_5m strong 5m candles inside the last two 15m
-    candles, and (require_trend_4h) the 4h trend agreeing. In the trade it rides
-    the 4h structure and leaves when it breaks. Nothing is anticipated.
-
-    Chosen on the TRAIN block of scripts/research_5m_patterns.py (282 variants):
-    train 86 trades PF 1.29; validation 24 trades PF 2.06; holdout 24 trades PF
-    2.13. The same rule without the 5m confirmation had train PF 1.07.
+    candles, and higher-timeframe trend/momentum agreeing (1h/4h). In the trade it
+    rides the 4h structure and leaves when it breaks. Nothing is anticipated.
     """
     kind: str = "leg_confirm"
     min_steps: int = 3
     min_steps_5m: int = 2
     require_trend_4h: bool = True
+    require_trend_1h: bool = False
+    require_ema_trend_4h: bool = False
+    require_macd_4h: bool = False
     sl_mult: float = 3.0
     leverage: float = 3.0
     vote: float = 0.8
@@ -274,22 +273,43 @@ def leg_confirm_inputs(rule: "LegConfirmRule", agent: str) -> tuple:
     else:
         cols = ("cz_leg_steps_down", "cz_breakout_down_48", "cz_step_body_atr", "cz_cvd_z_16",
                 "cz_steps5_down", "cz_struct_4h_short")
-    return cols + (("cz_trend_4h",) if rule.require_trend_4h else ())
+    extras = []
+    if rule.require_trend_4h:
+        extras.append("cz_trend_4h")
+    if getattr(rule, "require_trend_1h", False):
+        extras.append("ema_trend_1h")
+    if getattr(rule, "require_ema_trend_4h", False):
+        extras.append("ema_trend_4h")
+    if getattr(rule, "require_macd_4h", False):
+        extras.append("macd_hist_4h")
+    return cols + tuple(extras)
 
 
 def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule") -> np.ndarray:
     if len(SIDES[agent]) != 1:
         raise ValueError("leg-confirm teacher is directional; %s trades both sides" % agent)
     side = SIDES[agent][0]
-    values = [float(row.get(c, 0.0)) for c in leg_confirm_inputs(rule, agent)]
-    steps, breakout, body, cvd, steps5, structure = values[:6]
+    inputs = leg_confirm_inputs(rule, agent)
+    values = {c: float(row.get(c, 0.0)) for c in inputs}
+    steps = values[inputs[0]]
+    breakout = values[inputs[1]]
+    body = values["cz_step_body_atr"]
+    cvd = values["cz_cvd_z_16"]
+    steps5 = values[inputs[4]]
+    structure = values[inputs[5]]
     if int(np.sign(position)) == side:
         vote = side * rule.vote if structure >= 0.0 else -side * rule.vote
     else:
         confirmed = (steps >= rule.min_steps and side * breakout > 0.0 and side * body > 0.0
                      and side * cvd > 0.0 and steps5 >= rule.min_steps_5m)
         if rule.require_trend_4h:
-            confirmed = confirmed and side * values[6] > 0.0
+            confirmed = confirmed and side * values.get("cz_trend_4h", 0.0) > 0.0
+        if getattr(rule, "require_trend_1h", False):
+            confirmed = confirmed and side * values.get("ema_trend_1h", 0.0) > 0.0
+        if getattr(rule, "require_ema_trend_4h", False):
+            confirmed = confirmed and side * values.get("ema_trend_4h", 0.0) > 0.0
+        if getattr(rule, "require_macd_4h", False):
+            confirmed = confirmed and side * values.get("macd_hist_4h", 0.0) > 0.0
         vote = side * rule.vote if confirmed else -side * rule.vote
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 

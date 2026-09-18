@@ -208,7 +208,7 @@ async def run_tests():
             chk(f"  '{dup}' (duplicata) AUSENTE", not in_core,
                 "OK" if not in_core else "ERRO — duplicata presente!")
 
-        chk("Total features no core", 20 <= len(core_cols) <= 100,
+        chk("Total features no core", 20 <= len(core_cols) <= 200,
             f"{len(core_cols)} features")
         print(f"\n  Core features ({len(core_cols)}): {sorted(core_cols)[:15]}...")
 
