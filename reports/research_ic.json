@@ -1,0 +1,1418 @@
+{
+ "1 hora | todos os candles": {
+  "stable": 158,
+  "chance": [
+   7,
+   11,
+   5
+  ],
+  "stable_paying_cost": 0,
+  "top": [
+   {
+    "feature": "cz_aggression",
+    "grupo": "fluxo/tape",
+    "ic": -0.026995612299451924,
+    "t": -17.357155974998836,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00019675259407515817,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_15m",
+    "grupo": "15m",
+    "ic": -0.036077769628496716,
+    "t": -12.487567038204764,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00019369757554443736,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_15m",
+    "grupo": "15m",
+    "ic": -0.03607805374063655,
+    "t": -12.486021149694029,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00019369757554443736,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_15m",
+    "grupo": "15m",
+    "ic": -0.03608123798050459,
+    "t": -12.47008245664262,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00019325574037434162,
+    "estavel": true
+   },
+   {
+    "feature": "cz_step_body_atr",
+    "grupo": "15m",
+    "ic": -0.03696354751781605,
+    "t": -8.855952218324044,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -7.269588345235673e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_100",
+    "grupo": "15m",
+    "ic": -0.03628287020456726,
+    "t": -8.312343071962749,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -3.727015044839483e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_50",
+    "grupo": "15m",
+    "ic": -0.041240811652373005,
+    "t": -8.225173944712187,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -8.796541481625876e-05,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_d_1h",
+    "grupo": "1h",
+    "ic": -0.02782642967037479,
+    "t": -8.1887189545313,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -7.570126414444823e-05,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_1h",
+    "grupo": "1h",
+    "ic": -0.03602770621996079,
+    "t": -7.623938648405241,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -2.3429381722739933e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_100",
+    "grupo": "15m",
+    "ic": -0.0393059747994269,
+    "t": -7.599523929376397,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00011164730971399796,
+    "estavel": true
+   },
+   {
+    "feature": "cz_vwap_dist",
+    "grupo": "fluxo/tape",
+    "ic": -0.029908362669102906,
+    "t": -7.573043077798631,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002580151673548913,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_1h",
+    "grupo": "1h",
+    "ic": -0.03468789690714026,
+    "t": -7.527015524433648,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -9.603738113799523e-05,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_1h",
+    "grupo": "1h",
+    "ic": -0.03468789690714026,
+    "t": -7.527015524433648,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -9.603738113799523e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_slope_50",
+    "grupo": "15m",
+    "ic": -0.025536846117162434,
+    "t": -7.477175765217743,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 4.721457238836489e-06,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_50",
+    "grupo": "15m",
+    "ic": -0.04083423422942402,
+    "t": -7.113751444417567,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00018626546084053806,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_15m",
+    "grupo": "15m",
+    "ic": -0.04837584017372259,
+    "t": -7.11136672610473,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.000400512565752426,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_15m",
+    "grupo": "15m",
+    "ic": -0.048375832699884214,
+    "t": -7.11136376410897,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.000400512565752426,
+    "estavel": true
+   },
+   {
+    "feature": "roc_1h",
+    "grupo": "1h",
+    "ic": -0.026785683246756727,
+    "t": -6.758296117136898,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002006334272644112,
+    "estavel": true
+   },
+   {
+    "feature": "low_frac_1h",
+    "grupo": "1h",
+    "ic": -0.03756939397893815,
+    "t": -6.552192652120202,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002992442140717787,
+    "estavel": true
+   },
+   {
+    "feature": "cz_struct_4h_long",
+    "grupo": "4h",
+    "ic": -0.041578679642212,
+    "t": -6.501713530305726,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002152352013847517,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_slope_100",
+    "grupo": "15m",
+    "ic": -0.024913144956435238,
+    "t": -6.365812850350537,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -3.8969335248290363e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_200",
+    "grupo": "15m",
+    "ic": -0.03276412608392357,
+    "t": -5.998576841540789,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0001129493047054537,
+    "estavel": true
+   },
+   {
+    "feature": "cci_1h",
+    "grupo": "1h",
+    "ic": -0.029557837777970816,
+    "t": -5.996693937559163,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 5.289496697295623e-05,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_20",
+    "grupo": "15m",
+    "ic": -0.04934441533594595,
+    "t": -5.977102222696156,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00015898816829026233,
+    "estavel": true
+   },
+   {
+    "feature": "bb_lower_4h",
+    "grupo": "4h",
+    "ic": -0.02785275397887418,
+    "t": -5.822970574721711,
+    "trimestres_mesmo_sinal": 0.8888888888888888,
+    "spread": -0.0003773013524208923,
+    "estavel": true
+   }
+  ]
+ },
+ "1 hora | dentro das pernas de ALTA marcadas": {
+  "stable": 167,
+  "chance": [
+   17,
+   5,
+   14
+  ],
+  "stable_paying_cost": 40,
+  "top": [
+   {
+    "feature": "cz_donchian_pos_50",
+    "grupo": "15m",
+    "ic": -0.19527365288427317,
+    "t": -27.242587325806923,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002530956023428397,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_32",
+    "grupo": "15m",
+    "ic": -0.20135478057282544,
+    "t": -23.032655711318405,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0019974142134334457,
+    "estavel": true
+   },
+   {
+    "feature": "cci_15m",
+    "grupo": "15m",
+    "ic": -0.22419390462478883,
+    "t": -23.024187309544143,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0024849999872908284,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_down_32",
+    "grupo": "15m",
+    "ic": -0.2023226766744761,
+    "t": -22.539109450335452,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0025886853244878865,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_20",
+    "grupo": "15m",
+    "ic": -0.24526211141944165,
+    "t": -21.595535570072062,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0028642329106821113,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_down_48",
+    "grupo": "15m",
+    "ic": -0.17734666909486743,
+    "t": -19.60128908779094,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0024080250740778457,
+    "estavel": true
+   },
+   {
+    "feature": "cz_efficiency_24",
+    "grupo": "15m",
+    "ic": -0.16814169215848213,
+    "t": -18.94629029360516,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.001787457448004389,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_down",
+    "grupo": "15m",
+    "ic": -0.17389261716458354,
+    "t": -18.871179857297147,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002433186603175949,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_20",
+    "grupo": "15m",
+    "ic": -0.2485182726181361,
+    "t": -18.691012505287244,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002673897673389768,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_d_15m",
+    "grupo": "15m",
+    "ic": -0.22812231783269965,
+    "t": -18.064558777708523,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002797059794985406,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_15m",
+    "grupo": "15m",
+    "ic": -0.24196543341054147,
+    "t": -17.694322642330818,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002629160162031883,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_15m",
+    "grupo": "15m",
+    "ic": -0.2419654638177478,
+    "t": -17.694320707817404,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002629160162031883,
+    "estavel": true
+   },
+   {
+    "feature": "plus_di_15m",
+    "grupo": "15m",
+    "ic": -0.1896203718794566,
+    "t": -17.411160127887136,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0020983323617257198,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_50",
+    "grupo": "15m",
+    "ic": -0.18498738292500655,
+    "t": -16.742378814338636,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0019062867206367184,
+    "estavel": true
+   },
+   {
+    "feature": "roc_15m",
+    "grupo": "15m",
+    "ic": -0.19225861020547028,
+    "t": -16.608423485038777,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002274299712679844,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_48",
+    "grupo": "15m",
+    "ic": -0.16600895907469718,
+    "t": -16.023553104081433,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0016802092771389797,
+    "estavel": true
+   },
+   {
+    "feature": "cz_struct_4h_long",
+    "grupo": "4h",
+    "ic": -0.17703876553968312,
+    "t": -15.463669422766907,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0021946562941572933,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_15m",
+    "grupo": "15m",
+    "ic": -0.26086072872259036,
+    "t": -15.214901198916696,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0027098718804211804,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_slope_20",
+    "grupo": "15m",
+    "ic": -0.1509864978982516,
+    "t": -14.52257724641746,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0016319172955870107,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_1h",
+    "grupo": "1h",
+    "ic": -0.1499817091918273,
+    "t": -14.246833390764396,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0020458795782265973,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_1h",
+    "grupo": "1h",
+    "ic": -0.1499817091918273,
+    "t": -14.246833390764396,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0020458795782265973,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_up",
+    "grupo": "15m",
+    "ic": -0.16181856254139423,
+    "t": -13.184037417090606,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013846009754731052,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_100",
+    "grupo": "15m",
+    "ic": -0.13078984412633188,
+    "t": -12.39336692764461,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013103914770924855,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_100",
+    "grupo": "15m",
+    "ic": -0.13989439775006438,
+    "t": -12.156282659078839,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00207027415159412,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_1h",
+    "grupo": "1h",
+    "ic": -0.14187086413438676,
+    "t": -11.99057573706705,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0015755276463931018,
+    "estavel": true
+   }
+  ]
+ },
+ "1 hora | dentro das pernas de BAIXA marcadas": {
+  "stable": 114,
+  "chance": [
+   26,
+   15,
+   22
+  ],
+  "stable_paying_cost": 37,
+  "top": [
+   {
+    "feature": "cz_breakout_up_32",
+    "grupo": "15m",
+    "ic": -0.1965264539805186,
+    "t": -15.178447973946797,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0027349183295160766,
+    "estavel": true
+   },
+   {
+    "feature": "cz_struct_4h_short",
+    "grupo": "4h",
+    "ic": 0.17570087348372185,
+    "t": 15.105876753761144,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0023202736344965715,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_d_15m",
+    "grupo": "15m",
+    "ic": -0.21644845553940625,
+    "t": -13.225315974799814,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002565224312222356,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_15m",
+    "grupo": "15m",
+    "ic": -0.23582432306625828,
+    "t": -12.68779881118829,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002824127634174689,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_15m",
+    "grupo": "15m",
+    "ic": -0.2358243757199564,
+    "t": -12.687792020893923,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002824127634174689,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_48",
+    "grupo": "15m",
+    "ic": -0.17021750008813208,
+    "t": -12.616215790350607,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0024330132350341696,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_up",
+    "grupo": "15m",
+    "ic": -0.1689912922299106,
+    "t": -12.596224590813698,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00238414463286491,
+    "estavel": true
+   },
+   {
+    "feature": "cz_leg_steps_down",
+    "grupo": "15m",
+    "ic": 0.074350876017764,
+    "t": 12.390197171058972,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0010390506903147985,
+    "estavel": true
+   },
+   {
+    "feature": "cz_efficiency_24",
+    "grupo": "15m",
+    "ic": -0.15493861088512464,
+    "t": -11.776446632951295,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002018452751388561,
+    "estavel": true
+   },
+   {
+    "feature": "minus_di_15m",
+    "grupo": "15m",
+    "ic": 0.18780443914556053,
+    "t": 11.691563731174766,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0025110860260045046,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_15m",
+    "grupo": "15m",
+    "ic": -0.2504038452271773,
+    "t": -10.596310167814224,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.003200259822032092,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_20",
+    "grupo": "15m",
+    "ic": -0.2448048337101304,
+    "t": -10.291116336820078,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0031008508390762083,
+    "estavel": true
+   },
+   {
+    "feature": "cci_15m",
+    "grupo": "15m",
+    "ic": -0.2297688249739546,
+    "t": -10.183374250453486,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0029665836903533605,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_slope_20",
+    "grupo": "15m",
+    "ic": -0.1458035180428047,
+    "t": -9.966925505395077,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.001503133470946972,
+    "estavel": true
+   },
+   {
+    "feature": "cmf_15m",
+    "grupo": "15m",
+    "ic": -0.11470877647231746,
+    "t": -9.939460074020111,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0015716333448224683,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_15m",
+    "grupo": "15m",
+    "ic": -0.10230817492771799,
+    "t": -9.699737726923871,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002055573757654507,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_15m",
+    "grupo": "15m",
+    "ic": -0.10230907949679799,
+    "t": -9.699469513055659,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002055573757654507,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_15m",
+    "grupo": "15m",
+    "ic": -0.10231224738434024,
+    "t": -9.691035845842382,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0020575517438722766,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_20",
+    "grupo": "15m",
+    "ic": -0.24661237812833303,
+    "t": -9.655034150500146,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0030861923222981293,
+    "estavel": true
+   },
+   {
+    "feature": "cz_avg_trade_size_z",
+    "grupo": "fluxo/tape",
+    "ic": 0.07281648712670098,
+    "t": 9.58178932207144,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0009596871305722812,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_50",
+    "grupo": "15m",
+    "ic": -0.18157698654958654,
+    "t": -9.534391906138074,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00233241874258966,
+    "estavel": true
+   },
+   {
+    "feature": "roc_15m",
+    "grupo": "15m",
+    "ic": -0.19481665235428677,
+    "t": -9.396317579574934,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0026432916657199695,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_1h",
+    "grupo": "1h",
+    "ic": -0.14363681826999683,
+    "t": -9.388847014318323,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002242955669217014,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_1h",
+    "grupo": "1h",
+    "ic": -0.14365305540039788,
+    "t": -9.387928317126729,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002245853574941358,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_1h",
+    "grupo": "1h",
+    "ic": -0.14365283237703472,
+    "t": -9.387838270220756,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002245853574941358,
+    "estavel": true
+   }
+  ]
+ },
+ "4 horas | todos os candles": {
+  "stable": 131,
+  "chance": [
+   10,
+   10,
+   28
+  ],
+  "stable_paying_cost": 7,
+  "top": [
+   {
+    "feature": "high_frac_1h",
+    "grupo": "1h",
+    "ic": -0.07124761736202145,
+    "t": -8.577439356037395,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013338265175078232,
+    "estavel": true
+   },
+   {
+    "feature": "close_frac_1h",
+    "grupo": "1h",
+    "ic": -0.07575442905860966,
+    "t": -7.999145417555208,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.001399931494064273,
+    "estavel": true
+   },
+   {
+    "feature": "low_frac_1h",
+    "grupo": "1h",
+    "ic": -0.07347667339839277,
+    "t": -7.794271549778875,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0012305977857267093,
+    "estavel": true
+   },
+   {
+    "feature": "bb_lower_4h",
+    "grupo": "4h",
+    "ic": -0.06147615022660968,
+    "t": -7.316246884395014,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00159902786845116,
+    "estavel": true
+   },
+   {
+    "feature": "cz_struct_4h_long",
+    "grupo": "4h",
+    "ic": -0.04120399886545748,
+    "t": -6.829013716882979,
+    "trimestres_mesmo_sinal": 0.8888888888888888,
+    "spread": -3.15169743315983e-05,
+    "estavel": true
+   },
+   {
+    "feature": "adl_4h",
+    "grupo": "4h",
+    "ic": -0.0941443354963595,
+    "t": -6.7225050849608605,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013823865387073517,
+    "estavel": true
+   },
+   {
+    "feature": "adl_15m",
+    "grupo": "15m",
+    "ic": -0.06803650469067951,
+    "t": -5.8511649146304245,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0017789867026216323,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_15m",
+    "grupo": "15m",
+    "ic": -0.019516908797734336,
+    "t": -5.660393930747157,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002458024424486856,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_15m",
+    "grupo": "15m",
+    "ic": -0.01951660306120369,
+    "t": -5.660295063354781,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0002458024424486856,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_15m",
+    "grupo": "15m",
+    "ic": -0.019508156642799042,
+    "t": -5.659464743421161,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.000239960413703619,
+    "estavel": true
+   },
+   {
+    "feature": "cz_step_body_atr",
+    "grupo": "15m",
+    "ic": -0.019569436206583586,
+    "t": -5.6107007240234745,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.00016498088152060023,
+    "estavel": true
+   },
+   {
+    "feature": "high_frac_15m",
+    "grupo": "15m",
+    "ic": -0.09076181236652604,
+    "t": -5.60834794090869,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.001133424884553113,
+    "estavel": true
+   },
+   {
+    "feature": "close_frac_15m",
+    "grupo": "15m",
+    "ic": -0.0921583786376193,
+    "t": -5.586546410884402,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0011793697024013168,
+    "estavel": true
+   },
+   {
+    "feature": "low_frac_15m",
+    "grupo": "15m",
+    "ic": -0.0914797030296704,
+    "t": -5.566466765320493,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0012054810962880934,
+    "estavel": true
+   },
+   {
+    "feature": "psar_1h",
+    "grupo": "1h",
+    "ic": -0.07141830993653217,
+    "t": -5.343035879180435,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0014146201104051682,
+    "estavel": true
+   },
+   {
+    "feature": "cci_1h",
+    "grupo": "1h",
+    "ic": -0.03908903093160868,
+    "t": -5.3216817493331545,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.000147547833840681,
+    "estavel": true
+   },
+   {
+    "feature": "low_frac_4h",
+    "grupo": "4h",
+    "ic": -0.07009955123833761,
+    "t": -5.31172801717886,
+    "trimestres_mesmo_sinal": 0.8888888888888888,
+    "spread": -0.0011041680440231473,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_down_48",
+    "grupo": "15m",
+    "ic": -0.04148709920917219,
+    "t": -5.12812947644749,
+    "trimestres_mesmo_sinal": 0.8888888888888888,
+    "spread": -0.00015660110702122166,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_down",
+    "grupo": "15m",
+    "ic": -0.041535170221609005,
+    "t": -5.126651907659183,
+    "trimestres_mesmo_sinal": 0.8888888888888888,
+    "spread": -0.00017454099707789756,
+    "estavel": true
+   },
+   {
+    "feature": "ema_26_4h",
+    "grupo": "4h",
+    "ic": -0.07111751919378989,
+    "t": -4.99059594913324,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013948976535323463,
+    "estavel": true
+   },
+   {
+    "feature": "ema_200_15m",
+    "grupo": "15m",
+    "ic": -0.07944576965935367,
+    "t": -4.980336117520215,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0012345440341519351,
+    "estavel": true
+   },
+   {
+    "feature": "ema_50_1h",
+    "grupo": "1h",
+    "ic": -0.0795190522405692,
+    "t": -4.964993887351721,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.001219114976668465,
+    "estavel": true
+   },
+   {
+    "feature": "adl_1h",
+    "grupo": "1h",
+    "ic": -0.07627645155819683,
+    "t": -4.957006464012594,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0010758240097279536,
+    "estavel": true
+   },
+   {
+    "feature": "close_frac_4h",
+    "grupo": "4h",
+    "ic": -0.07631739065681065,
+    "t": -4.846180693565525,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0013230173008298,
+    "estavel": true
+   },
+   {
+    "feature": "ema_12_4h",
+    "grupo": "4h",
+    "ic": -0.08034082107694167,
+    "t": -4.817695730078458,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0012298086298125706,
+    "estavel": true
+   }
+  ]
+ },
+ "4 horas | dentro das pernas de ALTA marcadas": {
+  "stable": 137,
+  "chance": [
+   50,
+   6,
+   12
+  ],
+  "stable_paying_cost": 73,
+  "top": [
+   {
+    "feature": "oc_move_pct_15m",
+    "grupo": "15m",
+    "ic": -0.0673237585861171,
+    "t": -20.685921023795085,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0026921012054129173,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_15m",
+    "grupo": "15m",
+    "ic": -0.06733232835727684,
+    "t": -20.669222645263805,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002691979258019437,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_15m",
+    "grupo": "15m",
+    "ic": -0.0673319187629672,
+    "t": -20.66833627980523,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002691979258019437,
+    "estavel": true
+   },
+   {
+    "feature": "cz_step_body_atr",
+    "grupo": "15m",
+    "ic": -0.06996719499187948,
+    "t": -19.851590769830437,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.002211827719157654,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_20",
+    "grupo": "15m",
+    "ic": -0.24930605750139292,
+    "t": -17.355886661419493,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005322707031397143,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_32",
+    "grupo": "15m",
+    "ic": -0.22108818467883243,
+    "t": -16.38778141420778,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004204569090607401,
+    "estavel": true
+   },
+   {
+    "feature": "plus_di_15m",
+    "grupo": "15m",
+    "ic": -0.17596222430812222,
+    "t": -15.990951865843558,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0034116042541756956,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_15m",
+    "grupo": "15m",
+    "ic": -0.24415054682035578,
+    "t": -15.521676532896992,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00500667025467452,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_15m",
+    "grupo": "15m",
+    "ic": -0.2441505440702607,
+    "t": -15.52167460468613,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00500667025467452,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_15m",
+    "grupo": "15m",
+    "ic": -0.26015597945078206,
+    "t": -15.012160846669488,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005601047945487899,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_48",
+    "grupo": "15m",
+    "ic": -0.1861739530499622,
+    "t": -14.873079763214697,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0033149133678195206,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_20",
+    "grupo": "15m",
+    "ic": -0.25200273779734667,
+    "t": -14.42543719344749,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005205534097667516,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_d_15m",
+    "grupo": "15m",
+    "ic": -0.24308748418899778,
+    "t": -14.124939612132161,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005301454391362989,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_up",
+    "grupo": "15m",
+    "ic": -0.18254039907780475,
+    "t": -14.011456291802263,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0031894942656691505,
+    "estavel": true
+   },
+   {
+    "feature": "cci_15m",
+    "grupo": "15m",
+    "ic": -0.24598565836279818,
+    "t": -13.986480625824514,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004797253079194128,
+    "estavel": true
+   },
+   {
+    "feature": "rsi_1h",
+    "grupo": "1h",
+    "ic": -0.1543307172388995,
+    "t": -13.503819421493304,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0028783490149565357,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_50",
+    "grupo": "15m",
+    "ic": -0.2035895362456517,
+    "t": -13.07617624618435,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0045527906020964275,
+    "estavel": true
+   },
+   {
+    "feature": "cci_1h",
+    "grupo": "1h",
+    "ic": -0.14290035249639355,
+    "t": -12.649973039035375,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0031252726903640035,
+    "estavel": true
+   },
+   {
+    "feature": "minus_di_15m",
+    "grupo": "15m",
+    "ic": 0.16688032222828655,
+    "t": 12.35020374217559,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.003581933384853755,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_100",
+    "grupo": "15m",
+    "ic": -0.1517999468473323,
+    "t": -11.86461703853271,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00402019743351667,
+    "estavel": true
+   },
+   {
+    "feature": "roc_15m",
+    "grupo": "15m",
+    "ic": -0.21629990046775943,
+    "t": -11.399489917454483,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004303861923698472,
+    "estavel": true
+   },
+   {
+    "feature": "cz_efficiency_24",
+    "grupo": "15m",
+    "ic": -0.17733989308185544,
+    "t": -11.371321628558933,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.003339643450937618,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_50",
+    "grupo": "15m",
+    "ic": -0.18077049219417754,
+    "t": -11.320040826997495,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0031529285341067356,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_100",
+    "grupo": "15m",
+    "ic": -0.12600313138079036,
+    "t": -11.162352370520503,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0017313538044789185,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_200",
+    "grupo": "15m",
+    "ic": -0.08421763262443023,
+    "t": -10.634860105651178,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0004969111555699146,
+    "estavel": true
+   }
+  ]
+ },
+ "4 horas | dentro das pernas de BAIXA marcadas": {
+  "stable": 163,
+  "chance": [
+   50,
+   14,
+   10
+  ],
+  "stable_paying_cost": 93,
+  "top": [
+   {
+    "feature": "rsi_15m",
+    "grupo": "15m",
+    "ic": -0.24371107592177335,
+    "t": -17.64071622768059,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005464128926719163,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_15m",
+    "grupo": "15m",
+    "ic": -0.2187135646057864,
+    "t": -17.19377120300616,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005230514797629747,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_15m",
+    "grupo": "15m",
+    "ic": -0.21871364693266795,
+    "t": -17.19374193994881,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005230514797629747,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_20",
+    "grupo": "15m",
+    "ic": -0.24697215045378101,
+    "t": -16.863288295094424,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005342393330315957,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_d_15m",
+    "grupo": "15m",
+    "ic": -0.20287605532132183,
+    "t": -16.420674834014505,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005166311409557086,
+    "estavel": true
+   },
+   {
+    "feature": "minus_di_15m",
+    "grupo": "15m",
+    "ic": 0.17651966591821697,
+    "t": 15.10064429234771,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.004241222628729512,
+    "estavel": true
+   },
+   {
+    "feature": "cz_steps5_down",
+    "grupo": "5m",
+    "ic": 0.06040998215823808,
+    "t": 14.923056680449074,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0009070469838315231,
+    "estavel": true
+   },
+   {
+    "feature": "cz_efficiency_24",
+    "grupo": "15m",
+    "ic": -0.18001248434033112,
+    "t": -14.101352486419104,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.003906841633283033,
+    "estavel": true
+   },
+   {
+    "feature": "cz_avg_trade_size_z",
+    "grupo": "fluxo/tape",
+    "ic": 0.05858217190077312,
+    "t": 13.639072715978491,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": 0.0015288636997853053,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_20",
+    "grupo": "15m",
+    "ic": -0.23375861063696124,
+    "t": -13.62688193436606,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005516431755698142,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_1h",
+    "grupo": "1h",
+    "ic": -0.14163325772862906,
+    "t": -12.60116156226229,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004225881830371805,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_1h",
+    "grupo": "1h",
+    "ic": -0.14165932123315614,
+    "t": -12.59875718509498,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00422991700352748,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_1h",
+    "grupo": "1h",
+    "ic": -0.14165989108021262,
+    "t": -12.598050594981755,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00422991700352748,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_dist_50",
+    "grupo": "15m",
+    "ic": -0.21219416507370656,
+    "t": -12.457035453250274,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004511116897399707,
+    "estavel": true
+   },
+   {
+    "feature": "cz_ema_slope_20",
+    "grupo": "15m",
+    "ic": -0.1719163019680439,
+    "t": -11.038862205708895,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0032735262147271377,
+    "estavel": true
+   },
+   {
+    "feature": "roc_15m",
+    "grupo": "15m",
+    "ic": -0.21472294431927463,
+    "t": -10.803228085297208,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004502357184465512,
+    "estavel": true
+   },
+   {
+    "feature": "cz_donchian_pos_50",
+    "grupo": "15m",
+    "ic": -0.22089200003720869,
+    "t": -10.73996153176134,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005533491497397098,
+    "estavel": true
+   },
+   {
+    "feature": "cz_breakout_up_48",
+    "grupo": "15m",
+    "ic": -0.18605438200826885,
+    "t": -10.582753199719178,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004648993349380459,
+    "estavel": true
+   },
+   {
+    "feature": "williams_r_1h",
+    "grupo": "1h",
+    "ic": -0.17793714118866813,
+    "t": -10.556964087137702,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004353965080564071,
+    "estavel": true
+   },
+   {
+    "feature": "stoch_k_1h",
+    "grupo": "1h",
+    "ic": -0.17793714118866813,
+    "t": -10.556964087137702,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.004353965080564071,
+    "estavel": true
+   },
+   {
+    "feature": "cci_15m",
+    "grupo": "15m",
+    "ic": -0.2277490305199507,
+    "t": -10.433572343357417,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.005050955093541796,
+    "estavel": true
+   },
+   {
+    "feature": "oc_move_pct_15m",
+    "grupo": "15m",
+    "ic": -0.09741688592541063,
+    "t": -10.416621458171488,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.0030523227571917478,
+    "estavel": true
+   },
+   {
+    "feature": "log_return_15m",
+    "grupo": "15m",
+    "ic": -0.09741267103583785,
+    "t": -10.412526414447424,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.003052972796715968,
+    "estavel": true
+   },
+   {
+    "feature": "close_reference_15m",
+    "grupo": "15m",
+    "ic": -0.09741250402091246,
+    "t": -10.412417834159594,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.003052972796715968,
+    "estavel": true
+   },
+   {
+    "feature": "cz_box_break_up",
+    "grupo": "15m",
+    "ic": -0.18383487701525067,
+    "t": -10.294508977561488,
+    "trimestres_mesmo_sinal": 1.0,
+    "spread": -0.00450983217107447,
+    "estavel": true
+   }
+  ]
+ }
+}
