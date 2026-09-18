@@ -238,11 +238,12 @@ class AIController:
         self.policy_oos_approved = False
         self.last_oos_validation: Dict[str, Any] = {}
 
-        # Politica que opera: 'edge_teacher' (meta-modelo + regra, espelhando o
-        # ambiente de backtest) ou 'sac' (especialistas de RL via MoE).
+        # Politica que opera: 'agent_mirror' (especialistas aprovados, espelhando
+        # o ambiente de backtest), 'edge_teacher' (meta-modelo + regra, idem) ou
+        # 'sac' (especialistas de RL via MoE). run_bot prepara os dois espelhos.
         self.live_policy = str(getattr(trading_config, 'LIVE_POLICY', 'sac')).strip().lower()
-        if self.live_policy not in ('sac', 'edge_teacher'):
-            raise ValueError('LIVE_POLICY must be sac or edge_teacher')
+        if self.live_policy not in ('sac', 'edge_teacher', 'agent_mirror'):
+            raise ValueError('LIVE_POLICY must be sac, edge_teacher or agent_mirror')
         self.teacher_rules: Dict[str, Any] = {}
         self.teacher_ready = False
         self._teacher_cache = None
