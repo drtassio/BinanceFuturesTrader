@@ -2,17 +2,17 @@
   "crypto_regime_detector": {
     "trained": true,
     "optimized": false,
-    "last_update": "2026-09-15T14:59:41.236339"
+    "last_update": "2026-09-14T14:36:49.725822"
   },
   "soft_gating_network": {
     "trained": true,
     "optimized": false,
-    "last_update": "2026-09-15T13:58:44.063665"
+    "last_update": "2026-09-14T14:37:04.634845"
   },
   "bull_specialist": {
     "trained": true,
     "optimized": false,
-    "last_update": "2026-09-15T13:18:11.276091"
+    "last_update": "2026-09-15T08:09:01.017078"
   },
   "bear_specialist": {
     "trained": true,

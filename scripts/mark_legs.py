@@ -129,13 +129,13 @@ def per_bar_labels(df: pd.DataFrame, legs: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def plot_weeks(df, legs, out_dir):
+def plot_weeks(df, legs, out_dir, only=()):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     names = []
-    for week_start in pd.date_range(df.index.min().normalize(), df.index.max(), freq="7D"):
+    for week_start in (only or pd.date_range(df.index.min().normalize(), df.index.max(), freq="7D")):
         week_end = week_start + pd.Timedelta("7D")
         w = df.loc[week_start:week_end]
         if len(w) < 50:
@@ -175,9 +175,18 @@ def plot_weeks(df, legs, out_dir):
 
 
 def main():
+    global SWING_MOVE, LEG_MIN_MOVE, LEG_MIN_SPEED, CONFIRM_MOVE
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-charts", action="store_true")
+    ap.add_argument("--swing", type=float, default=SWING_MOVE)
+    ap.add_argument("--leg-min", type=float, default=LEG_MIN_MOVE)
+    ap.add_argument("--speed", type=float, default=LEG_MIN_SPEED)
+    ap.add_argument("--confirm", type=float, default=CONFIRM_MOVE)
+    ap.add_argument("--tag", default="", help="sufixo dos arquivos, ex.: fino")
+    ap.add_argument("--weeks", default="", help="so estas semanas (AAAAMMDD,AAAAMMDD) nos graficos")
     args = ap.parse_args()
+    SWING_MOVE, LEG_MIN_MOVE, LEG_MIN_SPEED, CONFIRM_MOVE = args.swing, args.leg_min, args.speed, args.confirm
+    suffix = "_" + args.tag if args.tag else ""
 
     df = load_close()
     df = df.loc[df.index.max() - pd.DateOffset(years=YEARS) - pd.Timedelta("7D"):]
@@ -186,9 +195,9 @@ def main():
     legs = legs[legs.entry_time >= start].reset_index(drop=True)
     labels = per_bar_labels(df, legs).loc[start:]
 
-    labels.to_parquet(ROOT_DIR / "data/teacher_leg_labels.parquet")
-    legs.to_parquet(ROOT_DIR / "data/teacher_legs.parquet")
-    out_dir = ROOT_DIR / "reports/leg_marks"
+    labels.to_parquet(ROOT_DIR / ("data/teacher_leg_labels%s.parquet" % suffix))
+    legs.to_parquet(ROOT_DIR / ("data/teacher_legs%s.parquet" % suffix))
+    out_dir = ROOT_DIR / ("reports/leg_marks%s" % suffix)
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("semana_*.png"):
         old.unlink()
@@ -203,8 +212,11 @@ def main():
     print("  posição desejada em %.1f%% dos candles (long %.1f%%, short %.1f%%); lateral/fora %.1f%%" % (
         (labels.hs_target_position != 0).mean() * 100, (labels.hs_target_position > 0).mean() * 100,
         (labels.hs_target_position < 0).mean() * 100, (labels.hs_target_position == 0).mean() * 100))
+    print("  lucro do professor (retrospecto, sem alavancagem): soma %+.0f%%, acerto %.0f%%, %d perdas"
+          % (legs.captured_net.sum() * 100, (legs.captured_net > 0).mean() * 100, (legs.captured_net <= 0).sum()))
     if not args.no_charts:
-        names = plot_weeks(df.loc[start:], legs, out_dir)
+        weeks = [pd.Timestamp(w) for w in args.weeks.split(",") if w]
+        names = plot_weeks(df.loc[start:], legs, out_dir, weeks)
         print("  gráficos: %d semanas em %s" % (len(names), out_dir))
 
 
