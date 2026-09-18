@@ -1,0 +1,10 @@
+{
+  "registered_at": "2026-09-18T16:40:00Z",
+  "agents": ["bull", "bear"],
+  "teacher": "models_ai/<agent>_marked_legs_fino_rule.json: the fine marks of scripts/mark_legs.py (2,748 legs), drawn on the finished chart, as the user asked",
+  "data": "data/featured_data_causal_leg5m.parquet: observation with 15m, 1h, the 4h structure and trend and the 5m candles inside each 15m bar",
+  "env_stop_atr_timeframe": "1h, as registered for the marked-leg teachers in reports/staircase_marked_legs_preregistration.json",
+  "training": "cloud/train_guided.py, 3 DAgger rounds, 10000 critic warm-up, 200000 fine-tuning steps, evaluation every 20000",
+  "selection_and_approval": "validation only, minimum 20 trades per block (marked-leg agents trade often); holdout read once; scripts/approve_agent_mirror.py criteria unchanged",
+  "prior_result": "the earlier attempt on the dataset without 5m features lost on validation after cloning (PF 0.60-0.77) and never reached fine-tuning (GPU out of memory)"
+}
