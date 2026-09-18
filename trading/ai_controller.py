@@ -43,7 +43,7 @@ from trading.tape_engine import TapeEngine
 from trading.onchain_engine import OnChainEngine
 from governance.ai_monitor import AIMonitor
 from governance.drift_detector import DriftDetector
-from xai_engine.explainer import Explainer
+from xai_engine.explainer import Explainer, build_position_context
 from data_provider import DataProvider
 from trading.utils.trend_backtest import (
     ensure_datetime_index,
@@ -130,6 +130,13 @@ class AIController:
     def set_feature_pipeline(self, pipeline: FeatureEngineeringPipeline): self.feature_pipeline = pipeline
     def set_portfolio(self, portfolio: PortfolioOptimizer): self.portfolio = portfolio
     def set_risk_manager(self, manager: RiskManager): self.risk_manager = manager
+
+    def _current_position_context(self) -> Optional[Dict[str, Any]]:
+        """Contexto da posição aberta no par principal para o Explainer (None se não houver posição)."""
+        if not self.portfolio:
+            return None
+        symbol = self.config_trading.PRIMARY_PAIR
+        return build_position_context(self.portfolio.positions.get(symbol), self.portfolio.get_current_price(symbol))
     def set_ai_monitor(self, monitor: AIMonitor): self.ai_monitor = monitor
     def set_drift_detector(self, detector: DriftDetector): self.drift_detector = detector
     def set_curriculum_engine(self, engine: CurriculumEngine): self.curriculum_engine = engine
@@ -2793,180 +2800,30 @@ class AIController:
                     logger.warning(f" Especialista '{expert_key}' no carregado. Ignorando no ensemble.")
                     continue
 
-                #  FAST PATH: monta observao direto do contrato do especialista 
-                # Evita o re-encode do autoencoder  shape correto na primeira tentativa.
-                _spec_cols = getattr(active_specialist, 'feature_columns', [])
-                if not _spec_cols:
-                    _fs = getattr(active_specialist, 'feature_scaler', None)
-                    if _fs is not None and hasattr(_fs, 'feature_names_in_'):
-                        _spec_cols = list(_fs.feature_names_in_)
+                # Observação idêntica ao treino (features escaladas + extras + estado + tempo + prior + física,
+                # empilhada em n_stack candles). Sem contrato válido o especialista é ignorado: nunca completar com zeros.
+                def _agent_state_at(offset: int) -> np.ndarray:
+                    steps_then = steps_in_candles - offset
+                    if pos_side != 0 and steps_then >= 0:
+                        return np.array([pos_side, pnl, steps_then / 100.0], dtype=np.float32)
+                    return np.zeros(3, dtype=np.float32)
 
-                _mem_keys = ['dist_to_max_20', 'dist_to_min_20',
-                             'dist_to_max_50', 'dist_to_min_50']
-
-                # Computa dist_to_max/min ao vivo — não existem na pipeline principal
-                _mem_live = {}
-                for _w in [20, 50]:
-                    try:
-                        _h = df_fully_enriched['high'].rolling(_w).max().iloc[-1]
-                        _l = df_fully_enriched['low'].rolling(_w).min().iloc[-1]
-                        _c = float(latest_row.get('close', 1.0))
-                        _mem_live[f'dist_to_max_{_w}'] = (_c - _h) / (_h + 1e-9)
-                        _mem_live[f'dist_to_min_{_w}'] = (_c - _l) / (_l + 1e-9)
-                    except Exception:
-                        _mem_live[f'dist_to_max_{_w}'] = 0.0
-                        _mem_live[f'dist_to_min_{_w}'] = 0.0
-
-                if _spec_cols and all(c in latest_row.index for c in _spec_cols):
-                    _mkt = np.array([float(latest_row.get(c, 0.0)) for c in _spec_cols],
-                                    dtype=np.float32)
-                    _mem = np.array([_mem_live.get(k, 0.0) for k in _mem_keys],
-                                    dtype=np.float32)
-                    _prior = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
-                    expert_observation = np.concatenate(
-                        [_mkt, _mem, agent_state, time_features, _prior]
+                try:
+                    expert_observation = active_specialist.build_live_observation(df_fully_enriched, _agent_state_at)
+                except Exception as obs_err:
+                    logger.error(f" [AI] {active_specialist.__class__.__name__}: falha ao montar observação: {obs_err}", exc_info=True)
+                    expert_observation = None
+                if expert_observation is None:
+                    logger.error(
+                        f" [AI] {active_specialist.__class__.__name__}: observação ao vivo incompatível com o contrato de treino. "
+                        f"Especialista ignorado nesta decisão (retreine para gerar o contrato)."
                     )
-                    logger.debug(
-                        f" [FAST PATH] {active_specialist.__class__.__name__}: "
-                        f"shape {expert_observation.shape[0]}  (sem re-encode)"
-                    )
-                else:
-                    # Fallback: reconstrói obs com spec_cols (default 0.0 se coluna ausente)
-                    # Evita usar full_observation (base_feature_columns != feature_columns do treino)
-                    if _spec_cols:
-                        _mkt_fb = np.array([float(latest_row.get(c, 0.0)) for c in _spec_cols], dtype=np.float32)
-                        _mem_fb = np.array([_mem_live.get(k, 0.0) for k in _mem_keys], dtype=np.float32)
-                        _prior_fb = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
-                        expert_observation = np.concatenate([_mkt_fb, _mem_fb, agent_state, time_features, _prior_fb])
-                    else:
-                        expert_observation = full_observation.copy()
-                # 
-
-                # Identifica o target_shape
-                target_shape = None
-                if hasattr(active_specialist, 'model') and active_specialist.model is not None:
-                    if hasattr(active_specialist.model, 'observation_space'):
-                        target_shape = active_specialist.model.observation_space.shape
-
-                current_shape = expert_observation.shape
-                logger.debug(f" [DEBUG SHAPE] Specialist: {expert_key} | Current: {current_shape} | Target: {target_shape}")
-
-                if target_shape and current_shape != target_shape:
-                    logger.info(f" [AI SHAPE FIX] Adaptando observao ({current_shape[0]} -> {target_shape[0]}) para {active_specialist.__class__.__name__}")
-                    missing_dims = target_shape[0] - current_shape[0]
-                    
-                    if missing_dims > 0 and missing_dims <= 10:
-                        padding = np.zeros(missing_dims, dtype=np.float32)
-                        expert_observation = np.concatenate([expert_observation, padding])
-                        logger.info(f" [AI SHAPE FIX] Padding simples aplicado. Novo shape: {expert_observation.shape}")
-                    elif self.feature_pipeline and hasattr(self.feature_pipeline, 'temporal_autoencoder_pipeline') and self.feature_pipeline.temporal_autoencoder_pipeline.autoencoder:
-                        try:
-                            pipeline_ae = self.feature_pipeline.temporal_autoencoder_pipeline
-                            seq_len = pipeline_ae.hyperparams.get('seq_length', 32)
-                            
-                            if len(df_fully_enriched) >= seq_len:
-                                ae_input_cols = pipeline_ae.feature_columns
-                                available_ae_cols = [c for c in ae_input_cols if c in df_fully_enriched.columns]
-                                
-                                if len(available_ae_cols) < len(ae_input_cols):
-                                    seq_df = pd.DataFrame(0, index=df_fully_enriched.index[-seq_len:], columns=ae_input_cols)
-                                    for c in available_ae_cols:
-                                        seq_df[c] = df_fully_enriched[c].iloc[-seq_len:]
-                                    seq_data = seq_df.values.astype(np.float32)
-                                else:
-                                    seq_data = df_fully_enriched.iloc[-seq_len:][ae_input_cols].values.astype(np.float32)
-
-                                if hasattr(pipeline_ae, 'scaler') and pipeline_ae.scaler_fitted:
-                                    seq_data_scaled = pipeline_ae.scaler.transform(seq_data)
-                                    seq_data = seq_data_scaled.reshape(1, seq_len, -1)
-                                else:
-                                    seq_data = seq_data.reshape(1, seq_len, -1)
-                                    
-                                seq_tensor = torch.FloatTensor(seq_data).to(pipeline_ae.device)
-                                
-                                with torch.no_grad():
-                                    _r = latest_row.get('regime', 2)
-                                    current_regime = int(_r) if pd.notna(_r) else 2
-                                    regime_tensor = torch.LongTensor([current_regime]).to(pipeline_ae.device)
-                                    mu, _ = pipeline_ae.autoencoder.encode(seq_tensor, regime_labels=regime_tensor)
-                                    latent_features = mu.cpu().numpy().flatten()
-                                    
-                                prior_dir_val = float(latest_row.get('tp_prior_dir', 0.0))
-                                prior_conf_val = float(latest_row.get('tp_prior_conf', 0.0))
-                                memory_keys = ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']
-                                memory_extras = np.array([float(latest_row.get(k, 0.0)) for k in memory_keys], dtype=np.float32)
-
-                                def _build_cerebral_obs(row, _agent_state, _time_features, _prior_dir, _prior_conf, _physics):
-                                    spec_cols = getattr(active_specialist, 'feature_columns', [])
-                                    if not spec_cols:
-                                        fs = getattr(active_specialist, 'feature_scaler', None)
-                                        if fs is not None and hasattr(fs, 'feature_names_in_'):
-                                            spec_cols = list(fs.feature_names_in_)
-                                    
-                                    # 1. Market Features (Estatísticas/Técnicas)
-                                    mkt = np.array([float(row.get(c, 0.0)) for c in spec_cols], dtype=np.float32) if spec_cols else np.zeros(65, dtype=np.float32)
-                                    
-                                    # 2. Memory Extras (Distâncias OHLC)
-                                    mem = np.array([_mem_live.get(k, 0.0) for k in ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']], dtype=np.float32)
-                                    
-                                    # 3. State & Time & Prior
-                                    prior_2 = np.array([_prior_dir, _prior_conf], dtype=np.float32)
-                                    
-                                    # 4. Physics Extras (Entropy & Hurst) - Unificando a visão "Cerebral"
-                                    return np.concatenate([mkt, mem, _agent_state, _time_features, prior_2, _physics])
-
-                                # --- Sensores de Fisica (Dr. Tensor) ---
-                                market_entropy = quantum_metrics.get('shannon_entropy', 0.0)
-                                market_hurst = quantum_metrics.get('hurst_exponent', 0.5)
-                                physics_extras = np.array([market_entropy, market_hurst], dtype=np.float32)
-
-                                if target_shape[0] in (304, 312): # Sequencial temporal n_stack=4 (4x76 ou 4x78)
-                                    n_rows = len(df_fully_enriched)
-                                    steps_seq = []
-                                    phys_arg = physics_extras if target_shape[0] == 312 else np.array([], dtype=np.float32)
-                                    for offset in range(3, -1, -1):
-                                        idx = max(0, n_rows - 1 - offset)
-                                        past_row = df_fully_enriched.iloc[idx]
-                                        steps_seq.append(_build_cerebral_obs(past_row, agent_state, time_features, prior_dir_val, prior_conf_val, phys_arg))
-                                    expert_observation = np.concatenate(steps_seq)
-                                elif target_shape[0] >= 80: # Novo Formato Cerebral (78 + 2)
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
-                                elif target_shape[0] == 78: # Formato de transicao (sem fisica)
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
-                                elif target_shape[0] == 76: # Base sem fisica
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
-                                elif target_shape[0] == 65:
-                                    tau_val = float(latest_row.get('tp_tau', 0.0))
-                                    primary_signal_val = float(latest_row.get('tp_primary_signal', 0.0))
-                                    uncertainty_val = float(latest_row.get('tp_uncertainty', 0.0))
-                                    p_extras = np.array([prior_dir_val, prior_conf_val, tau_val, primary_signal_val, uncertainty_val], dtype=np.float32)
-                                    expert_observation = np.concatenate([latent_features, agent_state, time_features, p_extras])
-                                else:
-                                    # Fallback Geral
-                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
-                                
-                                if expert_observation.shape[0] > target_shape[0]:
-                                    expert_observation = expert_observation[:target_shape[0]]
-                                elif expert_observation.shape[0] < target_shape[0]:
-                                    expert_observation = np.pad(expert_observation, (0, target_shape[0] - len(expert_observation)))
-                            else:
-                                if current_shape[0] < target_shape[0]:
-                                    pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
-                                    expert_observation = np.concatenate([expert_observation, pad])
-                                else:
-                                    expert_observation = expert_observation[:target_shape[0]]
-                        except Exception as e:
-                            logger.error(f" [AI SHAPE FIX] Erro durante encoding: {e}. Fallback emergencial.")
-                            if current_shape[0] < target_shape[0]:
-                                pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
-                                expert_observation = np.concatenate([expert_observation, pad])
-                            else:
-                                expert_observation = expert_observation[:target_shape[0]]
+                    continue
 
                 # Gerar sinal para o especialista especfico
                 try:
                     specialist_display_name = active_specialist.__class__.__name__
-                    strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row)
+                    strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row, pre_normalized=True)
                     if strategic_signal_ind:
                         if strategic_signal_ind.explanation is not None:
                             strategic_signal_ind.explanation['specialist'] = specialist_display_name
@@ -3240,7 +3097,8 @@ class AIController:
                         market_data_dict = xai_features_row
                         
                         self._is_explaining = True
-                        top_expl = self.explainer.explain_decision(strategic_signal, market_data_dict, top_n=8)
+                        top_expl = self.explainer.explain_decision(strategic_signal, market_data_dict, top_n=8,
+                                                                   position_context=self._current_position_context())
                         self._is_explaining = False
                         
                         strategic_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
@@ -3292,7 +3150,8 @@ class AIController:
                  # [XAI FIX] Explica Rejeio de Risco
                 try:
                     if self.explainer:
-                        top_expl = self.explainer.explain_decision(final_rejection, latest_row)
+                        top_expl = self.explainer.explain_decision(final_rejection, latest_row,
+                                                               position_context=self._current_position_context())
                         final_rejection.explanation['main_contributors'] = top_expl.get('main_contributors')
                         if 'narrative' in top_expl:
                              final_rejection.explanation['narrative'] = top_expl['narrative']
@@ -3301,11 +3160,16 @@ class AIController:
 
                 return final_rejection
 
+            # [JOURNAL] Regime detectado no momento da decisão, gravado no Trade Journal quando a ordem executa
+            modulated_signal.explanation['market_regime'] = current_regime_str
+            modulated_signal.explanation['regime_confidence'] = float(latest_row.get('regime_confidence', 0.5))
+
             # XAI: anexa principais features quando disponvel
             try:
                 # [MELHORIA] Explica qualquer deciso, inclusive HOLD, se o explainer estiver ativo
                 if self.explainer and modulated_signal:
-                    top_expl = self.explainer.explain_decision(modulated_signal, latest_row)
+                    top_expl = self.explainer.explain_decision(modulated_signal, latest_row,
+                                                               position_context=self._current_position_context())
                     modulated_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
                     modulated_signal.explanation['xai_mode'] = top_expl.get('mode', 'full')
                     

@@ -22,6 +22,43 @@ logger = get_logger("Explainer")
 # Silencia logs internos matemáticos da biblioteca SHAP para limpar o terminal
 logging.getLogger('shap').setLevel(logging.WARNING)
 
+
+def build_position_context(position: Any, current_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """
+    Converte uma Position aberta no contexto usado pelo Explainer e pelo Trade Journal.
+    Retorna None quando não há posição (ou ela é inválida).
+    """
+    if position is None or not getattr(position, 'quantity', 0) or getattr(position, 'entry_price', 0) <= 0:
+        return None
+
+    quantity = float(position.quantity)
+    entry_price = float(position.entry_price)
+    mark_price = float(current_price) if current_price and current_price > 0 else float(getattr(position, 'mark_price', 0.0) or 0.0)
+
+    # PnL recalculado com o preço mais recente; sem preço, usa o valor sincronizado do portfólio
+    if mark_price > 0:
+        unrealized_pnl = (mark_price - entry_price) * quantity
+    else:
+        unrealized_pnl = float(position.unrealized_pnl)
+        mark_price = entry_price
+
+    leverage = max(float(getattr(position, 'leverage', 1) or 1), 1.0)
+    margin = entry_price * abs(quantity) / leverage
+    liquidation_price = float(getattr(position, 'liquidation_price', 0.0) or 0.0)
+
+    return {
+        "is_open": True,
+        "symbol": position.symbol,
+        "side": "LONG" if quantity > 0 else "SHORT",
+        "quantity": quantity,
+        "entry_price": entry_price,
+        "mark_price": mark_price,
+        "unrealized_pnl": unrealized_pnl,
+        "roe_pct": unrealized_pnl / margin if margin > 0 else 0.0,
+        "leverage": leverage,
+        "liquidation_price": liquidation_price,
+    }
+
 class Explainer:
     """
     [VERSÃO ESTADO DA ARTE]
@@ -211,17 +248,31 @@ class Explainer:
             logger.error(f"❌ [EXPLAINER] Erro no método rápido: {e}")
             return [{"feature": "Erro na análise rápida", "value": "N/A", "reason": str(e)}]
 
-    def explain_decision(self, signal: Signal, market_features_row: pd.Series, top_n: int = 5) -> Dict[str, Any]:
+    def explain_decision(self, signal: Signal, market_features_row: pd.Series, top_n: int = 5,
+                         position_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Gera uma explicação detalhada para uma decisão de trading usando SHAP.
+
+        Com `position_context` (ver build_position_context), a narrativa passa a
+        focar na gestão da posição aberta em vez de apenas avaliar novas entradas.
         """
         if not isinstance(signal, Signal):
             return {"narrative": "Erro: Sinal inválido."}
-        
+
         # [MELHORIA] Modo rápido para produção
         if self.production_mode:
             self.explanation_counter += 1
             if self.explanation_counter % self.explanation_interval != 0:
+                # Posição aberta sempre recebe narrativa de gestão (barata, sem SHAP)
+                if position_context:
+                    return {
+                        "decision": signal.action.value,
+                        "confidence": f"{signal.confidence:.2%}",
+                        "narrative": self._generate_position_narrative(signal, position_context),
+                        "position": position_context,
+                        "mode": "production_fast",
+                        "explanation_counter": self.explanation_counter
+                    }
                 # Retorna explicação simplificada para a maioria das decisões
                 return {
                     "narrative": f"Decisão {signal.action.value} com confiança {signal.confidence:.2%}. "
@@ -242,28 +293,74 @@ class Explainer:
             # Fallback para modo rápido
             contributors = self._get_feature_importance_fast(market_features_row, top_n=top_n)
         
-        narrative = self._generate_narrative(signal, contributors)
-        
+        narrative = self._generate_narrative(signal, contributors, position_context)
+
         explanation = {
             "decision": signal.action.value,
             "confidence": f"{signal.confidence:.2%}",
             "specialist_in_charge": signal.explanation.get("specialist", "N/A"),
             "main_contributors": contributors,
             "narrative": narrative,
+            "position": position_context,
             "timestamp_utc": datetime.utcnow().isoformat()
         }
         return explanation
 
-    def _generate_narrative(self, signal: Signal, contributors: List[Dict]) -> str:
+    def _generate_position_narrative(self, signal: Signal, position: Dict[str, Any]) -> str:
+        """Narrativa de gestão de uma posição aberta: estado do trade e o que o sinal atual significa para ele."""
+        side = position.get("side", "LONG")
+        pnl = float(position.get("unrealized_pnl", 0.0))
+        roe = float(position.get("roe_pct", 0.0))
+        leverage = float(position.get("leverage", 1.0))
+        mark = float(position.get("mark_price", 0.0))
+        liquidation = float(position.get("liquidation_price", 0.0))
+        reason = signal.explanation.get("reason", "")
+        original_action = signal.explanation.get("original_action")
+        conf_val = signal.explanation.get("original_confidence", signal.confidence)
+
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+        pnl_word = "lucro" if pnl >= 0 else "prejuízo"
+        narrative = (
+            f"📍 GESTÃO DE POSIÇÃO: {side} {abs(position.get('quantity', 0.0)):.4f} {position.get('symbol', signal.symbol)}\n"
+            f"{pnl_icon} Monitorando posição {side} com {pnl_word} de ${abs(pnl):,.2f} ({roe:+.2%} ROE) | Alavancagem {leverage:.0f}x\n"
+            f"💲 Entrada: ${position.get('entry_price', 0.0):,.2f} | Atual: ${mark:,.2f}"
+        )
+        if liquidation > 0 and mark > 0:
+            liq_distance = abs(mark - liquidation) / mark
+            liq_icon = "⚠️" if liq_distance < 0.05 else "🛡️"
+            narrative += f" | {liq_icon} Liquidação: ${liquidation:,.2f} ({liq_distance:.2%} de distância)"
+
+        is_long = side == "LONG"
+        if signal.action == Action.CLOSE or (is_long and signal.action == Action.SELL) or (not is_long and signal.action == Action.BUY):
+            verb = "FECHAR" if signal.action == Action.CLOSE else "REDUZIR/FECHAR"
+            narrative += f"\n🔄 DECISÃO: {verb} {side} — sinal {signal.action.value} contrário à posição (confiança {signal.confidence:.2%})."
+        elif signal.action in (Action.BUY, Action.SELL):
+            narrative += (f"\n➕ DECISÃO: sinal {signal.action.value} a favor do {side} (confiança {signal.confidence:.2%}). "
+                          f"O limite de uma posição por símbolo impede aumento — mantendo.")
+        elif original_action:
+            orig = original_action.value if hasattr(original_action, "value") else str(original_action)
+            narrative += f"\n🛑 DECISÃO: MANTER {side} — intenção {orig} vetada pelo risco (confiança {conf_val:.2%})."
+        else:
+            narrative += (f"\n⏸️ DECISÃO: MANTER {side} (HOLD) — nenhum sinal de saída/reversão com confiança suficiente "
+                          f"({conf_val:.2%}). A saída depende de sinal contrário ou das ordens de proteção (SL/TP).")
+        if reason:
+            narrative += f"\n📌 Motivo: {reason}"
+        return narrative
+
+    def _generate_narrative(self, signal: Signal, contributors: List[Dict],
+                            position_context: Optional[Dict[str, Any]] = None) -> str:
         """Gera uma narrativa textual explicativa e organizada da decisão."""
         action_desc = signal.action.value.upper()
         specialist = signal.explanation.get("specialist", "Motor de IA")
         # Se houve veto de risco, o motivo está no 'reason'
         reason = signal.explanation.get("reason", "")
         original_action = signal.explanation.get("original_action", None)
-        
+
         # --- 1. Cabeçalho da Decisão ---
-        if signal.action == Action.HOLD:
+        if position_context:
+            # Com posição aberta, o foco é a gestão do trade em andamento
+            narrative = self._generate_position_narrative(signal, position_context)
+        elif signal.action == Action.HOLD:
             if original_action:
                 # Caso de Veto de Risco
                 narrative = f"🛑 TRADE VETADO PELO RISCO ({original_action.value.upper()} -> HOLD)\n"

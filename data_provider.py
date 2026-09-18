@@ -217,6 +217,10 @@ class DataProvider:
                     self.data_cache[cache_key] = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
 
                 data_for_features = self.data_cache[cache_key].tail(required_data_points)
+                # Só candles fechados: o treino usa candles completos, e o candle em formação muda até fechar
+                _now_utc = pd.Timestamp.now(tz='UTC')
+                _closed_mask = (data_for_features.index + pd.Timedelta(milliseconds=interval_ms)) <= _now_utc
+                data_for_features = data_for_features[_closed_mask]
                 if len(data_for_features) > 0:
                     raw_dfs_multi_tf[interval] = data_for_features
 

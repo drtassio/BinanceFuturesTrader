@@ -264,7 +264,7 @@
         }
     },
     "training_defaults": {
-        "specialist_timesteps": 25000,
+        "specialist_timesteps": 500000,
         "gating_epochs": 200,
         "warmup_episodes": 10,
         "eval_frequency": 5000,

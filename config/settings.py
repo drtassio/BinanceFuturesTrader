@@ -146,6 +146,12 @@ class TradingConfig(Config):
     # --- Taxas de Trading Reais da Binance Futures VIP0 (BTCUSDT Perp) ---
     # Documentação: https://www.binance.com/en/fee/trading
     TAKER_FEE = float(os.environ.get('TAKER_FEE', 0.0004))   # 0.04% VIP0 USDT-M Futures
+    # Recompensa dos especialistas: 'economic' = retorno log do patrimônio líquido (lucro real);
+    # 'shaped' = motor antigo de bônus/penalidades (scientific_corrections), mantido só para comparação.
+    REWARD_MODE = os.environ.get('REWARD_MODE', 'economic')
+    ECONOMIC_REWARD_SCALE = float(os.environ.get('ECONOMIC_REWARD_SCALE', 100.0))
+    # Fração do patrimônio alocada por trade no ambiente de treino (antes 0.10 fixo)
+    ENV_BASE_ALLOCATION = float(os.environ.get('ENV_BASE_ALLOCATION', 1.0))
     MAKER_FEE = float(os.environ.get('MAKER_FEE', 0.0002))   # 0.02% VIP0 USDT-M Futures
     BNB_DISCOUNT_FEE_MULTIPLIER = float(os.environ.get('BNB_DISCOUNT_FEE_MULTIPLIER', 0.90)) # 10% de desconto ao usar BNB
     USDC_MAKER_FEE = float(os.environ.get('USDC_MAKER_FEE', 0.0)) # 0.000% para USDC Maker

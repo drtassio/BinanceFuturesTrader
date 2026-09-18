@@ -117,7 +117,7 @@ class BaseRegimeSpecialist(TrendSpecialist):
                     df,
                     regime_code=self.regime_code,
                     filter_by_regime=True,
-                    normalize=True,
+                    normalize=False,  # o scaler do especialista é a única normalização (igual à produção)
                     min_samples=min_samples
                 )
                 
@@ -188,50 +188,11 @@ class BaseRegimeSpecialist(TrendSpecialist):
 
     def _apply_temporal_weighting(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        [TEMPORAL WEIGHTING] Mitigar viés temporal: dados recentes podem ter estrutura
-        diferente de dados antigos mesmo no mesmo regime.
-
-        Problema: Bull regime em 2025-2026 tem volatilidade alta mas tendência baixa (pullbacks).
-        Solução: Downweight amostras recentes (2025-2026) em relação às antigas (2023-2024).
-
-        Retorna resampled DataFrame com distribuição temporal equilibrada.
+        Mantém a série temporal intacta. A versão anterior reamostrava COM reposição e reordenava,
+        criando candles duplicados e saltos de preço entre linhas — o ambiente calculava PnL sobre
+        uma sequência que nunca existiu.
         """
-        if df is None or len(df) == 0:
-            return df
-
-        try:
-            if not isinstance(df.index, pd.DatetimeIndex):
-                # Index não é temporal — retorna como está
-                return df
-
-            _cutoff_recent = pd.Timestamp('2025-01-01')
-            _recent_mask = df.index >= _cutoff_recent
-
-            # Amostras antigas (2023-2024): weight=1.0
-            # Amostras recentes (2025-2026): weight=0.4 (downweight 60%)
-            _sample_weights = np.ones(len(df))
-            _sample_weights[_recent_mask] = 0.4
-
-            # Resample usando pesos, preserve ordem temporal
-            _target_size = min(len(df), 25000)
-            df_resampled = df.sample(
-                n=_target_size,
-                weights=_sample_weights,
-                replace=True,
-                random_state=42
-            ).sort_index()
-
-            _recent_pct = 100.0 * _recent_mask.sum() / len(df)
-            logger.info(
-                f"[TEMPORAL WEIGHT] {self.name}: {len(df)} → {len(df_resampled)} amostras. "
-                f"Recentes (2025-2026): {_recent_pct:.1f}% com downweight 0.4x."
-            )
-
-            return df_resampled
-
-        except Exception as _tw_err:
-            logger.warning(f"[TEMPORAL WEIGHT] {self.name}: Erro ao aplicar downweight: {_tw_err}. Retornando original.")
-            return df
+        return df
 
     @staticmethod
     def _subsample_high_confidence(df: pd.DataFrame, name: str = "", confidence_threshold: float = 0.62) -> pd.DataFrame:
@@ -479,11 +440,11 @@ class BaseRegimeSpecialist(TrendSpecialist):
             logger.error(f"❌ {self.name}: Erro durante treinamento: {e}", exc_info=True)
             return {'success': False, 'error': str(e)}
     
-    def decide_action(self, observation: np.ndarray, df_row: pd.Series) -> Optional[Signal]:
+    def decide_action(self, observation: np.ndarray, df_row: pd.Series, pre_normalized: bool = False) -> Optional[Signal]:
         """
         [FIX PRODUÇÃO] Sobrescreve decide_action para aplicar filtros de direção específicos de cada regime.
         """
-        signal = super().decide_action(observation, df_row)
+        signal = super().decide_action(observation, df_row, pre_normalized=pre_normalized)
         if signal is None:
             return None
 

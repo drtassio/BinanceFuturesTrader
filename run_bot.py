@@ -8,8 +8,9 @@ import os
 import asyncio
 import json
 import warnings
-import csv
+import math
 import signal
+from enum import Enum
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 import numpy as np
@@ -39,7 +40,7 @@ from feature_engineering.main import FeatureEngineeringPipeline
 from governance.ai_monitor import AIMonitor
 from governance.drift_detector import DriftDetector
 from learning.curriculum_engine import CurriculumEngine
-from xai_engine.explainer import Explainer
+from xai_engine.explainer import Explainer, build_position_context
 
 # --- Environment Hardening (Audit Fix P0) ---
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -81,7 +82,7 @@ except Exception as _gpu_init_err:
 # --- Configuração Inicial ---
 logger = get_logger("run_bot_main")
 LOGS_DIR = os.path.join(os.getcwd(), "logs")
-TRADES_LOG_FILE = os.path.join(LOGS_DIR, "trades_log.csv")
+TRADE_JOURNAL_FILE = os.path.join(LOGS_DIR, "trade_journal.jsonl")
 
 # --- Estado e Componentes Globais ---
 system_state: Dict[str, Any] = {
@@ -102,22 +103,90 @@ training_trade_logs: List[Dict[str, Any]] = []
 
 # --- Funções de Logging e Persistência ---
 
+def _to_jsonable(value: Any) -> Any:
+    """Converte recursivamente enums, tipos numpy/pandas e datas em valores serializáveis em JSON."""
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, np.ndarray):
+        return _to_jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def save_trade_to_log(trade_data: Dict):
-    """Salva os detalhes de um trade em um arquivo CSV para auditoria e retreinamento."""
-    file_exists = os.path.isfile(TRADES_LOG_FILE)
+    """
+    Registra o trade no Trade Journal (logs/trade_journal.jsonl), uma linha JSON por execução,
+    com o contexto completo da decisão: regime, votos do ensemble MoE, score ponderado e motivo.
+    """
+    explanation = trade_data.get('signal_explanation') or {}
+
+    # Regime gravado pelo AIController no momento da decisão; fallback para as features atuais
+    regime = explanation.get('market_regime')
+    regime_confidence = explanation.get('regime_confidence')
+    latest_features = system_state.get('latest_features')
+    if regime is None and latest_features is not None:
+        regime_code = latest_features.get('regime')
+        if regime_code is not None and pd.notna(regime_code):
+            regime = {0: "BULL", 1: "BEAR", 2: "RANGER"}.get(int(regime_code), "UNKNOWN")
+        regime_confidence = latest_features.get('regime_confidence')
+
+    record = {
+        "timestamp":       trade_data.get('timestamp'),
+        "mode":            "LIVE" if system_state.get('live_trading_enabled') else "PAPER",
+        "symbol":          trade_data.get('symbol'),
+        "trade_type":      trade_data.get('trade_type'),
+        "action":          trade_data.get('action'),
+        "status":          trade_data.get('status'),
+        "quantity":        trade_data.get('quantity'),
+        "price":           trade_data.get('price'),
+        "notional_value":  trade_data.get('notional_value'),
+        "leverage":        trade_data.get('leverage'),
+        "strategy":        trade_data.get('strategy'),
+        "reduce_only":     trade_data.get('reduce_only'),
+        "order_id":        trade_data.get('order_id'),
+        "client_order_id": trade_data.get('client_order_id'),
+        "decision": {
+            "confidence":         trade_data.get('confidence'),
+            "profit_probability": trade_data.get('profit_probability'),
+            "position_size_pct":  trade_data.get('position_size_pct'),
+            "stop_loss":          trade_data.get('stop_loss'),
+            "take_profit":        trade_data.get('take_profit'),
+            "specialist":         explanation.get('specialist'),
+            "weighted_score":     explanation.get('weighted_score'),
+            "ensemble_votes":     explanation.get('ensemble_details', {}),
+            "reason":             explanation.get('reason'),
+            "modulation":         explanation.get('modulation'),
+            "main_contributors":  explanation.get('main_contributors') or [],
+            "narrative":          explanation.get('narrative'),
+        },
+        "market": {
+            "regime":            regime,
+            "regime_confidence": regime_confidence,
+            "tape_pulse":        system_state.get('tape_pulse'),
+            "sentiment":         system_state.get('onchain_pulse'),
+            "quantum":           explanation.get('quantum', {}),
+        },
+    }
+
     try:
-        with open(TRADES_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
-            fieldnames = [
-                'timestamp', 'symbol', 'action', 'quantity', 'price', 'status',
-                'leverage', 'profit_probability', 'notional_value', 'order_id', 'client_order_id'
-            ]
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(trade_data)
-        logger.info(f"💾 [AUDITORIA] Trade salvo: {trade_data.get('symbol')} {trade_data.get('action')}")
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        with open(TRADE_JOURNAL_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(_to_jsonable(record), ensure_ascii=False) + "\n")
+        logger.info(f"💾 [JOURNAL] Trade registrado: {record['symbol']} {record['action']} "
+                    f"({record['trade_type']}) | Regime: {regime}")
     except Exception as e:
-        logger.error(f"❌ [AUDITORIA] Falha ao salvar trade no log CSV: {e}", exc_info=True)
+        logger.error(f"❌ [JOURNAL] Falha ao registrar trade no journal: {e}", exc_info=True)
 
 
 def log_portfolio_status(portfolio_name: str, portfolio_data: Dict):
@@ -195,12 +264,13 @@ def log_system_status():
     logger.info(log_message)
 
 
-def log_trade_decision(signal, explainer, ai_monitor=None):
+def log_trade_decision(signal, explainer, ai_monitor=None, position_context=None):
     """
     Registra a decisão de trading da IA, gera explicação SHAP e persiste no AIMonitor.
 
     Cobre TODOS os tipos de decisão (BUY, SELL, HOLD) para que o bot nunca
     seja uma caixa-preta — cada escolha fica rastreável via logs/ai_events/*.jsonl.
+    Com `position_context`, a explicação foca na gestão da posição aberta.
     """
     if not signal:
         logger.info("🧠 [IA] Decisão: HOLD. Motivo: Sinal nulo recebido.")
@@ -222,9 +292,19 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
     latest_features = system_state.get('latest_features')
 
     # ── Gera explicação ──────────────────────────────────────────────────────
-    if explainer is not None and latest_features is not None:
+    precomputed = signal.explanation or {}
+    if precomputed.get('narrative'):
+        # O AIController já explicou esta decisão (SHAP + contexto da posição): evita recalcular
+        explanation = {
+            "decision": action_str,
+            "confidence": f"{signal.confidence:.2%}",
+            "narrative": precomputed['narrative'],
+            "main_contributors": precomputed.get('main_contributors') or [],
+            "position": position_context,
+        }
+    elif explainer is not None and latest_features is not None:
         try:
-            explanation = explainer.explain_decision(signal, latest_features)
+            explanation = explainer.explain_decision(signal, latest_features, position_context=position_context)
         except Exception as exc:
             logger.warning(f"⚠️ [XAI] Falha ao gerar explicação: {exc}")
             explanation = {
@@ -288,7 +368,8 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
             "stop_loss":    signal.stop_loss,
             "take_profit":  signal.take_profit,
             "position_pct": signal.position_size_pct,
-            "quantum":      signal.explanation.get('quantum', {})
+            "quantum":      signal.explanation.get('quantum', {}),
+            "position":     position_context,
         }
 
         # Exibe Dados Técnicos Formatados no Terminal
@@ -611,15 +692,22 @@ async def ensure_trailing_stops_for_existing_positions(connector, positions: Dic
             # quantity < 0 = SHORT, trailing stop = BUY
             trailing_side = "SELL" if quantity > 0 else "BUY"
             abs_quantity = abs(quantity)
-            
-            # Callback rate do config (4% default)
-            callback_rate = config.DEFAULT_STOP_LOSS_PCT * 100
-            
+
+            # Mesma regra do bracket do ExecutionEngine: arma após +1R (SL%) a partir da entrada e
+            # segue o preço com recuo de metade do SL (confiança do sinal original é desconhecida).
+            # O Stop Loss fixo da posição é garantido pelo monitor do ExecutionEngine.
+            direction = 1 if quantity > 0 else -1
+            sl_pct = config.DEFAULT_STOP_LOSS_PCT
+            entry_price = float(pos_data.get('entry_price', 0.0) or 0.0)
+            activation_price = entry_price * (1 + direction * sl_pct) if entry_price > 0 else None
+            callback_rate = sl_pct * 0.5 * 100
+
             result = await connector.place_trailing_stop_order(
                 symbol=symbol,
                 side=trailing_side,
                 quantity=abs_quantity,
-                callback_rate=callback_rate
+                callback_rate=callback_rate,
+                activation_price=activation_price
             )
             
             if result:
@@ -1026,7 +1114,8 @@ async def main_trading_loop():
             # Etapa 3: Gerar e executar a decisão
             if ai_controller.is_trained:
                 signal = await ai_controller.generate_trading_decision(featured_df)
-                log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
+                position_context = build_position_context(portfolio.positions.get(symbol), current_price)
+                log_trade_decision(signal, explainer, ai_monitor, position_context)  # [XAI] explica + persiste
 
                 # [TELEGRAM] Registra decisão no buffer para o relatório horário
                 if telegram and signal:

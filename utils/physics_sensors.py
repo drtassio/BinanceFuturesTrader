@@ -58,7 +58,7 @@ def get_market_chaos_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     """Retorna um dicionário com métricas de física do mercado."""
     try:
         if df is None or len(df) < 30:
-            return {"entropy": 0.0, "hurst": 0.5, "chaos_label": "Iniciando..."}
+            return {"entropy": 0.0, "hurst": 0.5, "chaos_label": "Iniciando...", "shannon_entropy": 0.0, "hurst_exponent": 0.5, "market_state": "Iniciando..."}
         
         returns = df['close'].pct_change().dropna().tail(30)
         
@@ -78,7 +78,29 @@ def get_market_chaos_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         return {
             "entropy": round(entropy, 2),
             "hurst": round(hurst, 2),
-            "chaos_label": label
+            "chaos_label": label,
+            # Chaves lidas pelo AIController e pelo ambiente de treino
+            "shannon_entropy": round(entropy, 2),
+            "hurst_exponent": round(hurst, 2),
+            "market_state": label,
         }
     except Exception:
-        return {"entropy": 0.0, "hurst": 0.5, "chaos_label": "Erro no Sensor"}
+        return {"entropy": 0.0, "hurst": 0.5, "chaos_label": "Erro no Sensor", "shannon_entropy": 0.0, "hurst_exponent": 0.5, "market_state": "Erro no Sensor"}
+
+
+def rolling_chaos_metrics(close, lookback: int = 30):
+    """
+    Entropia e Hurst por candle, idênticos a get_market_chaos_metrics() aplicado à janela
+    que termina em cada candle. Usado no pré-cálculo do ambiente de treino e na inferência ao vivo.
+    Retorna (entropy, hurst) como arrays numpy do mesmo tamanho de `close`.
+    """
+    close = np.asarray(close, dtype=float)
+    n = len(close)
+    entropy = np.zeros(n, dtype=np.float32)
+    hurst = np.full(n, 0.5, dtype=np.float32)
+    for i in range(lookback - 1, n):
+        window = close[max(0, i - lookback): i + 1]
+        metrics = get_market_chaos_metrics(pd.DataFrame({"close": window}))
+        entropy[i] = metrics["entropy"]
+        hurst[i] = metrics["hurst"]
+    return entropy, hurst

@@ -21,9 +21,9 @@ async def main():
     symbol = "BTCUSDT"
     side = "BUY"
     quantity = 0.005
-    callback_rate = 400 # Basis points (should be converted to 4.0)
-    
-    print(f"Placing trailing stop with callbackRate={callback_rate} (basis points)...")
+    callback_rate = 4.0 # Percentual (4.0 = 4%), faixa aceita pela Binance: 0.1 a 10
+
+    print(f"Placing trailing stop with callbackRate={callback_rate}%...")
     result = await connector.place_trailing_stop_order(symbol, side, quantity, callback_rate)
     
     if result:

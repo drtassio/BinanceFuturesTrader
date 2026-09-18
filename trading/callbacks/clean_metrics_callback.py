@@ -191,7 +191,7 @@ class CleanMetricsCallback(BaseCallback):
             returns = np.array(self.trade_pnls[-100:])  # Últimos 100 trades
             
             win_rate = self.n_wins / max(1, self.n_trades)
-            profit_factor = self.total_profit / max(0.01, self.total_loss)
+            profit_factor = self.total_profit / self.total_loss if self.total_loss > 1e-12 else float('inf')  # PnLs são frações pequenas: piso 0.01 inflava o PF
             sharpe = self._calc_sharpe(returns)
             sortino = self._calc_sortino(returns)
             avg_trade = np.mean(returns) * 100  # Em %

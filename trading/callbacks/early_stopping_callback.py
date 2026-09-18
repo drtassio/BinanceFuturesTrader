@@ -54,8 +54,13 @@ class EarlyStoppingCallback(BaseCallback):
                 print("⚠️ [EarlyStoppingCallback] Não detectado uso por EvalCallback. O early stopping pode não funcionar corretamente.")
 
     def _on_step(self) -> bool:
-        """Chamado a cada passo. Não é usado aqui."""
-        return True
+        """
+        O EvalCallback do SB3 chama on_step() do callback filho (callback_after_eval) logo após
+        cada avaliação. Antes este método sempre retornava True e o early stopping nunca disparava.
+        """
+        if self.parent is None or not hasattr(self.parent, 'last_mean_reward'):
+            return True
+        return self._on_evaluation_end(float(self.parent.last_mean_reward), {})
 
     def _on_rollout_end(self) -> None:
         """Chamado ao fim de cada rollout. Não utilizado neste callback."""

@@ -383,7 +383,10 @@ class MoETrainingOrchestrator:
         try:
             # Fit and predict regimes
             self.regime_df = self.regime_detector.fit_predict(self.train_df)
-            
+            # O bot ao vivo carrega models_ai/crypto_regime_detector.pkl: sem ele, o pipeline ajustaria
+            # um detector novo sobre poucas centenas de candles a cada ciclo.
+            self.regime_detector.save()
+
             # Validate quality
             metrics = self.regime_detector.validate_regimes()
             
@@ -412,6 +415,8 @@ class MoETrainingOrchestrator:
             # Add regime labels to training dataframe
             self.train_df['regime'] = self.regime_df['regime'].values
             self.train_df['regime_confidence'] = self.regime_df['confidence'].values
+            # regime_name também precisa refletir os rótulos novos: o train() dos especialistas filtra por ele
+            self.train_df['regime_name'] = self.train_df['regime'].map(CryptoRegimeDetector.REGIME_NAMES)
             
             # Cache for later use
             regime_cache = ROOT_DIR / "models_ai" / "regime_labels.parquet"

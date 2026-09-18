@@ -21,6 +21,13 @@ from config.settings import AIConfig, TradingConfig
 
 logger = get_logger("FeatureEngineering")
 
+
+def _timeframe_delta(tf: str) -> pd.Timedelta:
+    """Duração de um timeframe da Binance ('1m', '15m', '1h', '4h', '1d')."""
+    units = {"m": "min", "h": "h", "d": "D"}
+    return pd.Timedelta(int(tf[:-1]), unit=units[tf[-1]])
+
+
 class FeatureEngineeringPipeline:
     def __init__(self, config: AIConfig):
         """
@@ -154,6 +161,10 @@ class FeatureEngineeringPipeline:
                  cols_all = tf_featured_df.columns.tolist()
                  final_secondary_df = tf_featured_df[cols_all].rename(columns={col: f"{col}_{tf}" for col in cols_all})
                  final_secondary_df = final_secondary_df.loc[:, ~final_secondary_df.columns.duplicated()]
+                 # [ANTI-LOOKAHEAD] Índice da Binance = horário de ABERTURA. Desloca para que um candle de outro
+                 # timeframe só apareça na linha primária que fecha depois dele (ex.: 1h aberto às 07:00 só
+                 # entra na linha de 15m que fecha às 08:00). Antes, a linha das 08:00 já via o fechamento das 08:45.
+                 final_secondary_df.index = final_secondary_df.index + _timeframe_delta(tf) - _timeframe_delta(primary_timeframe)
                  all_timeframes_dfs.append(final_secondary_df)
 
         if not all_timeframes_dfs:
@@ -203,7 +214,6 @@ class FeatureEngineeringPipeline:
             from feature_engineering.scientific_data_processor import ScientificDataProcessor
             data_processor = ScientificDataProcessor()
             featured_df_combined = data_processor.add_regime_labels(featured_df_combined)
-            data_processor.save_scalers()
             logger.info(f"Regime labels adicionados: {featured_df_combined['regime'].value_counts().to_dict()}")
         except Exception as e:
             logger.warning(f"Falha ao adicionar regime labels: {e}")
