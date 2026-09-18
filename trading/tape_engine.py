@@ -60,12 +60,6 @@ class TapeEngine:
         self._msg_received_count = 0
         self._last_vol_sync = datetime.utcnow()
         self._current_min_vol = {s: 0.0 for s in self.symbols}
-        # Fluxo por minuto (volume comprador, vendedor): mede a pressão no horizonte de decisão do bot (15m)
-        self._minute_flow: Dict[str, Deque[tuple]] = {s: deque(maxlen=60) for s in self.symbols}
-        self._current_min_buy = {s: 0.0 for s in self.symbols}
-        self._current_min_sell = {s: 0.0 for s in self.symbols}
-        # Último aggTrade id visto: evita contar o mesmo trade duas vezes (WebSocket + fallback REST)
-        self._last_trade_id = {s: -1 for s in self.symbols}
         self._tape_dataset_path = os.path.join(os.getcwd(), 'data', 'tape_snapshots.jsonl')
         self._last_snapshot_at: Dict[str, datetime] = {}
 
@@ -87,24 +81,6 @@ class TapeEngine:
 
         logger.info(f"📡 [TAPE] Iniciando WebSockets (Canais: {streams})")
         self._ws_task = asyncio.create_task(self.connector.start_websocket_stream(streams, self._handle_ws_message))
-
-    def _ingest_trade(self, symbol: str, trade_id, qty: float, is_buy: bool, ts_ms: float, count_volume: bool = True) -> bool:
-        """Registra um aggTrade uma única vez (por id). Retorna False se já tinha sido visto."""
-        if trade_id is not None:
-            trade_id = int(trade_id)
-            if trade_id <= self._last_trade_id[symbol]:
-                return False
-            self._last_trade_id[symbol] = trade_id
-        self.trades_buffer[symbol].append(
-            _TapeTick(quantity=qty, is_buy=is_buy, timestamp=datetime.utcfromtimestamp(ts_ms / 1000.0))
-        )
-        if count_volume:
-            self._current_min_vol[symbol] += qty
-            if is_buy:
-                self._current_min_buy[symbol] += qty
-            else:
-                self._current_min_sell[symbol] += qty
-        return True
 
     async def stop(self):
         self.is_running = False
@@ -129,7 +105,14 @@ class TapeEngine:
 
             # Processar aggTrade
             if 'aggTrade' in stream or data.get('e') == 'aggTrade':
-                self._ingest_trade(target_symbol, data.get('a'), float(data['q']), not bool(data['m']), data.get('T', 0))
+                qty = float(data['q'])
+                tick = _TapeTick(
+                    quantity=qty,
+                    is_buy=not bool(data['m']),
+                    timestamp=datetime.fromtimestamp(data.get('T', 0) / 1000.0)
+                )
+                self.trades_buffer[target_symbol].append(tick)
+                self._current_min_vol[target_symbol] += qty
                 
             # Processar bookTicker
             elif 'bookTicker' in stream or ('u' in data and 'b' in data):
@@ -149,8 +132,12 @@ class TapeEngine:
             data = await self.connector._make_request("GET", "/fapi/v1/aggTrades", params={"symbol": symbol, "limit": 500})
             if data and isinstance(data, list):
                 for t in data:
-                    # Warmup: histórico entra no buffer, mas não infla o volume do minuto corrente
-                    self._ingest_trade(symbol, t.get('a'), float(t['q']), not bool(t['m']), t['T'], count_volume=False)
+                    tick = _TapeTick(
+                        quantity=float(t['q']),
+                        is_buy=not bool(t['m']),
+                        timestamp=datetime.fromtimestamp(t['T'] / 1000.0)
+                    )
+                    self.trades_buffer[symbol].append(tick)
                 self._calculate_metrics(symbol)
                 logger.info(f"✅ [TAPE] {symbol}: Warmup concluído via REST ({len(data)} trades).")
         except Exception as e:
@@ -212,8 +199,14 @@ class TapeEngine:
             if data and isinstance(data, list):
                 count = 0
                 for t in data:
-                    if self._ingest_trade(symbol, t.get('a'), float(t['q']), not bool(t['m']), t['T']):
-                        count += 1
+                    tick = _TapeTick(
+                        quantity=float(t['q']),
+                        is_buy=not bool(t['m']),
+                        timestamp=datetime.fromtimestamp(t['T'] / 1000.0)
+                    )
+                    # Só adiciona se for mais novo que o último no buffer (simplificado)
+                    self.trades_buffer[symbol].append(tick)
+                    count += 1
                 if count > 0:
                     self._calculate_metrics(symbol)
                     logger.debug(f"🔄 [TAPE] {symbol}: Sincronizado via REST ({count} trades).")
@@ -223,8 +216,13 @@ class TapeEngine:
     async def _fetch_rest_depth(self, symbol: str):
         """Busca o Order Book (RPI) via REST conforme sua documentação."""
         try:
-            # 20 niveis bastam para OBI, perfil de profundidade e muros (peso 2, chamado a cada 3s)
-            data = await self.connector._make_request("GET", "/fapi/v1/depth", params={"symbol": symbol, "limit": 20}, signed=False)
+            # Usando /fapi/v1/rpiDepth se disponível, senão /fapi/v1/depth
+            endpoint = "/fapi/v1/rpiDepth" 
+            data = await self.connector._make_request("GET", endpoint, params={"symbol": symbol, "limit": 1000}, signed=False)
+            
+            # Se rpiDepth falhar (erro 404), tenta o depth comum
+            if not data:
+                data = await self.connector._make_request("GET", "/fapi/v1/depth", params={"symbol": symbol, "limit": 100}, signed=False)
             
             if data and 'bids' in data and 'asks' in data:
                 bids = data['bids']
@@ -328,9 +326,6 @@ class TapeEngine:
             for s in self.symbols:
                 self.volume_history[s].append(self._current_min_vol[s])
                 self._current_min_vol[s] = 0.0
-                self._minute_flow[s].append((self._current_min_buy[s], self._current_min_sell[s]))
-                self._current_min_buy[s] = 0.0
-                self._current_min_sell[s] = 0.0
             self._last_vol_sync = now
 
         recent = trades[-self.short_window_size:]
@@ -383,14 +378,8 @@ class TapeEngine:
 
         rvol = m.relative_volume   # 1.0 = normal, 2.5+ = institucional
 
-        # ── Fluxo de agressão nos últimos 15 minutos (horizonte de decisão do bot) ──
-        last_minutes = list(self._minute_flow.get(symbol, []))[-15:]
-        buy_15m = sum(b for b, _ in last_minutes) + self._current_min_buy.get(symbol, 0.0)
-        sell_15m = sum(s for _, s in last_minutes) + self._current_min_sell.get(symbol, 0.0)
-        flow_15m = (buy_15m - sell_15m) / (buy_15m + sell_15m) if (buy_15m + sell_15m) > 0 else 0.0
-
-        # ── Score base: fluxo de 15m domina; fluxo de segundos e topo do livro confirmam ──
-        base_score = (flow_15m * 0.5) + (m.volume_imbalance * 0.3) + (m.obi * 0.2)
+        # ── Score base: imbalance direcional + pressão do livro ───────────────
+        base_score = (m.volume_imbalance * 0.7) + (m.obi * 0.3)
 
         # ── Amplificador por volume relativo (baleias amplificam) ─────────────
         if rvol >= 2.5:
@@ -437,7 +426,6 @@ class TapeEngine:
             "score":                round(score, 4),
             "obi":                  round(m.obi, 4),
             "vpin":                 round(m.vpin, 4),
-            "flow_imbalance_15m":   round(flow_15m, 4),
             "delta":                round(m.aggressor_delta, 2),
             "relative_volume":      round(rvol, 2),
             # ── Depth profile (Fase 1) ────────────────────────────────────────

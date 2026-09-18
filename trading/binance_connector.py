@@ -530,38 +530,19 @@ class BinanceConnector:
             if result:
                 logger.info(f"✅ [CONECTOR] Ordem {result.get('orderId')} ({result.get('status')}) cancelada com sucesso.")
                 return result
-            # SL/TP/Trailing vivem na Algo Order API (o orderId normalizado dessas ordens é o algoId)
-            if order_id:
-                return await self.cancel_algo_order(order_id)
-            return None
         except Exception as e:
+            # Fallback para Algo Order API (/fapi/v1/algoOrder)
+            if order_id:
+                try:
+                    algo_params = {'symbol': symbol, 'algoId': order_id}
+                    algo_res = await self._make_request('DELETE', '/fapi/v1/algoOrder', params=algo_params, signed=True)
+                    if algo_res:
+                        logger.info(f"✅ [CONECTOR] Algo Order {order_id} cancelada com sucesso via /fapi/v1/algoOrder.")
+                        return algo_res
+                except Exception as ae:
+                    logger.debug(f"Fallback algoOrder falhou: {ae}")
             logger.error(f"❌ [ERRO CONECTOR] Exceção ao cancelar ordem: {e}", exc_info=True)
             return None
-
-    async def cancel_algo_order(self, algo_id: Any) -> Optional[Dict[str, Any]]:
-        """Cancela uma ordem condicional (SL/TP/Trailing) da Algo Order API pelo algoId."""
-        result = await self._make_request('DELETE', '/fapi/v1/algoOrder', params={'algoId': algo_id}, signed=True)
-        if result:
-            logger.info(f"✅ [CONECTOR] Algo Order {algo_id} cancelada.")
-        return result
-
-    async def cancel_all_algo_orders(self, symbol: str) -> int:
-        """Cancela todas as ordens condicionais abertas (SL, TP, Trailing) do símbolo. Retorna quantas foram canceladas."""
-        open_algo = await self._make_request('GET', '/fapi/v1/openAlgoOrders', params={'symbol': symbol}, signed=True)
-        if not isinstance(open_algo, list) or not open_algo:
-            return 0
-        result = await self._make_request('DELETE', '/fapi/v1/algoOpenOrders', params={'symbol': symbol}, signed=True)
-        if result is None:
-            logger.warning(f"⚠️ [CONECTOR] Falha ao cancelar {len(open_algo)} algo order(s) de {symbol}.")
-            return 0
-        return len(open_algo)
-
-    async def has_open_position(self, symbol: str) -> Optional[bool]:
-        """True/False conforme a exchange; None se a consulta falhar (nunca assumir posição fechada por erro)."""
-        data = await self._make_request('GET', '/fapi/v2/positionRisk', params={'symbol': symbol}, signed=True)
-        if not isinstance(data, list):
-            return None
-        return any(float(p.get('positionAmt', 0) or 0) != 0 for p in data)
 
     async def get_ticker_price(self, symbol: str) -> Optional[Dict[str, str]]:
         """
@@ -611,70 +592,116 @@ class BinanceConnector:
             return None
 
     async def place_trailing_stop_order(self, symbol: str, side: str, quantity: float,
-                                         callback_rate: float, activation_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
+                                         callback_rate: float) -> Optional[Dict[str, Any]]:
         """
-        Coloca um Trailing Stop real (TRAILING_STOP_MARKET) via Algo Order API (POST /fapi/v1/algoOrder).
-        Desde 2025-12-09 a Binance rejeita ordens condicionais em /fapi/v1/order (erro -4120).
+        Coloca uma ordem de Trailing Stop para proteger uma posicao.
 
-        Args:
-            side: lado da ordem de saída ('SELL' protege LONG, 'BUY' protege SHORT)
-            quantity: quantidade da posição a proteger (reduceOnly)
-            callback_rate: recuo em percentual (1.0 = 1%); a Binance aceita de 0.1 a 10
-            activation_price: preço que arma o trailing. None arma imediatamente no preço atual.
+        Estrategia de 3 camadas (fallback robusto):
+          1. /fapi/v1/order com type='TRAILING_STOP_MARKET'  -- endpoint unificado
+          2. /fapi/v1/order/trailingStop                     -- endpoint específico
+          3. /fapi/v1/order com type='STOP_MARKET'           -- hard stop calculado (garantido)
         """
-        if not symbol or not side or quantity <= 0 or callback_rate <= 0:
-            logger.error(f"[CONECTOR] Parametros invalidos para trailing stop: {symbol} {side} {quantity} cb={callback_rate}")
+        if not symbol or not side or quantity <= 0:
+            logger.error("[CONECTOR] Parametros invalidos para trailing stop.")
             return None
 
+        # Normaliza callback_rate (aceita basis points > 5 ou percentual <= 5)
+        if callback_rate > 5.0:
+            callback_rate = callback_rate / 100.0
+        callback_rate = max(0.1, min(5.0, round(callback_rate, 1)))
+
         side_upper = side.upper()
-        callback_rate = round(min(max(float(callback_rate), 0.1), 10.0), 1)
-        symbol_info = await self.get_symbol_info(symbol)
-        price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
-        qty_precision = int(symbol_info['quantityPrecision']) if symbol_info else 3
-
-        params = {
-            'algoType': 'CONDITIONAL',
-            'symbol': symbol,
-            'side': side_upper,
-            'type': 'TRAILING_STOP_MARKET',
-            'quantity': f"{round(quantity, qty_precision):.{qty_precision}f}",
-            'callbackRate': f"{callback_rate:.1f}",
-            'reduceOnly': 'true',
-            'workingType': 'MARK_PRICE',
-        }
-
-        if activation_price and activation_price > 0:
-            ticker = await self.get_ticker_price(symbol)
-            current_price = float(ticker['price']) if ticker and 'price' in ticker else 0.0
-            # SELL (protege LONG) só pode armar acima do preço atual; BUY (protege SHORT), abaixo (senão erro -2021)
-            not_reached = current_price <= 0 or (
-                activation_price > current_price if side_upper == 'SELL' else activation_price < current_price
-            )
-            if not_reached:
-                params['activatePrice'] = f"{activation_price:.{price_precision}f}"
-            else:
-                logger.info(f"[CONECTOR] Preço ${current_price:.2f} já passou da ativação {activation_price:.2f}: trailing armado imediatamente.")
-
         logger.info(
-            f"[CONECTOR] Trailing Stop {symbol}: {side_upper} {params['quantity']} | "
-            f"callback {callback_rate}% | ativação {params.get('activatePrice', 'imediata')}"
+            f"[CONECTOR] Trailing Stop {symbol}: {side_upper} {quantity} @ {callback_rate}% callback"
         )
 
-        result = await self._make_request('POST', '/fapi/v1/algoOrder', params=params, signed=True)
-        if not (isinstance(result, dict) and result.get('algoId')):
-            # Hedge Mode não aceita reduceOnly: tenta com positionSide explícito
-            hedge_params = {k: v for k, v in params.items() if k != 'reduceOnly'}
-            hedge_params['positionSide'] = 'LONG' if side_upper == 'SELL' else 'SHORT'
-            result = await self._make_request('POST', '/fapi/v1/algoOrder', params=hedge_params, signed=True)
+        # Cascata de 3 tentativas para cobrir todos os modos de conta (One-Way, Hedge, Portfolio Margin).
+        try:
+            symbol_info = await self.get_symbol_info(symbol)
+            price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
+            qty_precision   = int(symbol_info['quantityPrecision']) if symbol_info else 3
 
-        if isinstance(result, dict) and result.get('algoId'):
-            result.setdefault('orderId', result['algoId'])
-            result.setdefault('type', result.get('orderType', 'TRAILING_STOP_MARKET'))
-            logger.info(f"[CONECTOR] ✅ Trailing Stop {result['algoId']} ativo para {symbol} (callback {callback_rate}%).")
-            return result
+            ticker = await self._make_request(
+                'GET', '/fapi/v1/ticker/price', params={'symbol': symbol}, signed=False
+            )
+            current_price = float(ticker['price']) if ticker and 'price' in ticker else 0.0
 
-        logger.error(f"[CONECTOR] ❌ Trailing Stop rejeitado para {symbol}. Veja o erro da API registrado acima.")
-        return None
+            if current_price <= 0:
+                logger.warning(f"[CONECTOR] Preço inválido para {symbol}. Stop cancelado.")
+                return None
+
+            offset = callback_rate / 100.0
+            stop_price = round(
+                current_price * (1.0 + offset) if side_upper == 'BUY' else current_price * (1.0 - offset),
+                price_precision
+            )
+            qty_rounded = round(quantity, qty_precision)
+            logger.info(f"[CONECTOR] Stop target: {side_upper} @ {stop_price} (preço atual ${current_price:.2f})")
+
+            # --- Tentativa 1: STOP_MARKET closePosition (One-Way mode) ---
+            try:
+                r = await self._make_request('POST', '/fapi/v1/order', params={
+                    'symbol': symbol, 'side': side_upper, 'type': 'STOP_MARKET',
+                    'stopPrice': f"{stop_price:.{price_precision}f}", 'closePosition': 'true',
+                }, signed=True)
+                if r and r.get('orderId'):
+                    logger.info(f"[CONECTOR] ✅ Stop (T1-closePosition) {r['orderId']} @ {stop_price}")
+                    return r
+            except Exception as e1:
+                logger.debug(f"[CONECTOR] T1 falhou: {e1}")
+
+            # --- Tentativa 2: STOP_MARKET positionSide=BOTH (Hedge/PM mode) ---
+            try:
+                r = await self._make_request('POST', '/fapi/v1/order', params={
+                    'symbol': symbol, 'side': side_upper, 'type': 'STOP_MARKET',
+                    'stopPrice': f"{stop_price:.{price_precision}f}",
+                    'quantity': qty_rounded, 'positionSide': 'BOTH', 'reduceOnly': 'true',
+                }, signed=True)
+                if r and r.get('orderId'):
+                    logger.info(f"[CONECTOR] ✅ Stop (T2-positionSide) {r['orderId']} @ {stop_price}")
+                    return r
+            except Exception as e2:
+                logger.debug(f"[CONECTOR] T2 falhou: {e2}")
+
+            # --- Tentativa 3: algoOrder TRAILING_STOP_MARKET (caminho canônico da Algo API) ---
+            try:
+                # O endpoint correto para Algo Orders de Trailing Stop é /fapi/v1/algo/futures/newOrderTrailingStop
+                algo_params = {
+                    'symbol': symbol,
+                    'side': side_upper,
+                    'quantity': qty_rounded,
+                    'callbackRate': callback_rate,
+                    'reduceOnly': 'true'
+                }
+                # Opcional: ativação do stop no preço atual
+                algo_params['activationPrice'] = f"{stop_price:.{price_precision}f}"
+                
+                r = await self._make_request('POST', '/fapi/v1/algo/futures/newOrderTrailingStop', params=algo_params, signed=True)
+                if r and (r.get('algoId') or r.get('orderId')):
+                    logger.info(f"[CONECTOR] ✅ Stop (T3-AlgoAPI) id={r.get('algoId') or r.get('orderId')} callback={callback_rate}%")
+                    return r
+            except Exception as e3:
+                logger.debug(f"[CONECTOR] T3 (AlgoAPI) falhou: {e3}")
+
+            # --- Tentativa 4: STOP_MARKET mínimo (sem positionSide nem closePosition) ---
+            try:
+                r = await self._make_request('POST', '/fapi/v1/order', params={
+                    'symbol': symbol, 'side': side_upper, 'type': 'STOP_MARKET',
+                    'quantity': qty_rounded, 'stopPrice': f"{stop_price:.{price_precision}f}",
+                    'reduceOnly': 'true',
+                }, signed=True)
+                if r and r.get('orderId'):
+                    logger.info(f"[CONECTOR] ✅ Stop (T4-minimal) {r['orderId']} @ {stop_price}")
+                    return r
+            except Exception as e4:
+                logger.debug(f"[CONECTOR] T4 falhou: {e4}")
+
+            logger.warning(f"[CONECTOR] ⚠️ Todas as tentativas de API falharam para {symbol}. Ativando stop por software @ {stop_price:.2f}.")
+            return {'software_stop': True, 'stop_price': stop_price, 'symbol': symbol, 'side': side_upper}
+
+        except Exception as e:
+            logger.error(f"[CONECTOR] ❌ Erro inesperado no stop para {symbol}: {e}", exc_info=True)
+            return None
 
     async def place_stop_loss_order(self, symbol: str, side: str, quantity: float, stop_price: float) -> Optional[Dict[str, Any]]:
         """

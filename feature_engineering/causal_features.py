@@ -110,6 +110,64 @@ def shift_higher_timeframes(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, D
     return out, report
 
 
+# A staircase: price sits in a tight box, then two or more large candles in the
+# same direction close out of it. The move has started; nothing is predicted.
+# Values from scripts/label_staircase_examples.py, chosen on its training block.
+STEP_BODY_ATR = 1.5
+STAIRCASE_BOX_BARS = 48      # 12h box
+STAIRCASE_BOX_GAP = 3        # the box ends before the steps themselves
+STRUCTURE_4H_BUFFER_ATR = 0.5
+BAR_4H = pd.Timedelta(hours=4)
+
+
+def add_staircase_structure(df: pd.DataFrame, atr: pd.Series) -> Dict[str, pd.Series]:
+    """Steps, the box they leave and the 4h structure that carries the trend.
+
+    step_up_count / step_down_count: consecutive candles whose body is at least
+    STEP_BODY_ATR x ATR and whose close beats the previous close.
+    box_width: height of the 12h box before the steps, in ATR (tight = small).
+    box_break_up / box_break_down: close beyond that box, in ATR.
+    struct_4h_long / struct_4h_short: distance from the close to the 4h
+    structure stop (lowest low / highest high of the last two CLOSED 4h candles,
+    widened by half a 4h ATR), in 15m ATR. Negative: the structure broke.
+    """
+    open_ = df["open"].astype(float)
+    close = df["close"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    body = (close - open_) / atr
+    step_up = (body >= STEP_BODY_ATR) & (close > close.shift(1))
+    step_down = (body <= -STEP_BODY_ATR) & (close < close.shift(1))
+    up_count = step_up.astype(int).groupby((~step_up).cumsum()).cumsum()
+    down_count = step_down.astype(int).groupby((~step_down).cumsum()).cumsum()
+
+    box_high = high.rolling(STAIRCASE_BOX_BARS).max().shift(STAIRCASE_BOX_GAP)
+    box_low = low.rolling(STAIRCASE_BOX_BARS).min().shift(STAIRCASE_BOX_GAP)
+
+    # 4h candles from the 15m bars, each stamped on the 15m bar that closes it.
+    bars = pd.DataFrame({"high": high, "low": low, "close": close})
+    four = bars.resample(BAR_4H, closed="left", label="left").agg(
+        {"high": "max", "low": "min", "close": "last"}).dropna()
+    four.index = four.index + BAR_4H - BAR
+    tr = np.maximum(four["high"] - four["low"],
+                    np.maximum((four["high"] - four["close"].shift()).abs(),
+                               (four["low"] - four["close"].shift()).abs()))
+    atr_4h = tr.rolling(14, min_periods=4).mean()
+    support = (four["low"].rolling(2).min() - STRUCTURE_4H_BUFFER_ATR * atr_4h).reindex(df.index, method="ffill")
+    resistance = (four["high"].rolling(2).max() + STRUCTURE_4H_BUFFER_ATR * atr_4h).reindex(df.index, method="ffill")
+
+    return {
+        "step_body_atr": body,
+        "step_up_count": up_count.astype(float),
+        "step_down_count": down_count.astype(float),
+        "box_width": (box_high - box_low) / atr,
+        "box_break_up": (close - box_high) / atr,
+        "box_break_down": (close - box_low) / atr,
+        "struct_4h_long": (close - support) / atr,
+        "struct_4h_short": (resistance - close) / atr,
+    }
+
+
 def add_trend_structure(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     """Causal description of a forming trend, from closed 15m bars only."""
     out = df.copy()
@@ -158,6 +216,10 @@ def add_trend_structure(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         prior_low = low.rolling(win).min().shift(1)
         put("breakout_up_%d" % win, (close - prior_high) / atr)
         put("breakout_down_%d" % win, (close - prior_low) / atr)
+
+    staircase = add_staircase_structure(out, atr)
+    for name, series in staircase.items():
+        put(name, series)
 
     logret = np.log(close).diff()
     base_vol = logret.rolling(384).std()

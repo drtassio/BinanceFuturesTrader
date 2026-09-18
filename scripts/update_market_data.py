@@ -4,7 +4,8 @@ Traz os dados de mercado até o último candle de 15m FECHADO.
 
 1. data/market_raw/*.parquet  - klines 15m (perp/spot BTC, perp ETH) e funding, API pública.
 2. data/featured_data.parquet - estende com o MESMO pipeline do bot
-   (DataProvider -> FeatureEngineeringPipeline.create_features), 15m/1h/4h.
+   (DataProvider -> FeatureEngineeringPipeline.create_features), em todos os
+   timeframes que o bot usa (TradingConfig.ALL_TRADING_TIMEFRAMES).
    Antes de gravar, recalcula um trecho que já existe e compara com o arquivo,
    para garantir que as linhas novas saem iguais às antigas.
 
@@ -123,10 +124,20 @@ async def build_featured(start: datetime, end: datetime) -> pd.DataFrame:
         provider = DataProvider(connector, pipeline)
         start_ts, end_ts = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
         raw = {}
-        for tf in ("15m", "1h", "4h"):
+        for tf in TradingConfig.ALL_TRADING_TIMEFRAMES:
             _, df = await provider._fetch_historical_batch(TradingConfig.PRIMARY_PAIR, tf, start_ts, end_ts)
             raw[tf] = df
-        featured = await pipeline.create_features(raw, TradingConfig.PRIMARY_PAIR, "15m", fit_scaler=False)
+        # featured_data.parquet is the base BEFORE the causal treatment and the
+        # meta-model: build_causal_dataset.py applies both on top of it, while
+        # the live create_features applies them inline. Stop at the base here.
+        import feature_engineering.causal_features as causal
+        original = causal.build_causal_features
+        causal.build_causal_features = lambda df: (df, {"trend_features": [], "tape_features": []})
+        pipeline._add_meta_features = lambda df: df
+        try:
+            featured = await pipeline.create_features(raw, TradingConfig.PRIMARY_PAIR, "15m", fit_scaler=False)
+        finally:
+            causal.build_causal_features = original
         return featured, raw
     finally:
         await connector.close()
@@ -156,7 +167,7 @@ def _splice_obv(col, old, fresh, raw, common):
     return ((x + c) / s).astype(old[col].dtype)
 
 
-def update_featured(force: bool = False):
+def update_featured(force: bool = False, micro_ok: bool = False):
     old = pd.read_parquet(FEATURED)
     old_end = old.index.max()
     last_open = last_closed_15m()
@@ -170,6 +181,14 @@ def update_featured(force: bool = False):
     fresh = _naive(fresh)
     fresh = fresh[fresh.index <= last_open].copy()
 
+    # "*_tf_*" columns come from an old historical builder that the live
+    # pipeline never produces; build_causal_dataset.py drops them. New rows
+    # carry NaN there instead of a value the bot could not reproduce.
+    legacy = [c for c in old.columns if "_tf_" in c and c not in fresh.columns]
+    for col in legacy:
+        fresh[col] = np.nan
+    if legacy:
+        print(f"   {len(legacy)} colunas legadas *_tf_* (descartadas no dataset causal) ficam vazias nas linhas novas")
     missing = [c for c in old.columns if c not in fresh.columns]
     extra = [c for c in fresh.columns if c not in old.columns]
     if missing:
@@ -179,7 +198,7 @@ def update_featured(force: bool = False):
     lo = old_end - pd.Timedelta(days=PARITY_DAYS)
     a, b = old.loc[lo:old_end], fresh.loc[lo:old_end, old.columns]
     common = a.index.intersection(b.index)
-    num = [c for c in old.columns if pd.api.types.is_numeric_dtype(old[c])]
+    num = [c for c in old.columns if pd.api.types.is_numeric_dtype(old[c]) and c not in legacy]
     a_num, b_num = a.loc[common, num].astype(float), b.loc[common, num].astype(float)
     rel = ((a_num - b_num).abs() / (a_num.abs() + 1e-9)).median()
     # Indicadores acumulados (OBV, PVT, ADL) dependem de onde a série começa: se a
@@ -196,6 +215,15 @@ def update_featured(force: bool = False):
             print(f"   {col}: OBV reconstruído a partir da soma acumulada e renormalizado")
     bad = rel[rel > PARITY_TOLERANCE].sort_values(ascending=False)
     print(f"   paridade em {len(common)} candles já existentes: {len(num) - len(bad)}/{len(num)} colunas iguais")
+    by_tf = pd.Series([c.rsplit("_", 1)[-1] if c.rsplit("_", 1)[-1] in ("1m", "5m", "15m", "1h", "4h") else "base"
+                       for c in bad.index], dtype=object).value_counts()
+    if len(bad):
+        print("   divergentes por timeframe: " + ", ".join(f"{tf}={n}" for tf, n in by_tf.items()))
+    if micro_ok:
+        # The specialists never observe *_1m/*_5m (trend_specialist._EXCLUDED_TF).
+        # The shipped base file cannot be reproduced there, so the new rows keep
+        # what the live bot computes and the check applies to everything else.
+        bad = bad[[not (c.endswith("_1m") or c.endswith("_5m")) for c in bad.index]]
     if len(bad):
         print("   colunas divergentes (diferença relativa mediana):")
         print(bad.head(15).to_string())
@@ -226,6 +254,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--raw-only", action="store_true")
     ap.add_argument("--force", action="store_true", help="grava o featured_data mesmo com paridade divergente")
+    ap.add_argument("--allow-micro-divergence", action="store_true",
+                    help="aceita divergencia so em colunas *_1m/*_5m, que os especialistas nao observam")
     args = ap.parse_args()
     logging.disable(logging.INFO)
 
@@ -236,7 +266,7 @@ def main():
     update_funding()
     if not args.raw_only:
         print("2) featured_data.parquet (pipeline do bot)")
-        update_featured(args.force)
+        update_featured(args.force, args.allow_micro_divergence)
 
 
 if __name__ == "__main__":

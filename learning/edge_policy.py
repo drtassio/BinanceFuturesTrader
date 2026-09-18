@@ -194,8 +194,56 @@ def trend_leg_action(row, position: float, agent: str, rule: "TrendLegRule") -> 
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 
 
+@dataclass(frozen=True)
+class StaircaseRule:
+    """Enter a staircase once it has formed, ride the 4h structure out.
+
+    Never anticipates a turn. Flat, it waits for two or more large candles
+    (body >= 1.5 ATR) in its direction that close out of a tight 12h box while
+    aggressive flow agrees: the move has already begun. In the trade it holds
+    while the close stays on its side of the 4h structure stop, which rides the
+    last two closed 4h candles, and leaves when that breaks. Small back-and-forth
+    candles never qualify as steps, so chop stays out of Bull and Bear.
+
+    Chosen on the training block (scripts/label_staircase_examples.py): of 72
+    variants the 40 profitable on train were all profitable on holdout.
+    """
+    kind: str = "staircase"
+    min_steps: int = 2
+    max_box_width: float = 8.0
+    min_cvd: float = 0.0
+    sl_mult: float = 3.0
+    leverage: float = 3.0
+    vote: float = 0.8
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def staircase_inputs(rule: "StaircaseRule", agent: str) -> tuple:
+    if SIDES[agent] == (1,):
+        return ("cz_step_up_count", "cz_box_width", "cz_box_break_up", "cz_cvd_z_16", "cz_struct_4h_long")
+    return ("cz_step_down_count", "cz_box_width", "cz_box_break_down", "cz_cvd_z_16", "cz_struct_4h_short")
+
+
+def staircase_action(row, position: float, agent: str, rule: "StaircaseRule") -> np.ndarray:
+    if len(SIDES[agent]) != 1:
+        raise ValueError("staircase teacher is directional; %s trades both sides" % agent)
+    side = SIDES[agent][0]
+    steps, width, breakout, cvd, structure = (float(row.get(c, 0.0)) for c in staircase_inputs(rule, agent))
+    if int(np.sign(position)) == side:
+        vote = side * rule.vote if structure >= 0.0 else -side * rule.vote
+    else:
+        formed = (steps >= rule.min_steps and width <= rule.max_box_width
+                  and side * breakout > 0.0 and side * cvd >= rule.min_cvd)
+        vote = side * rule.vote if formed else -side * rule.vote
+    return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
 def load_rule(saved: Dict[str, object]):
     """Teacher from its saved JSON 'rule' block."""
+    if saved.get("kind") == "staircase":
+        return StaircaseRule(**saved)
     if saved.get("kind") == "breakout":
         return BreakoutRule(**saved)
     if saved.get("kind") in ("trend_leg", "rally"):  # "rally": earlier name of the same rule
@@ -204,6 +252,8 @@ def load_rule(saved: Dict[str, object]):
 
 
 def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
+    if isinstance(rule, StaircaseRule):
+        return staircase_action(row, position, agent, rule)
     if isinstance(rule, BreakoutRule):
         return breakout_action(row, position, agent, rule)
     if isinstance(rule, TrendLegRule):
@@ -213,6 +263,8 @@ def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
 
 def teacher_inputs(rule, agent: str) -> Dict[str, object]:
     """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
+    if isinstance(rule, StaircaseRule):
+        return {"columns": staircase_inputs(rule, agent), "prior_dir": False}
     if isinstance(rule, BreakoutRule):
         return {"columns": breakout_inputs(rule, agent), "prior_dir": False}
     if isinstance(rule, TrendLegRule):

@@ -273,7 +273,7 @@ class CryptoRegimeDetector:
                 train_data = features
                 
             self.hmm_model.fit(train_data)
-            hidden_states = self._hmm_filtered_states(features)
+            hidden_states = self.hmm_model.predict(features)
             
             # [F2 FIX] Mapeamento por Sharpe Contemporâneo (SEM LEAKAGE)
             # Bull = Alto retorno/Baixa vol, Bear = Baixo retorno/Alta vol.
@@ -527,57 +527,46 @@ class CryptoRegimeDetector:
         
         return final_regimes, confidence
     
-    def _hmm_filtered_states(self, features: np.ndarray) -> np.ndarray:
-        """
-        Estado mais provável em cada t usando SOMENTE observações até t (algoritmo forward).
-        hmm_model.predict() usa Viterbi sobre a sequência inteira: o rótulo de t depende do futuro,
-        o que infla o treino e diverge do que existe ao vivo.
-        """
-        try:
-            from scipy.special import logsumexp
-            model = self.hmm_model
-            log_emission = model._compute_log_likelihood(features)
-            log_trans = np.log(model.transmat_ + 1e-300)
-            log_alpha = np.log(model.startprob_ + 1e-300) + log_emission[0]
-            states = np.empty(len(features), dtype=int)
-            states[0] = int(np.argmax(log_alpha))
-            for t in range(1, len(features)):
-                log_alpha = logsumexp(log_alpha[:, None] + log_trans, axis=0) + log_emission[t]
-                log_alpha -= logsumexp(log_alpha)
-                states[t] = int(np.argmax(log_alpha))
-            return states
-        except Exception as e:
-            logger.warning(f"⚠️ Filtragem forward do HMM falhou ({e}); usando predict().")
-            return self.hmm_model.predict(features)
-
     def _smooth_regimes(self, regimes: np.ndarray, confidence: np.ndarray) -> np.ndarray:
         """
-        Anti-whipsaw CAUSAL: uma troca de regime só é confirmada depois de persistir
-        min_regime_duration barras (ou imediatamente com confiança >= 0.75).
-        A versão anterior fundia segmentos olhando onde eles terminavam (informação futura).
+        Remove regime changes that don't persist for min_regime_duration.
+        [F3 FIX] Usa confiança para preservar segmentos curtos mas confiantes.
+        
+        Um segmento de 4 bars com confiança 0.90 indica transição rápida real 
+        em crypto — não deve ser absorvido como ruído.
         """
-        n = len(regimes)
-        if n == 0:
+        if len(regimes) < self.config.min_regime_duration:
             return regimes
-        min_duration = max(1, int(self.config.min_regime_duration))
-        smoothed = np.empty_like(regimes)
-        current = regimes[0]
-        candidate = current
-        run = 0
-        for i in range(n):
-            regime = regimes[i]
-            if regime == current:
-                candidate, run = current, 0
-            else:
-                if regime == candidate:
-                    run += 1
-                else:
-                    candidate, run = regime, 1
-                if run >= min_duration or confidence[i] >= 0.75:
-                    current, run = regime, 0
-            smoothed[i] = current
-        return smoothed
+        
+        smoothed = regimes.copy()
+        
+        # Passe linear O(n): identifica segmentos e mescla os curtos e pouco confiantes
+        n = len(smoothed)
+        i = 0
+        while i < n:
+            seg_start = i
+            seg_regime = smoothed[i]
+            while i < n and smoothed[i] == seg_regime:
+                i += 1
+            seg_end = i  # exclusive
 
+            duration = seg_end - seg_start
+            
+            # [F3 FIX] Calcula confiança média do segmento
+            seg_conf = float(np.mean(confidence[seg_start:seg_end]))
+            
+            # Duração mínima adaptativa: curtos + baixa confiança = ruído
+            # curtos + alta confiança = transição rápida genuina (preservar)
+            high_confidence_threshold = 0.75
+            is_high_confidence = seg_conf >= high_confidence_threshold
+            
+            if duration < self.config.min_regime_duration and seg_start > 0 and not is_high_confidence and seg_end < n:
+                # Segmento curto e baixa confiança: absorve no regime anterior
+                prev_regime = smoothed[seg_start - 1]
+                smoothed[seg_start:seg_end] = prev_regime
+
+        return smoothed
+    
     def fit_predict(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Main entry point: fit all models and predict regimes.
@@ -948,7 +937,7 @@ class CryptoRegimeDetector:
         # 2. HMM Prediction
         if self.hmm_model:
             try:
-                hidden_states = self._hmm_filtered_states(features_scaled)
+                hidden_states = self.hmm_model.predict(features_scaled)
                 # [FIX] Usa mapeamento salvo durante fit() em vez de recalcular pelo índice
                 # da coluna 0, que muda se funding_rate for adicionado/removido entre sessões
                 mapping = getattr(self, '_hmm_state_mapping', None)

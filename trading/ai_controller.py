@@ -43,7 +43,7 @@ from trading.tape_engine import TapeEngine
 from trading.onchain_engine import OnChainEngine
 from governance.ai_monitor import AIMonitor
 from governance.drift_detector import DriftDetector
-from xai_engine.explainer import Explainer, build_position_context
+from xai_engine.explainer import Explainer
 from data_provider import DataProvider
 from trading.utils.trend_backtest import (
     ensure_datetime_index,
@@ -310,13 +310,6 @@ class AIController:
     def set_feature_pipeline(self, pipeline: FeatureEngineeringPipeline): self.feature_pipeline = pipeline
     def set_portfolio(self, portfolio: PortfolioOptimizer): self.portfolio = portfolio
     def set_risk_manager(self, manager: RiskManager): self.risk_manager = manager
-
-    def _current_position_context(self) -> Optional[Dict[str, Any]]:
-        """Contexto da posição aberta no par principal para o Explainer (None se não houver posição)."""
-        if not self.portfolio:
-            return None
-        symbol = self.config_trading.PRIMARY_PAIR
-        return build_position_context(self.portfolio.positions.get(symbol), self.portfolio.get_current_price(symbol))
     def set_ai_monitor(self, monitor: AIMonitor): self.ai_monitor = monitor
     def set_drift_detector(self, detector: DriftDetector): self.drift_detector = detector
     def set_curriculum_engine(self, engine: CurriculumEngine): self.curriculum_engine = engine
@@ -3185,23 +3178,38 @@ class AIController:
                     logger.warning(f" Especialista '{expert_key}' no carregado. Ignorando no ensemble.")
                     continue
 
-                # Observação idêntica ao treino (features escaladas + extras + estado + tempo + prior + física,
-                # empilhada em n_stack candles). Sem contrato válido o especialista é ignorado: nunca completar com zeros.
-                def _agent_state_at(offset: int) -> np.ndarray:
-                    steps_then = steps_in_candles - offset
-                    if pos_side != 0 and steps_then >= 0:
-                        return np.array([pos_side, pnl, steps_then / 100.0], dtype=np.float32)
-                    return np.zeros(3, dtype=np.float32)
+                #  FAST PATH: monta observao direto do contrato do especialista 
+                # Evita o re-encode do autoencoder  shape correto na primeira tentativa.
+                _spec_cols = getattr(active_specialist, 'feature_columns', [])
+                if not _spec_cols:
+                    _fs = getattr(active_specialist, 'feature_scaler', None)
+                    if _fs is not None and hasattr(_fs, 'feature_names_in_'):
+                        _spec_cols = list(_fs.feature_names_in_)
 
-                try:
-                    expert_observation = active_specialist.build_live_observation(df_fully_enriched, _agent_state_at)
-                except Exception as obs_err:
-                    logger.error(f" [AI] {active_specialist.__class__.__name__}: falha ao montar observação: {obs_err}", exc_info=True)
-                    expert_observation = None
-                if expert_observation is None:
-                    logger.error(
-                        f" [AI] {active_specialist.__class__.__name__}: observação ao vivo incompatível com o contrato de treino. "
-                        f"Especialista ignorado nesta decisão (retreine para gerar o contrato)."
+                _mem_keys = ['dist_to_max_20', 'dist_to_min_20',
+                             'dist_to_max_50', 'dist_to_min_50']
+
+                # Computa dist_to_max/min ao vivo — não existem na pipeline principal
+                _mem_live = {}
+                for _w in [20, 50]:
+                    try:
+                        _h = df_fully_enriched['high'].rolling(_w).max().iloc[-1]
+                        _l = df_fully_enriched['low'].rolling(_w).min().iloc[-1]
+                        _c = float(latest_row.get('close', 1.0))
+                        _mem_live[f'dist_to_max_{_w}'] = (_c - _h) / (_h + 1e-9)
+                        _mem_live[f'dist_to_min_{_w}'] = (_c - _l) / (_l + 1e-9)
+                    except Exception:
+                        _mem_live[f'dist_to_max_{_w}'] = 0.0
+                        _mem_live[f'dist_to_min_{_w}'] = 0.0
+
+                if _spec_cols and all(c in latest_row.index for c in _spec_cols):
+                    _mkt = np.array([float(latest_row.get(c, 0.0)) for c in _spec_cols],
+                                    dtype=np.float32)
+                    _mem = np.array([_mem_live.get(k, 0.0) for k in _mem_keys],
+                                    dtype=np.float32)
+                    _prior = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
+                    expert_observation = np.concatenate(
+                        [_mkt, _mem, agent_state, time_features, _prior]
                     )
                     logger.debug(
                         f" [FAST PATH] {active_specialist.__class__.__name__}: "
@@ -3643,8 +3651,7 @@ class AIController:
                         market_data_dict = xai_features_row
                         
                         self._is_explaining = True
-                        top_expl = self.explainer.explain_decision(strategic_signal, market_data_dict, top_n=8,
-                                                                   position_context=self._current_position_context())
+                        top_expl = self.explainer.explain_decision(strategic_signal, market_data_dict, top_n=8)
                         self._is_explaining = False
                         
                         strategic_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
@@ -3696,8 +3703,7 @@ class AIController:
                  # [XAI FIX] Explica Rejeio de Risco
                 try:
                     if self.explainer:
-                        top_expl = self.explainer.explain_decision(final_rejection, latest_row,
-                                                               position_context=self._current_position_context())
+                        top_expl = self.explainer.explain_decision(final_rejection, latest_row)
                         final_rejection.explanation['main_contributors'] = top_expl.get('main_contributors')
                         if 'narrative' in top_expl:
                              final_rejection.explanation['narrative'] = top_expl['narrative']
@@ -3706,16 +3712,11 @@ class AIController:
 
                 return final_rejection
 
-            # [JOURNAL] Regime detectado no momento da decisão, gravado no Trade Journal quando a ordem executa
-            modulated_signal.explanation['market_regime'] = current_regime_str
-            modulated_signal.explanation['regime_confidence'] = float(latest_row.get('regime_confidence', 0.5))
-
             # XAI: anexa principais features quando disponvel
             try:
                 # [MELHORIA] Explica qualquer deciso, inclusive HOLD, se o explainer estiver ativo
                 if self.explainer and modulated_signal:
-                    top_expl = self.explainer.explain_decision(modulated_signal, latest_row,
-                                                               position_context=self._current_position_context())
+                    top_expl = self.explainer.explain_decision(modulated_signal, latest_row)
                     modulated_signal.explanation['main_contributors'] = top_expl.get('main_contributors')
                     modulated_signal.explanation['xai_mode'] = top_expl.get('mode', 'full')
                     

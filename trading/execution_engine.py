@@ -59,8 +59,6 @@ class ExecutionOrder:
         
         # [NOVO] Flag para ordens que visam apenas reduzir a posição (Safety)
         self.reduce_only: bool = False 
-        # executedQty/cumQuote já vistos por ordem filha (fatias TWAP reportam valores próprios)
-        self._child_fills: Dict[str, tuple] = {}
         
         logger.info(f"🆕 [EXEC] Nova meta-ordem criada: {self.id} (Símbolo: {self.signal.symbol}, Ação: {self.signal.action.value}, Estratégia: {self.strategy}, Alavancagem: {self.signal.leverage:.2f}x).")
         
@@ -84,30 +82,18 @@ class ExecutionOrder:
             current_order_executed_qty = float(fill_data.get('executedQty', 0.0))
             current_order_cum_quote_qty = float(fill_data.get('cumQuote', 0.0))
             order_status_str = fill_data.get('status', 'NEW')
-
-            # Cada ordem filha (fatia TWAP, limite, mercado) reporta executedQty/cumQuote PRÓPRIOS.
-            # Acumula por filha para não confundir o total da meta-ordem com o da fatia atual.
-            child_id = str(fill_data.get('orderId') or fill_data.get('clientOrderId') or self.id)
-            prev_child_qty, prev_child_quote = self._child_fills.get(child_id, (0.0, 0.0))
-            newly_filled_qty = current_order_executed_qty - prev_child_qty
-            newly_filled_quote = current_order_cum_quote_qty - prev_child_quote
-
+            
+            newly_filled_qty = current_order_executed_qty - self.filled_quantity
+            
             if newly_filled_qty <= 1e-9 and OrderStatus(order_status_str) == self.status:
                 return None # Nenhuma atualização necessária
 
-            self._child_fills[child_id] = (current_order_executed_qty, current_order_cum_quote_qty)
-            total_qty = sum(q for q, _ in self._child_fills.values())
-            total_quote = sum(v for _, v in self._child_fills.values())
-
-            if newly_filled_qty > 1e-9 and newly_filled_quote > 0:
-                current_trade_price = newly_filled_quote / newly_filled_qty
-            elif current_order_executed_qty > 0 and current_order_cum_quote_qty > 0:
+            current_trade_price = 0.0
+            if current_order_executed_qty > 0:
                 current_trade_price = current_order_cum_quote_qty / current_order_executed_qty
-            else:
-                current_trade_price = float(fill_data.get('avgPrice', 0.0) or 0.0)
 
-            self.filled_quantity = total_qty
-            self.avg_fill_price = total_quote / total_qty if total_qty > 0 and total_quote > 0 else current_trade_price
+            self.filled_quantity = current_order_executed_qty
+            self.avg_fill_price = current_trade_price
 
             logger.info(f"✅ [EXEC] Preenchimento para meta-ordem {self.id}: {newly_filled_qty:.4f} {self.signal.symbol} @ {current_trade_price:.2f}.")
 
@@ -143,20 +129,7 @@ class ExecutionOrder:
         except Exception as e:
             logger.error(f"❌ [ERRO EXEC] Erro ao atualizar meta-ordem {self.id} com fill data: {e}. Data: {fill_data}", exc_info=True)
             self.status = OrderStatus.REJECTED
-            return None
-
-    def journal_context(self) -> Dict[str, Any]:
-        """Contexto da decisão que originou esta ordem, anexado a cada trade enviado ao Trade Journal."""
-        return {
-            "trade_type": "EXIT" if self.reduce_only or self.signal.action == Action.CLOSE else "ENTRY",
-            "strategy": self.strategy,
-            "reduce_only": self.reduce_only,
-            "confidence": self.signal.confidence,
-            "position_size_pct": self.signal.position_size_pct,
-            "stop_loss": self.signal.stop_loss,
-            "take_profit": self.signal.take_profit,
-            "signal_explanation": self.signal.explanation or {},
-        }
+            return None 
 
 
 class ExecutionEngine:
@@ -215,7 +188,6 @@ class ExecutionEngine:
         # [PROFIT SHIELD v2.0] Controle de proteção de lucro e realização parcial
         self._partial_realizations: Dict[str, bool] = {} # symbol → True se já realizou parcial
         self._breakeven_activated: Dict[str, bool] = {}  # symbol → True se BE está ativo
-        self._bracket_symbols: Set[str] = set()  # símbolos com bracket SL/TP/Trailing gerenciado
 
         # [RISK GATE] Referência opcional ao RiskManager para gates de risco intra-TWAP
         # Injetada externamente via set_risk_manager() para evitar dependência circular.
@@ -501,12 +473,6 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"❌ [LIMIT TIMEOUT] Erro ao cancelar/re-executar {order.id}: {e}", exc_info=True)
 
-    def _record_trade(self, order: ExecutionOrder, trade_log_data: Dict[str, Any]):
-        """Publica o trade na UI (dados planos) e envia ao Trade Journal junto com a explicação do sinal."""
-        self.system_state["recent_trades"].append(trade_log_data)
-        if self.trade_log_callback:
-            self.trade_log_callback({**trade_log_data, **order.journal_context()})
-
     async def submit_order(self, signal: Signal):
         """
         Submete um novo sinal de trading para execução.
@@ -695,7 +661,6 @@ class ExecutionEngine:
         self._stop_monitor_tick += 1
         try:
             positions_copy = list(self.portfolio.positions.items())
-            await self._cleanup_closed_brackets({s for s, p in positions_copy if p.quantity != 0})
 
             for symbol, position in positions_copy:
                 if position.quantity == 0:
@@ -736,10 +701,10 @@ class ExecutionEngine:
                     # part of what a mirrored policy was approved on.
                     await self._apply_profit_protection_logic(symbol, position)
 
-                # Só o Stop Loss fixo conta como proteção: um trailing ainda não armado não limita a perda
+                # Verifica se já existe alguma ordem de proteção (trailing stop OU stop market)
                 open_orders = await self.connector.get_open_orders(symbol)
                 has_stop = any(
-                    o.get('type') in ('STOP_MARKET', 'STOP')
+                    o.get('type') in ('TRAILING_STOP_MARKET', 'STOP_MARKET', 'STOP')
                     for o in (open_orders or [])
                 )
 
@@ -769,8 +734,9 @@ class ExecutionEngine:
                             if close_result and close_result.get('orderId'):
                                 logger.warning(f"[MONITOR] ✅ Stop software executado: {symbol} fechado @ market. OrderId={close_result.get('orderId')}")
                                 self._software_stops.pop(symbol, None)
-                        # Stop por software é camada EXTRA: só funciona com o bot rodando, então nunca
-                        # substitui o Stop Loss na exchange (que protege mesmo se o processo cair).
+                        else:
+                            # Stop ainda não disparado → trata como proteção ativa
+                            has_stop = True
 
                 if not has_stop:
                     logger.warning(
@@ -848,16 +814,14 @@ class ExecutionEngine:
             
             # --- FASE 1: BREAK-EVEN (ROI > 2%) ---
             if roi_display >= 2.0 and not self._breakeven_activated.get(symbol):
-                # Move o stop para a entrada + folga de taxas (~ida e volta taker). Só ativa se o preço já
-                # estiver além desse nível; senão o stop dispararia na hora (ex.: ROI 2% com 10x = preço +0.2%).
-                fee_buffer = 0.001
+                # Move o stop para o preço de entrada + 0.5% de "folga" para taxas
+                fee_buffer = 0.005 # 0.5%
                 be_price = position.entry_price * (1 + (direction * fee_buffer))
-                if (direction > 0 and mark_price > be_price) or (direction < 0 and mark_price < be_price):
-                    current_sw_stop = self._software_stops.get(symbol)
-                    if current_sw_stop is None or (direction > 0 and be_price > current_sw_stop) or (direction < 0 and be_price < current_sw_stop):
-                        self._software_stops[symbol] = be_price
-                    self._breakeven_activated[symbol] = True
-                    logger.info(f"🛡️ [PROFIT SHIELD] {symbol} atingiu {roi_display:.2f}% ROI. BREAK-EVEN ATIVADO @ {be_price:.2f}")
+                
+                self._software_stops[symbol] = be_price
+                self._breakeven_activated[symbol] = True
+                
+                logger.info(f"🛡️ [PROFIT SHIELD] {symbol} atingiu {roi_display:.2f}% ROI. BREAK-EVEN ATIVADO @ {be_price:.2f}")
 
             # --- FASE 2: REALIZAÇÃO PARCIAL 50% (ROI > 4%) ---
             if roi_display >= 4.0 and not self._partial_realizations.get(symbol):
@@ -1137,8 +1101,12 @@ class ExecutionEngine:
             "client_order_id": order.id
         }
         
-        # Exibe na UI e registra no Trade Journal
-        self._record_trade(order, trade_log_data)
+        # Adiciona ao estado do sistema para exibição na UI
+        self.system_state["recent_trades"].append(trade_log_data)
+        
+        # Chama o callback para salvar o trade em arquivo
+        if self.trade_log_callback:
+            self.trade_log_callback(trade_log_data)
 
         # [TRAILING STOP] Em Paper Trading, não devemos colocar ordens reais na Binance.
         pass
@@ -1195,7 +1163,8 @@ class ExecutionEngine:
                     "order_id": result.get('orderId', order.id),
                     "client_order_id": result.get('clientOrderId', order.id)
                 }
-                self._record_trade(order, trade_log_data)
+                self.system_state["recent_trades"].append(trade_log_data)
+                self.trade_log_callback(trade_log_data)
             
             # Se não preencheu imediatamente, tenta consultar o status algumas vezes (polling)
             if order.status != OrderStatus.FILLED:
@@ -1353,7 +1322,8 @@ class ExecutionEngine:
                     "order_id": result.get('orderId', order.id),
                     "client_order_id": result.get('clientOrderId', order.id)
                 }
-                self._record_trade(order, trade_log_data)
+                self.system_state["recent_trades"].append(trade_log_data)
+                self.trade_log_callback(trade_log_data)
             # <<-- FIM DA CORREÇÃO -->>
     
             if order.status == OrderStatus.FILLED:
@@ -1361,8 +1331,21 @@ class ExecutionEngine:
                 if new_trade:
                     # [BUG FIX] Atualiza o Portfolio com o trade real
                     self.portfolio.update_from_trade(new_trade)
-                    # [SAFETY] Entrada → bracket SL/TP/Trailing; saída total → cancela proteções restantes
-                    await self._handle_protections_after_fill(order, new_trade)
+                    # [SAFETY] Hard Stop imediato
+                    sl_pct = order.signal.stop_loss if (order.signal.stop_loss is not None and order.signal.stop_loss > 0) else self.config.DEFAULT_STOP_LOSS_PCT
+                    if sl_pct > 0:
+                        await self._place_initial_hard_stop(new_trade, sl_pct)
+                    # [SAFETY] Take Profit
+                    tp_pct = order.signal.take_profit if (order.signal.take_profit is not None and order.signal.take_profit > 0) else self.config.DEFAULT_TAKE_PROFIT_PCT
+                    if tp_pct > 0:
+                        await self._place_initial_take_profit(new_trade, tp_pct)
+                    # [BUG FIX] Trailing Stop imediato para Limit Orders
+                    await self._place_trailing_stop(
+                        symbol=new_trade.symbol,
+                        side=new_trade.side,
+                        quantity=abs(new_trade.quantity),
+                        stop_loss_pct=sl_pct
+                    )
             elif order.status == OrderStatus.PARTIALLY_FILLED:
                 logger.info(f"⏳ [LIVE] Ordem limite {result.get('orderId')} para {order.id} PARCIALMENTE PREENCHIDA.")
                 # Monitor loop (10s) cobre o fill restante; proteções serão colocadas quando FILLED.
@@ -1539,14 +1522,41 @@ class ExecutionEngine:
                                 "order_id": result.get('orderId', order.id),
                                 "client_order_id": result.get('clientOrderId', order.id)
                             }
-                            self._record_trade(order, trade_log_data)
+                            self.system_state["recent_trades"].append(trade_log_data)
+                            self.trade_log_callback(trade_log_data)
                         
                         # Atualiza o Portfolio com o trade real
                         self.portfolio.update_from_trade(new_trade)
                         
-                        # [SAFETY] Recoloca o bracket SL/TP/Trailing da posição agregada (cancela o anterior)
+                        # [SAFETY] Coloca/Atualiza proteções na Binance para a posição atualizada
+                        sl_pct = order.signal.stop_loss if (order.signal.stop_loss is not None and order.signal.stop_loss > 0) else self.config.DEFAULT_STOP_LOSS_PCT
+                        tp_pct = order.signal.take_profit if (order.signal.take_profit is not None and order.signal.take_profit > 0) else self.config.DEFAULT_TAKE_PROFIT_PCT
+
+                        # [CONFIDENCE-BASED TRAILING] Ajusta callback do trailing stop pela confiança do sinal.
+                        # Alta confiança → trailing mais largo (trade respira mais, captura mais upside)
+                        # Baixa confiança → trailing mais apertado (protege capital mais rápido)
+                        # Fórmula: callback = sl_pct × (0.5 + confiança × 1.0), clampado em [0.5×sl, 2×sl]
+                        confidence = float(order.signal.confidence or 0.60)
+                        confidence_factor = 0.5 + confidence * 1.0  # range [0.5, 1.5] para conf [0.0, 1.0]
+                        trailing_sl_pct = float(np.clip(sl_pct * confidence_factor, sl_pct * 0.5, sl_pct * 2.0))
+
+                        logger.info(
+                            f"🎯 [SAFETY] Proteções para {new_trade.symbol}: "
+                            f"SL={sl_pct:.1%} | TP={tp_pct:.1%} | "
+                            f"Trailing={trailing_sl_pct:.1%} (conf={confidence:.0%})"
+                        )
+
+                        # Coloca proteções na exchange: Hard Stop + TP + Trailing
                         try:
-                            await self._handle_protections_after_fill(order, new_trade)
+                            await self._place_initial_hard_stop(new_trade, sl_pct)
+                            if tp_pct > 0:
+                                await self._place_initial_take_profit(new_trade, tp_pct)
+                            await self._place_trailing_stop(
+                                symbol=new_trade.symbol,
+                                side=new_trade.side,
+                                quantity=abs(self.portfolio.get_position_quantity(new_trade.symbol)),
+                                stop_loss_pct=trailing_sl_pct  # trailing usa callback dinâmico
+                            )
                         except Exception as protect_err:
                             logger.warning(f"⚠️ [TWAP SAFETY] Erro ao colocar proteções para fatia: {protect_err}")
                     # <<-- FIM DA CORREÇÃO -->>
@@ -1598,8 +1608,24 @@ class ExecutionEngine:
             else:
                 logger.warning(f"⚠️ [LIVE] TWAP {order.id} nao preenchida completamente. Quantidade faltante: {order.total_quantity - order.filled_quantity:.4f}.")
 
-        # Portfólio e bracket de proteção já são atualizados a cada fatia preenchida
-        # (repetir aqui contaria a última fatia em dobro e duplicaria as ordens de proteção).
+        # [BUG FIX] TWAP nao colocava protecoes. Agora coloca Hard Stop + Trailing Stop ao concluir.
+        if order.status == OrderStatus.FILLED and order.trades:
+            last_trade = order.trades[-1]
+            # Atualiza portfolio com o trade TWAP consolidado
+            self.portfolio.update_from_trade(last_trade)
+            sl_pct = order.signal.stop_loss if order.signal.stop_loss > 0 else self.config.DEFAULT_STOP_LOSS_PCT
+            if sl_pct > 0:
+                await self._place_initial_hard_stop(last_trade, sl_pct)
+            tp_pct = order.signal.take_profit if order.signal.take_profit > 0 else self.config.DEFAULT_TAKE_PROFIT_PCT
+            if tp_pct > 0:
+                await self._place_initial_take_profit(last_trade, tp_pct)
+            await self._place_trailing_stop(
+                symbol=last_trade.symbol,
+                side=last_trade.side,
+                quantity=abs(order.filled_quantity),
+                stop_loss_pct=sl_pct
+            )
+            logger.info(f"[TWAP] Protecoes colocadas para TWAP {order.id}: Hard Stop + TP + Trailing Stop.")
 
         # [TWAP PERSISTENCE] Limpa estado após conclusão (sucesso ou cancelamento completo)
         self._clear_twap_state()
@@ -1636,154 +1662,151 @@ class ExecutionEngine:
             # Em caso de erro, assume que pode haver posição (seguro)
             return True
 
-    @staticmethod
-    def _resolve_pct(value: Optional[float], default: float) -> float:
-        """Percentual do sinal em fração (0.03 = 3%) ou o default da config quando ausente/inválido."""
-        if value is None or not (0 < value < 1):
-            return float(default)
-        return float(value)
-
-    async def _handle_protections_after_fill(self, order: ExecutionOrder, trade: Trade):
+    async def _place_trailing_stop(self, symbol: str, side: OrderSide, quantity: float, stop_loss_pct: Optional[float] = None):
         """
-        Após um fill real: uma ENTRADA recebe o bracket SL/TP/Trailing; uma SAÍDA que zera a
-        posição cancela as proteções restantes (ordens órfãs poderiam fechar a próxima posição).
-        """
-        symbol = order.signal.symbol
-        if order.reduce_only or order.signal.action == Action.CLOSE:
-            if await self.connector.has_open_position(symbol) is False:
-                await self._clear_protections(symbol)
-            return
-        await self._place_protection_bracket(order, trade)
-
-    async def _place_protection_bracket(self, order: ExecutionOrder, trade: Trade):
-        """
-        Bracket de proteção de uma posição aberta (tudo server-side via Algo Order API):
-          1. Stop Loss   — entrada ∓ SL%, closePosition: limita a perda máxima (-1R).
-          2. Take Profit — entrada ± TP%, closePosition: alvo final do trade.
-          3. Trailing    — arma em +1R (entrada ± SL%, no máximo metade do TP) e segue o melhor
-                           preço com recuo de SL% × (0.3 + 0.4 × confiança). Depois de armado trava
-                           ~0.3–0.7R de lucro no pior caso e deixa o trade vencedor correr até o TP.
-        As proteções anteriores do símbolo são canceladas antes, para não acumular duplicatas.
-        """
-        signal = order.signal
-        symbol = signal.symbol
-        direction = 1 if signal.action == Action.BUY else -1
-
-        # Posição agregada do portfólio (correta para TWAP e fills parciais) quando o lado confere
-        position = self.portfolio.positions.get(symbol)
-        if position and position.entry_price > 0 and position.quantity * direction > 0:
-            entry_price, quantity = position.entry_price, abs(position.quantity)
-        else:
-            entry_price, quantity = trade.executed_price, abs(trade.quantity)
-
-        sl_pct = self._resolve_pct(signal.stop_loss, self.config.DEFAULT_STOP_LOSS_PCT)
-        tp_pct = self._resolve_pct(signal.take_profit, self.config.DEFAULT_TAKE_PROFIT_PCT)
-        confidence = float(np.clip(signal.confidence or 0.6, 0.0, 1.0))
-        activation_pct = min(sl_pct, tp_pct * 0.5)
-        callback_pct = sl_pct * (0.3 + 0.4 * confidence)
-
-        exit_side = "SELL" if direction > 0 else "BUY"
-        stop_price = entry_price * (1 - direction * sl_pct)
-        take_profit_price = entry_price * (1 + direction * tp_pct)
-        activation_price = entry_price * (1 + direction * activation_pct)
-
-        logger.info(
-            f"🎯 [BRACKET] {symbol} {'LONG' if direction > 0 else 'SHORT'} {quantity} @ {entry_price:.2f} | "
-            f"SL {stop_price:.2f} ({sl_pct:.2%}) | TP {take_profit_price:.2f} ({tp_pct:.2%}) | "
-            f"Trailing arma em {activation_price:.2f} ({activation_pct:.2%}) com recuo {callback_pct:.2%} (conf {confidence:.0%})"
-        )
-
-        await self._clear_protections(symbol)
-        self._bracket_symbols.add(symbol)
-
-        if not await self.connector.place_stop_loss_order(symbol, exit_side, quantity, stop_price):
-            # Sem stop na exchange: o monitor fecha a posição a mercado se o preço cruzar este nível
-            self._software_stops[symbol] = stop_price
-            logger.critical(f"🚨 [BRACKET] Stop Loss rejeitado para {symbol}! Stop por software ativo @ {stop_price:.2f}.")
-
-        if not await self.connector.place_take_profit_order(symbol, exit_side, quantity, take_profit_price):
-            logger.warning(f"⚠️ [BRACKET] Take Profit não foi colocado para {symbol}.")
-
-        position_side = OrderSide.BUY if direction > 0 else OrderSide.SELL
-        if not await self._place_trailing_stop(symbol, position_side, quantity, callback_pct, activation_price):
-            logger.warning(f"⚠️ [BRACKET] Trailing Stop não foi colocado para {symbol} (SL/TP seguem ativos).")
-
-        self.system_state["command_feedback"] = (
-            f"Bracket {symbol}: SL {stop_price:.2f} | TP {take_profit_price:.2f} | "
-            f"Trailing {callback_pct:.2%} após {activation_price:.2f}"
-        )
-
-    async def _clear_protections(self, symbol: str):
-        """Cancela SL/TP/Trailing abertos do símbolo e zera o estado local de proteção."""
-        cancelled = await self.connector.cancel_all_algo_orders(symbol)
-        if cancelled:
-            logger.info(f"🧹 [PROTEÇÃO] {cancelled} ordem(ns) condicional(is) anterior(es) cancelada(s) para {symbol}.")
-        for state in (self._software_stops, self._breakeven_activated, self._partial_realizations, self._stop_fail_count):
-            state.pop(symbol, None)
-        self._bracket_symbols.discard(symbol)
-
-    async def _cleanup_closed_brackets(self, open_symbols: Set[str]):
-        """Remove proteções órfãs de posições encerradas fora do bot (SL/TP/Trailing disparado, liquidação, manual)."""
-        for symbol in self._bracket_symbols - open_symbols:
-            if await self.connector.has_open_position(symbol) is False:
-                logger.info(f"🧹 [PROTEÇÃO] Posição em {symbol} encerrada. Cancelando proteções restantes.")
-                await self._clear_protections(symbol)
-        self._bracket_symbols.update(open_symbols)
-
-    async def _place_emergency_stop(self, symbol: str, position: Position):
-        """Stop Loss fixo para posição sem stop na exchange: nível da entrada, ou do preço atual se a entrada já ficou para trás."""
-        mark_price = position.mark_price
-        if mark_price <= 0:
-            ticker = await self.connector.get_ticker_price(symbol)
-            mark_price = float(ticker.get('price', 0)) if ticker else 0.0
-        if mark_price <= 0 or position.entry_price <= 0:
-            return None
-
-        direction = 1 if position.quantity > 0 else -1
-        sl_pct = self.config.DEFAULT_STOP_LOSS_PCT
-        stop_price = position.entry_price * (1 - direction * sl_pct)
-        if (direction > 0 and stop_price >= mark_price) or (direction < 0 and stop_price <= mark_price):
-            logger.warning(f"⚠️ [MONITOR] {symbol} já passou do stop da entrada ({stop_price:.2f}). Stop calculado a partir do preço atual.")
-            stop_price = mark_price * (1 - direction * sl_pct)
-
-        exit_side = "SELL" if direction > 0 else "BUY"
-        return await self.connector.place_stop_loss_order(symbol, exit_side, abs(position.quantity), stop_price)
-
-    async def _place_trailing_stop(self, symbol: str, side: OrderSide, quantity: float,
-                                   stop_loss_pct: Optional[float] = None, activation_price: Optional[float] = None):
-        """
-        Coloca um Trailing Stop real na exchange.
-
+        Coloca uma ordem de trailing stop na exchange para proteger uma posição.
+        
         Args:
             symbol: Par de trading
-            side: Lado da POSIÇÃO (OrderSide.BUY para Long, OrderSide.SELL para Short); a ordem sai no lado oposto.
+            side: Lado da POSIÇÃO (OrderSide.BUY para Long, OrderSide.SELL para Short).
+                  O trailing stop será colocado no lado OPOSTO.
             quantity: Quantidade da posição (em valor absoluto)
-            stop_loss_pct: Recuo do trailing em fração (0.01 = 1%). Se None, usa DEFAULT_STOP_LOSS_PCT.
-            activation_price: Preço que arma o trailing. None arma imediatamente.
+            stop_loss_pct: Percentual de callback (e.g., 0.01 para 1%). Se None, usa config.
         """
         try:
-            callback_rate = abs(stop_loss_pct or self.config.DEFAULT_STOP_LOSS_PCT) * 100
-            trailing_side = "SELL" if side == OrderSide.BUY else "BUY"
-
+            # Calcula o callback rate
+            sl_pct = stop_loss_pct or self.config.DEFAULT_STOP_LOSS_PCT
+            callback_rate = abs(sl_pct) * 100
+            
+            # O lado do trailing stop é o oposto da posição
+            if side == OrderSide.BUY:
+                trailing_side = "SELL"
+            else:
+                trailing_side = "BUY"
+            
+            # Obter precisão do símbolo para quantity
             symbol_info = await self._get_cached_symbol_info(symbol)
             qty_precision = int(symbol_info['quantityPrecision']) if symbol_info else 3
             final_qty = round(quantity, qty_precision)
 
+            logger.info(f"🎯 [EXEC] Colocando Trailing Stop para {symbol}...")
+            logger.info(f"   ├─ Posição: {side.value} {quantity:.6f} -> Ajustado: {final_qty}")
+            logger.info(f"   └─ Trailing Stop: {trailing_side} @ {callback_rate:.1f}% callback")
+            
             result = await self.connector.place_trailing_stop_order(
                 symbol=symbol,
                 side=trailing_side,
                 quantity=final_qty,
-                callback_rate=callback_rate,
-                activation_price=activation_price
+                callback_rate=callback_rate
             )
-            if result:
-                logger.info(f"[EXEC] Trailing Stop {result.get('orderId')} para {symbol}: {trailing_side} {final_qty} @ {callback_rate:.2f}% callback")
+
+            if result and result.get('software_stop'):
+                sw_price = result.get('stop_price', 0.0)
+                self._software_stops[symbol] = sw_price
+                logger.warning(f"[EXEC] 🛡️ Stop SOFTWARE ativado para {symbol} @ {sw_price:.2f} (API rejeitou todas as tentativas)")
+                self.system_state["command_feedback"] = f"Stop SOFTWARE {symbol} @ {sw_price:.2f}"
                 return result
-            logger.warning(f"[EXEC] Falha ao colocar Trailing Stop para {symbol}")
-            return None
+            elif result and result.get('orderId'):
+                order_id = result.get('orderId', 'N/A')
+                order_type = result.get('type', 'STOP')
+                logger.info(f"[EXEC] Stop {order_type} {order_id} colocado para {symbol} @ {callback_rate:.1f}%")
+                self.system_state["command_feedback"] = f"Stop ativo {symbol} @ {callback_rate:.1f}%"
+                return result
+            else:
+                logger.warning(f"[EXEC] Falha ao colocar stop para {symbol}")
+                return None
         except Exception as e:
             logger.error(f"[EXEC] Erro ao colocar Trailing Stop para {symbol}: {e}", exc_info=True)
             return None
+
+    async def _place_initial_hard_stop(self, trade: Trade, stop_loss_pct: float):
+        """
+        Coloca uma ordem de Stop Loss Fixo (Hard Stop) imediatamente após a entrada.
+        
+        Args:
+            trade: Objeto Trade com detalhes da execução
+            stop_loss_pct: Percentual do stop (ex: 0.02 para 2%)
+        """
+        try:
+            if not trade or stop_loss_pct <= 0:
+                return
+
+            # Calcula preço do stop
+            entry_price = trade.executed_price
+            symbol = trade.symbol
+            quantity = abs(trade.quantity)
+            
+            if trade.side == OrderSide.BUY:
+                stop_price = entry_price * (1.0 - stop_loss_pct)
+                sl_side = "SELL"
+            else: # SELL (Short)
+                stop_price = entry_price * (1.0 + stop_loss_pct)
+                sl_side = "BUY"
+                
+            logger.info(f"🛑 [SAFETY] Colocando Hard Stop para {symbol}...")
+            logger.info(f"   ├─ Entrada: {entry_price}")
+            logger.info(f"   └─ Stop Price: {stop_price:.2f} ({stop_loss_pct:.1%})")
+            
+            # Chama o conector
+            result = await self.connector.place_stop_loss_order(
+                symbol=symbol,
+                side=sl_side,
+                quantity=quantity,
+                stop_price=stop_price
+            )
+            
+            if result:
+                order_id = result.get('orderId', 'N/A')
+                logger.info(f"✅ [SAFETY] Hard Stop {order_id} ativado com sucesso!")
+                self.system_state["command_feedback"] = f"Hard Stop ativo para {symbol} @ {stop_price:.2f}"
+            else:
+                logger.critical(f"🚨 [PERIGO] Falha ao colocar Hard Stop para {symbol}! Posição desprotegida!")
+                self.system_state["command_feedback"] = f"PERIGO: Falha ao colocar Stop Loss para {symbol}!"
+                
+        except Exception as e:
+            logger.error(f"❌ [ERRO SAFETY] Erro crítico ao colocar Hard Stop: {e}", exc_info=True)
+
+    async def _place_initial_take_profit(self, trade: Trade, take_profit_pct: float):
+        """
+        Coloca uma ordem de Take Profit Automático imediatamente após a entrada.
+        """
+        try:
+            if not trade or take_profit_pct <= 0:
+                return
+
+            # Calcula preço do TP
+            entry_price = trade.executed_price
+            symbol = trade.symbol
+            quantity = abs(trade.quantity)
+            
+            if trade.side == OrderSide.BUY:
+                stop_price = entry_price * (1.0 + take_profit_pct)
+                tp_side = "SELL"
+            else: # SELL (Short)
+                stop_price = entry_price * (1.0 - take_profit_pct)
+                tp_side = "BUY"
+                
+            logger.info(f"🎯 [SAFETY] Colocando Take Profit para {symbol}...")
+            logger.info(f"   ├─ Entrada: {entry_price}")
+            logger.info(f"   └─ TP Price: {stop_price:.2f} (+{take_profit_pct:.1%})")
+            
+            # Chama o conector
+            result = await self.connector.place_take_profit_order(
+                symbol=symbol,
+                side=tp_side,
+                quantity=quantity,
+                stop_price=stop_price
+            )
+            
+            if result:
+                order_id = result.get('orderId', 'N/A')
+                logger.info(f"✅ [SAFETY] Take Profit {order_id} ativado com sucesso!")
+                self.system_state["command_feedback"] = f"Take Profit ativo para {symbol} @ {stop_price:.2f}"
+            else:
+                logger.warning(f"⚠️ [SAFETY] Falha ao colocar Take Profit para {symbol}.")
+                
+        except Exception as e:
+            logger.error(f"❌ [ERRO SAFETY] Erro ao colocar Take Profit: {e}", exc_info=True)
 
     async def reconcile_with_exchange(self):
         """
