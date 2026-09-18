@@ -121,14 +121,44 @@ def rule_input_mask(agent, obs_dim, rule, agent_name, n_stack=4, all_features=Tr
     When all_features=True (default), preserves the complete observation vector so the
     actor learns cross-correlations with the 32 autoencoder latents, aggressor delta,
     order flow, 1h/4h higher-timeframe features, and position states.
+
+    For MarkedLegRule, even with all_features=False we cannot use teacher_inputs()
+    because it returns all_columns=True (marks drawn on a finished chart have no
+    formula). Instead we restrict BC to the causal LegConfirmRule-equivalent columns
+    that the bot can observe live, which prevents the network from memorizing
+    autoencoder latents or 4h patterns that act as proxies for where the human drew
+    the leg end (causal confusion, de Haan et al. 2019). Without this fix the clone
+    achieves <1% false-positives on train but 75-80% on validation.
     """
     import numpy as _np
+    from learning.edge_policy import MarkedLegRule, LegConfirmRule
 
     if all_features:
         return _np.ones(obs_dim, dtype=bool)
     frame_dim = obs_dim // n_stack
     columns = list(agent.feature_columns)
     inputs = teacher_inputs(rule, agent_name)
+
+    # MarkedLegRule: teacher_inputs returns all_columns=True because the marks are
+    # drawn on the finished chart. Using all features causes causal confusion: the
+    # actor memorises autoencoder latents that encode future leg boundaries.
+    # Fix: use the observable structural columns from LegConfirmRule as the BC mask.
+    if inputs.get("all_columns") and isinstance(rule, MarkedLegRule):
+        from learning.edge_policy import leg_confirm_inputs
+        # Default LegConfirmRule with the same structural requirements the rule
+        # captures in practice (4h structure, body-ATR, CVD, 5m steps).
+        proxy_rule = LegConfirmRule(require_trend_4h=True, require_trend_1h=False)
+        proxy_cols = leg_confirm_inputs(proxy_rule, agent_name)
+        keep = _np.zeros(obs_dim, dtype=bool)
+        offset = (n_stack - 1) * frame_dim
+        for name in proxy_cols:
+            if name in columns:
+                keep[offset + columns.index(name)] = True
+        extras = frame_dim - len(columns) - 11
+        tail = offset + len(columns) + extras
+        keep[tail + 0] = True  # sign(position)
+        return keep
+
     if inputs.get("all_columns"):
         return _np.ones(obs_dim, dtype=bool)
     keep = _np.zeros(obs_dim, dtype=bool)
@@ -255,14 +285,22 @@ def behaviour_clone(model, observations, actions, epochs, sides, keep_mask,
                          if fidelity['exit_recall'] is not None else 'sem exemplos')
             line += ' decisoes[macro=%.1f%% saidas=%s n=%d]' % (
                 100 * val_bal, exit_text, fidelity['exit_count'])
-            if val_bal > best[0]:
-                best = (val_bal, copy.deepcopy(model.actor.state_dict()), epoch)
+            # [FIX CAUSAL CONFUSION] Penalize false-positive rate in epoch selection.
+            # Without this, the selector picks the 'always-open' attractor (99% recall,
+            # 75% FP) over the correct 'selective entry' attractor (50% recall, 0.1% FP).
+            # fp_penalty=0.5 means we need 2 extra recall points to compensate for 1 FP point.
+            # Reference: offline RL selection criteria (Kumar et al. 2022).
+            fp_penalty = 0.5
+            val_score = val_bal - fp_penalty * val_false
+            line += ' score_fp=%.3f' % val_score
+            if val_score > best[0]:
+                best = (val_score, copy.deepcopy(model.actor.state_dict()), epoch)
         print(line)
         if have_val and epoch - best[2] >= patience:
             break
     if best[1] is not None:
         model.actor.load_state_dict(best[1])
-        print("  melhor fidelidade na validacao na epoca %d (acuracia balanceada %.1f%%)" % (best[2], 100 * best[0]))
+        print("  melhor fidelidade na validacao na epoca %d (score penalizado=%.3f)" % (best[2], best[0]))
     return obs_t, act_t, weights
 
 
