@@ -181,6 +181,8 @@ def main() -> int:
 
         env_class = {"bull": BullTradingEnv, "bear": BearTradingEnv, "ranger": RangerTradingEnv}[agent]
         AIConfig.ENV_STOP_ATR_TIMEFRAME = run_contract.get("stop_atr_timeframe", "15m")
+        from trading.agent_mirror import apply_leverage_bounds
+        apply_leverage_bounds(run_contract)
         sample = pd.read_parquet(dataset).sort_index().iloc[-600:].ffill().fillna(0.0)
         if run_contract.get("training_frame_columns"):
             sample = sample[run_contract["training_frame_columns"]]
@@ -215,7 +217,7 @@ def main() -> int:
         "scaler_sha256": sha256(args.dest / scaler_name),
     }
     # The live mirror needs the stop scale and frame the model was trained on.
-    for key in ("stop_atr_timeframe", "training_frame_columns", "dataset"):
+    for key in ("stop_atr_timeframe", "leverage_bounds", "training_frame_columns", "dataset"):
         if key in run_contract:
             contract[key] = run_contract[key]
     (args.dest / ("%s_feature_contract.json" % agent)).write_text(json.dumps(contract, indent=2), encoding="utf-8")

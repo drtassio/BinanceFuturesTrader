@@ -410,8 +410,13 @@ class TrendFollowingEnv(gym.Env):
             # Solução: ruin mais tolerante + leverage cap para episódios longo (~3k steps)
             self.ruin_threshold = 0.15        # 15%: só mata com perda de 85% — episódios longos
             self.ruin_buffer_threshold = 0.60  # Penalidade progressiva abaixo de 60%
-            self._leverage_cap_hpo = min(self.trading_config.MAX_LEVERAGE_PER_TRADE, 3.0)
-            logger.debug("[ENV ELITE] Training mode: ruin_threshold=0.15, leverage_cap=3.0x")
+            # The ceiling of the agent's leverage action. It is the same number
+            # the sizing below clamps to (TRAINING_LEVERAGE_CAP), so the agent
+            # learns to use exactly the range it will be allowed to use, and the
+            # feature contract records it for replay.
+            self._leverage_cap_hpo = min(self.trading_config.MAX_LEVERAGE_PER_TRADE,
+                                         float(getattr(self.config, 'TRAINING_LEVERAGE_CAP', 3.0)))
+            logger.debug("[ENV ELITE] Training mode: ruin_threshold=0.15, leverage_cap=%.1fx", self._leverage_cap_hpo)
 
         # Limite de episÃƒÂ³dio: usar praticamente todo o dataset para aprender ciclos completos de tendÃƒÂªncia
         self.optimization_episode_ratio = 1.0

@@ -465,6 +465,10 @@ def main() -> int:
     (run_dir / "feature_contract.json").write_text(
         json.dumps({"feature_columns": list(agent.feature_columns),
                     "stop_atr_timeframe": AIConfig.ENV_STOP_ATR_TIMEFRAME,
+                    # The leverage range the agent learned in; replay and live
+                    # sizing must use the same one.
+                    "leverage_bounds": [float(TradingConfig.MIN_LEVERAGE_PER_TRADE),
+                                        float(min(TradingConfig.MAX_LEVERAGE_PER_TRADE, AIConfig.TRAINING_LEVERAGE_CAP))],
                     "training_frame_columns": list(df.columns),
                     "dataset": str(args.data)}, indent=2), encoding="utf-8")
     report = {

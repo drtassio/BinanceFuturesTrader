@@ -39,6 +39,22 @@ REPLAY_BARS = 3000
 PADDING = 3
 
 
+def apply_leverage_bounds(contract: dict) -> None:
+    """Replay with the leverage range the specialist was trained in.
+
+    The environment's leverage action spans MIN_LEVERAGE_PER_TRADE up to
+    TRAINING_LEVERAGE_CAP. Replaying under different settings would size the
+    same votes differently from the backtest that approved them. Contracts
+    written before the bounds were recorded were all trained in 1x..3x.
+    """
+    from config.settings import AIConfig, TradingConfig
+
+    low, high = contract.get("leverage_bounds", [1.0, 3.0])
+    TradingConfig.MIN_LEVERAGE_PER_TRADE = float(low)
+    TradingConfig.MAX_LEVERAGE_PER_TRADE = max(float(TradingConfig.MAX_LEVERAGE_PER_TRADE), float(high))
+    AIConfig.TRAINING_LEVERAGE_CAP = float(high)
+
+
 def load_specialist(agent_name: str, model_dir: Path):
     """The promoted specialist with the stop scale and frame it was trained on."""
     from cloud.train_agent import AGENTS
@@ -49,6 +65,7 @@ def load_specialist(agent_name: str, model_dir: Path):
     if not contract.get("training_frame_columns"):
         raise ValueError("contrato de %s sem training_frame_columns: modelo anterior ao espelho" % agent_name)
     AIConfig.ENV_STOP_ATR_TIMEFRAME = contract.get("stop_atr_timeframe", "15m")
+    apply_leverage_bounds(contract)
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True
     config.MODEL_DIR = str(model_dir)
