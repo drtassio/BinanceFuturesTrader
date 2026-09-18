@@ -118,6 +118,47 @@ STAIRCASE_BOX_BARS = 48      # 12h box
 STAIRCASE_BOX_GAP = 3        # the box ends before the steps themselves
 STRUCTURE_4H_BUFFER_ATR = 0.5
 BAR_4H = pd.Timedelta(hours=4)
+# Leg confirmation (scripts/research_5m_patterns.py, chosen on its train block):
+# LEG_STEP_ATR-sized 15m steps within LEG_STEP_WINDOW bars, and strong 5m steps
+# inside the latest 15m candles.
+LEG_STEP_ATR = 1.0
+LEG_STEP_WINDOW = 12
+STEP_5M_ATR = 1.0
+STEP_5M_WINDOW = 6          # the last six 5m candles, i.e. the last two 15m candles
+
+
+def add_inside_5m_features(df: pd.DataFrame, df5: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """What the 5m candles inside each 15m candle show, from closed 5m bars only.
+
+    The 15m bar labelled t closes together with the 5m bar labelled t+10min, so
+    each 5m value is re-stamped 10 minutes earlier and read on the 15m grid.
+    """
+    out = df.copy()
+    need = ("open", "high", "low", "close")
+    if df5 is None or len(df5) == 0 or not all(c in df5.columns for c in need):
+        return out, []
+    five = df5.sort_index()
+    five = five[~five.index.duplicated(keep="last")]
+    o, h, l, c = (five[k].astype(float) for k in need)
+    tr = np.maximum(h - l, np.maximum((h - c.shift()).abs(), (l - c.shift()).abs()))
+    atr5 = tr.rolling(14).mean().replace(0.0, np.nan)
+    body5 = (c - o) / atr5
+    inside = pd.DataFrame({
+        PREFIX + "steps5_up": (body5 >= STEP_5M_ATR).astype(float).rolling(STEP_5M_WINDOW).sum(),
+        PREFIX + "steps5_down": (body5 <= -STEP_5M_ATR).astype(float).rolling(STEP_5M_WINDOW).sum(),
+        PREFIX + "body5_last": body5,
+    })
+    inside.index = inside.index - pd.Timedelta(minutes=10)
+    index = out.index
+    lookup = inside
+    if index.tz is not None and lookup.index.tz is None:
+        lookup.index = lookup.index.tz_localize(index.tz)
+    elif index.tz is None and lookup.index.tz is not None:
+        lookup.index = lookup.index.tz_convert(None)
+    aligned = lookup.reindex(index)
+    for col in aligned.columns:
+        out[col] = _clean(aligned[col])
+    return out, list(aligned.columns)
 
 
 def add_staircase_structure(df: pd.DataFrame, atr: pd.Series) -> Dict[str, pd.Series]:
@@ -156,7 +197,20 @@ def add_staircase_structure(df: pd.DataFrame, atr: pd.Series) -> Dict[str, pd.Se
     support = (four["low"].rolling(2).min() - STRUCTURE_4H_BUFFER_ATR * atr_4h).reindex(df.index, method="ffill")
     resistance = (four["high"].rolling(2).max() + STRUCTURE_4H_BUFFER_ATR * atr_4h).reindex(df.index, method="ffill")
 
+    # A leg rarely climbs in consecutive large candles: steps alternate with
+    # small pause candles. Count the steps of LEG_STEP_ATR within the window.
+    leg_up = (body >= LEG_STEP_ATR).astype(float).rolling(LEG_STEP_WINDOW).sum()
+    leg_down = (body <= -LEG_STEP_ATR).astype(float).rolling(LEG_STEP_WINDOW).sum()
+    ema_fast = four["close"].ewm(span=20).mean()
+    ema_slow = four["close"].ewm(span=50).mean()
+    trend_4h = np.sign(ema_fast - ema_slow).reindex(df.index, method="ffill")
+
     return {
+        "leg_steps_up": leg_up,
+        "leg_steps_down": leg_down,
+        "breakout_up_48": (close - high.rolling(48).max().shift(1)) / atr,
+        "breakout_down_48": (close - low.rolling(48).min().shift(1)) / atr,
+        "trend_4h": trend_4h,
         "step_body_atr": body,
         "step_up_count": up_count.astype(float),
         "step_down_count": down_count.astype(float),
@@ -404,18 +458,25 @@ def add_regime_priors(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     return out, added
 
 
-def build_causal_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
-    """Apply the full causal treatment. Used by training and by the live bot."""
+def build_causal_features(df: pd.DataFrame, df5: pd.DataFrame = None) -> Tuple[pd.DataFrame, Dict[str, object]]:
+    """Apply the full causal treatment. Used by training and by the live bot.
+
+    df5: raw 5m candles (open/high/low/close) covering df, for the view from
+    inside each 15m candle. Training passes the 5m history, the live bot its 5m
+    window; without it those columns are simply absent.
+    """
     out, flow_aliases = normalize_flow_columns(df)
     out, shift_report = shift_higher_timeframes(out)
     out, trend_cols = add_trend_structure(out)
     out, tape_cols = add_tape_features(out)
+    out, inside_cols = add_inside_5m_features(out, df5)
     out, prior_cols = add_regime_priors(out)
     meta: Dict[str, object] = {
         "flow_aliases": flow_aliases,
         "higher_timeframe_shift": shift_report,
         "trend_features": trend_cols,
         "tape_features": tape_cols,
+        "inside_5m_features": inside_cols,
         "regime_priors": prior_cols,
     }
     return out, meta

@@ -1,0 +1,10 @@
+{
+  "symbol": "BTCUSDT",
+  "interval": "5m",
+  "requested_start": "2024-08-01T00:00:00Z",
+  "requested_end": "2026-09-18T12:00:00Z",
+  "flow_rows": 224209,
+  "funding_rows": 2336,
+  "flow_path": "data\\external_5m\\binance_usdm_btcusdt_5m_flow.parquet",
+  "funding_path": "data\\external_5m\\binance_usdm_btcusdt_funding.parquet"
+}

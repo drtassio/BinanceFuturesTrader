@@ -207,7 +207,8 @@ class FeatureEngineeringPipeline:
         # especialista seja reproduzivel em tempo real.
         try:
             from feature_engineering.causal_features import build_causal_features
-            featured_df_combined, _causal_meta = build_causal_features(featured_df_combined)
+            featured_df_combined, _causal_meta = build_causal_features(
+                featured_df_combined, df5=raw_df_dict.get("5m"))
             featured_df_combined = featured_df_combined.ffill().fillna(0.0)
             logger.info(
                 "[CAUSAL] HTF deslocado para candles fechados; +%d features de tendencia, +%d de tape.",

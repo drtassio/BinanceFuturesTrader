@@ -53,6 +53,7 @@ def main() -> None:
     parser.add_argument("--base", type=Path, default=ROOT / "data" / "featured_data.parquet")
     parser.add_argument("--flow", type=Path, default=ROOT / "data" / "external" / "binance_usdm_btcusdt_15m_flow.parquet")
     parser.add_argument("--funding", type=Path, default=ROOT / "data" / "external" / "binance_usdm_btcusdt_funding.parquet")
+    parser.add_argument("--five-minute", type=Path, default=ROOT / "data" / "external_5m" / "binance_usdm_btcusdt_5m_flow.parquet")
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "featured_data_causal.parquet")
     args = parser.parse_args()
 
@@ -80,7 +81,11 @@ def main() -> None:
     df = df.drop(columns=legacy)
     print("colunas legadas sem equivalente ao vivo removidas: %d" % len(legacy))
 
-    df, meta = build_causal_features(df)
+    five = None
+    if args.five_minute.exists():
+        # Same 5m candles the live bot fetches, for the view inside each 15m bar.
+        five = pd.read_parquet(args.five_minute).sort_index()
+    df, meta = build_causal_features(df, df5=five)
     meta["dropped_legacy_columns"] = legacy
 
     # The higher timeframe shift leaves genuine warm-up NaNs at the head, and

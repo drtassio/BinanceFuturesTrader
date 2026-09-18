@@ -1,0 +1,11 @@
+{
+  "registered_at": "2026-09-18T15:05:00Z",
+  "agents": ["bull", "bear"],
+  "teacher": "models_ai/<agent>_leg_confirm_rule.json: LegConfirmRule, 15m primary with the 5m candles inside (3 steps >= 1 ATR within 12 bars, 12h breakout, body and flow on its side, >= 2 strong 5m candles in the last two 15m bars), exit on the 4h structure",
+  "data": "data/featured_data_causal_leg5m.parquet (2024-09-18 .. 2026-09-18), same split and embargo as the earlier runs",
+  "env_stop_atr_timeframe": "1h (unchanged from the earlier registration)",
+  "selection": "cloud/train_guided.py picks on validation; holdout read once",
+  "approval": "scripts/approve_agent_mirror.py criteria unchanged, with a minimum of 10 trades per block: the teacher trades about once a week per side and makes 12-18 trades in each 3.6-month block",
+  "disclosure": "the teacher's validation and holdout results in the environment were displayed before this registration (bull +6.2%/+20.5%, bear +6.6%/-7.1%); the rule itself was selected on train only",
+  "code_commit": "the commit that adds this file"
+}

@@ -241,6 +241,60 @@ def staircase_action(row, position: float, agent: str, rule: "StaircaseRule") ->
 
 
 @dataclass(frozen=True)
+class LegConfirmRule:
+    """Enter a leg once it is confirmed on 15m AND accelerating inside on 5m.
+
+    Flat, the specialist waits for: at least min_steps 15m candles with a body of
+    1 ATR or more within the last 12 (steps with pauses between them), the close
+    past the prior 12h extreme, the current candle and the aggressive flow on its
+    side, at least min_steps_5m strong 5m candles inside the last two 15m
+    candles, and (require_trend_4h) the 4h trend agreeing. In the trade it rides
+    the 4h structure and leaves when it breaks. Nothing is anticipated.
+
+    Chosen on the TRAIN block of scripts/research_5m_patterns.py (282 variants):
+    train 86 trades PF 1.29; validation 24 trades PF 2.06; holdout 24 trades PF
+    2.13. The same rule without the 5m confirmation had train PF 1.07.
+    """
+    kind: str = "leg_confirm"
+    min_steps: int = 3
+    min_steps_5m: int = 2
+    require_trend_4h: bool = True
+    sl_mult: float = 3.0
+    leverage: float = 3.0
+    vote: float = 0.8
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+def leg_confirm_inputs(rule: "LegConfirmRule", agent: str) -> tuple:
+    if SIDES[agent] == (1,):
+        cols = ("cz_leg_steps_up", "cz_breakout_up_48", "cz_step_body_atr", "cz_cvd_z_16",
+                "cz_steps5_up", "cz_struct_4h_long")
+    else:
+        cols = ("cz_leg_steps_down", "cz_breakout_down_48", "cz_step_body_atr", "cz_cvd_z_16",
+                "cz_steps5_down", "cz_struct_4h_short")
+    return cols + (("cz_trend_4h",) if rule.require_trend_4h else ())
+
+
+def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule") -> np.ndarray:
+    if len(SIDES[agent]) != 1:
+        raise ValueError("leg-confirm teacher is directional; %s trades both sides" % agent)
+    side = SIDES[agent][0]
+    values = [float(row.get(c, 0.0)) for c in leg_confirm_inputs(rule, agent)]
+    steps, breakout, body, cvd, steps5, structure = values[:6]
+    if int(np.sign(position)) == side:
+        vote = side * rule.vote if structure >= 0.0 else -side * rule.vote
+    else:
+        confirmed = (steps >= rule.min_steps and side * breakout > 0.0 and side * body > 0.0
+                     and side * cvd > 0.0 and steps5 >= rule.min_steps_5m)
+        if rule.require_trend_4h:
+            confirmed = confirmed and side * values[6] > 0.0
+        vote = side * rule.vote if confirmed else -side * rule.vote
+    return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
+@dataclass(frozen=True)
 class MarkedLegRule:
     """Replay the entries and exits marked on the chart (scripts/mark_legs.py).
 
@@ -291,6 +345,8 @@ def marked_leg_action(row, position: float, agent: str, rule: "MarkedLegRule") -
 
 def load_rule(saved: Dict[str, object]):
     """Teacher from its saved JSON 'rule' block."""
+    if saved.get("kind") == "leg_confirm":
+        return LegConfirmRule(**saved)
     if saved.get("kind") == "marked_legs":
         return MarkedLegRule(**saved)
     if saved.get("kind") == "staircase":
@@ -303,6 +359,8 @@ def load_rule(saved: Dict[str, object]):
 
 
 def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
+    if isinstance(rule, LegConfirmRule):
+        return leg_confirm_action(row, position, agent, rule)
     if isinstance(rule, MarkedLegRule):
         return marked_leg_action(row, position, agent, rule)
     if isinstance(rule, StaircaseRule):
@@ -316,6 +374,8 @@ def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
 
 def teacher_inputs(rule, agent: str) -> Dict[str, object]:
     """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
+    if isinstance(rule, LegConfirmRule):
+        return {"columns": leg_confirm_inputs(rule, agent), "prior_dir": False}
     if isinstance(rule, MarkedLegRule):
         # Marks drawn on the finished chart read no single column: the agent
         # must find them in its whole observation.
