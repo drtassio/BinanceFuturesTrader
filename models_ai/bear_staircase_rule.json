@@ -1,0 +1,5 @@
+{
+  "agent": "bear",
+  "rule": {"kind": "staircase", "min_steps": 2, "max_box_width": 8.0, "min_cvd": 0.0, "sl_mult": 3.0, "leverage": 3.0, "vote": 0.8},
+  "selected_on": "train block of scripts/label_staircase_examples.py (72-variant grid, PF on train)"
+}

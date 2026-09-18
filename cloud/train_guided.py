@@ -126,9 +126,12 @@ def rule_input_mask(agent, obs_dim, rule, agent_name, n_stack=4):
 
     frame_dim = obs_dim // n_stack
     columns = list(agent.feature_columns)
+    inputs = teacher_inputs(rule, agent_name)
+    if inputs.get("all_columns"):
+        # A teacher drawn on the finished chart has no known inputs to isolate.
+        return _np.ones(obs_dim, dtype=bool)
     keep = _np.zeros(obs_dim, dtype=bool)
     offset = (n_stack - 1) * frame_dim
-    inputs = teacher_inputs(rule, agent_name)
     for name in inputs["columns"]:
         if name not in columns:
             raise KeyError("observacao sem a entrada da professora: %s" % name)

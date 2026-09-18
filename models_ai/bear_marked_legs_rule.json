@@ -1,0 +1,5 @@
+{
+  "agent": "bear",
+  "rule": {"kind": "marked_legs", "labels_path": "data/teacher_leg_labels.parquet", "sl_mult": 3.0, "leverage": 3.0, "vote": 0.8},
+  "selected_on": "marks drawn on the finished chart by scripts/mark_legs.py; demonstrations, not a live rule"
+}

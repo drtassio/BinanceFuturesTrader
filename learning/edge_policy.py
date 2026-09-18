@@ -240,8 +240,59 @@ def staircase_action(row, position: float, agent: str, rule: "StaircaseRule") ->
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 
 
+@dataclass(frozen=True)
+class MarkedLegRule:
+    """Replay the entries and exits marked on the chart (scripts/mark_legs.py).
+
+    The marks come from the finished chart: each leg is known start to end, the
+    entry sits where the move was already confirmed and the exit where its end
+    was confirmed. They are demonstrations, not a rule the bot can evaluate live,
+    so the teacher reads the mark for the bar's timestamp and the agent has to
+    learn from its own observation where those marks fall.
+    """
+    kind: str = "marked_legs"
+    labels_path: str = "data/teacher_leg_labels.parquet"
+    sl_mult: float = 3.0
+    leverage: float = 3.0
+    vote: float = 0.8
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+_MARKS: Dict[str, object] = {}
+
+
+def _marked_position(rule: "MarkedLegRule", timestamp) -> int:
+    import pandas as pd
+    from pathlib import Path
+
+    marks = _MARKS.get(rule.labels_path)
+    if marks is None:
+        path = Path(rule.labels_path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[1] / path
+        frame = pd.read_parquet(path)
+        index = pd.to_datetime(frame.index)
+        marks = pd.Series(frame["hs_target_position"].to_numpy(), index=index.tz_localize(None) if index.tz else index)
+        _MARKS[rule.labels_path] = marks
+    stamp = pd.Timestamp(timestamp)
+    stamp = stamp.tz_convert(None) if stamp.tzinfo else stamp
+    return int(marks.get(stamp, 0))
+
+
+def marked_leg_action(row, position: float, agent: str, rule: "MarkedLegRule") -> np.ndarray:
+    if len(SIDES[agent]) != 1:
+        raise ValueError("marked-leg teacher is directional; %s trades both sides" % agent)
+    side = SIDES[agent][0]
+    wanted = _marked_position(rule, row.name) == side
+    return np.array([side * rule.vote if wanted else -side * rule.vote, rule.sl_mult, rule.leverage], dtype=np.float32)
+
+
 def load_rule(saved: Dict[str, object]):
     """Teacher from its saved JSON 'rule' block."""
+    if saved.get("kind") == "marked_legs":
+        return MarkedLegRule(**saved)
     if saved.get("kind") == "staircase":
         return StaircaseRule(**saved)
     if saved.get("kind") == "breakout":
@@ -252,6 +303,8 @@ def load_rule(saved: Dict[str, object]):
 
 
 def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
+    if isinstance(rule, MarkedLegRule):
+        return marked_leg_action(row, position, agent, rule)
     if isinstance(rule, StaircaseRule):
         return staircase_action(row, position, agent, rule)
     if isinstance(rule, BreakoutRule):
@@ -263,6 +316,10 @@ def teacher_action(row, position: float, agent: str, rule) -> np.ndarray:
 
 def teacher_inputs(rule, agent: str) -> Dict[str, object]:
     """Observation columns the teacher reads, and whether it reads tp_prior_dir."""
+    if isinstance(rule, MarkedLegRule):
+        # Marks drawn on the finished chart read no single column: the agent
+        # must find them in its whole observation.
+        return {"columns": (), "prior_dir": False, "all_columns": True}
     if isinstance(rule, StaircaseRule):
         return {"columns": staircase_inputs(rule, agent), "prior_dir": False}
     if isinstance(rule, BreakoutRule):

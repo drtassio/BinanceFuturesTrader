@@ -1,0 +1,15 @@
+{
+  "registered_at": "2026-09-18T12:10:00Z",
+  "agents": ["bull", "bear"],
+  "data": "data/featured_data_causal_2y.parquet (2024-09-18 .. 2026-09-18, last two years only, as the user asked)",
+  "split": "cloud/train_agent.split_chronological: 70% train, 15% validation, 15% holdout, 768-bar embargo",
+  "teachers": {
+    "marked_legs": "models_ai/<agent>_marked_legs_rule.json: the entries and exits scripts/mark_legs.py marks on the finished chart (786 legs). Demonstrations only; the agent learns from its own observation.",
+    "staircase": "models_ai/<agent>_staircase_rule.json: causal StaircaseRule (2+ steps >= 1.5 ATR out of a tight box, flow agrees, exit on 4h structure), for comparison."
+  },
+  "env_stop_atr_timeframe": "1h, chosen on the TRAIN block only (staircase teacher: bull +27.7% at 1h vs -1.6% at 15m and +21.5% at 4h; bear +27.1% at 1h, +28.3% at 15m, +17.2% at 4h)",
+  "selection": "cloud/train_guided.py picks the checkpoint on VALIDATION only; holdout read once",
+  "approval": "scripts/approve_agent_mirror.py criteria as committed (train net > 0; validation net > 0, PF >= 1.2, DD <= 15%; holdout PF >= 1.1, DD <= 15%, beats buy and hold, net > 0 or loss <= 5% in a >20% adverse market), with the minimum trade count per block at 20 for marked_legs agents and 10 for staircase agents, whose teacher trades about once a week per side",
+  "disclosure": "the staircase thresholds were chosen by training-block profit factor, but holdout numbers of that grid were displayed during research; the marked-leg teacher sees the finished chart and is an upper bound, not a live strategy",
+  "code_commit": "to be filled by the commit that adds this file"
+}
