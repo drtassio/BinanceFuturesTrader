@@ -54,13 +54,24 @@ class EarlyStoppingCallback(BaseCallback):
                 print("⚠️ [EarlyStoppingCallback] Não detectado uso por EvalCallback. O early stopping pode não funcionar corretamente.")
 
     def _on_step(self) -> bool:
-        """
-        O EvalCallback do SB3 chama on_step() do callback filho (callback_after_eval) logo após
-        cada avaliação. Antes este método sempre retornava True e o early stopping nunca disparava.
-        """
-        if self.parent is None or not hasattr(self.parent, 'last_mean_reward'):
+        """Chamado a cada passo. Não é usado aqui."""
+        # EvalCallback invokes callback_after_eval through BaseCallback.on_step.
+        # There is no Stable-Baselines3 _on_evaluation_end hook.
+        if self.parent is None or not isinstance(self.parent, EvalCallback):
             return True
-        return self._on_evaluation_end(float(self.parent.last_mean_reward), {})
+        current_mean_reward = float(self.parent.last_mean_reward)
+        if not np.isfinite(current_mean_reward):
+            return True
+        if current_mean_reward > self.best_mean_reward + self.min_delta:
+            self.best_mean_reward = current_mean_reward
+            self.no_improvement_count = 0
+            if self.verbose > 0:
+                print(f"[EarlyStopping] Novo melhor reward: {current_mean_reward:.4f}")
+        else:
+            self.no_improvement_count += 1
+            if self.verbose > 0:
+                print(f"[EarlyStopping] Sem melhora: {self.no_improvement_count}/{self.patience}")
+        return self.no_improvement_count < self.patience
 
     def _on_rollout_end(self) -> None:
         """Chamado ao fim de cada rollout. Não utilizado neste callback."""

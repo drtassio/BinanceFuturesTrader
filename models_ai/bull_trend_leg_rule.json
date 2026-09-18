@@ -1,0 +1,14 @@
+{
+  "agent": "bull",
+  "rule": {
+    "kind": "trend_leg",
+    "entry_window": 192,
+    "exit_window": 32,
+    "min_expansion": 1.2,
+    "min_cvd": 1.0,
+    "sl_mult": 3.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "selected_on": "train only (2020-02..2024-09), best train Sharpe of 864 variants in scratch research_bull_fast.py; validation and holdout reported, not used"
+}

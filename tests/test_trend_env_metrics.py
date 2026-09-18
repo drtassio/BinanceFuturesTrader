@@ -39,6 +39,26 @@ def _build_minimal_dataframe(rows: int = 16) -> pd.DataFrame:
 
 
 class TrendEnvMetricsTest(unittest.TestCase):
+    def test_stop_intrabar_rebound_and_gap(self):
+        fill = TrendFollowingEnv._resting_stop_fill
+        self.assertEqual(fill(1, 95, 100, 110, 94), 95)
+        self.assertEqual(fill(1, 95, 90, 100, 85), 90)
+        self.assertEqual(fill(-1, 105, 100, 106, 90), 105)
+        self.assertEqual(fill(-1, 105, 110, 115, 100), 110)
+        self.assertIsNone(fill(1, 95, 100, 110, 96))
+        self.assertIsNone(fill(0, 95, 100, 110, 94))
+
+    def test_historical_funding_is_signed_and_only_on_boundary(self):
+        cost = TrendFollowingEnv._historical_funding_cost
+        before = pd.Timestamp('2024-01-01 07:45:00')
+        settlement = pd.Timestamp('2024-01-01 08:00:00')
+        self.assertAlmostEqual(cost(1000, 1, .001, before, settlement), 1)
+        self.assertAlmostEqual(cost(1000, -1, .001, before, settlement), -1)
+        self.assertEqual(cost(1000, 1, .001, settlement, settlement + pd.Timedelta(minutes=15)), 0)
+
+    def test_normal_stop_enabled_during_training(self):
+        self.assertFalse(self.env.disable_normal_sl)
+
     def setUp(self) -> None:
         df = _build_minimal_dataframe()
         self.env = TrendFollowingEnv(df, AIConfig(), mode="training")

@@ -94,7 +94,7 @@ class BullTradingEnv(TrendFollowingEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # 🔬 Dr. Tensor Fix: Relaxed gates para exploração, mas MANTÉM long-only constraint
-        self.relaxed_gates = True
+        self.relaxed_gates = False
         # 🐂 BullSpecialist: nunca permite short, mesmo em HPO/exploração
         self._specialist_long_only = True
     

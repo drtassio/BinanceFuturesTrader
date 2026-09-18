@@ -33,6 +33,80 @@ class DataProvider:
     Fornece dados de mercado brutos e transformados para outros componentes do bot.
     Gerencia o cache de dados e a integração com o pipeline de engenharia de features.
     """
+    # Minutos por barra, para converter a janela pedida em numero de barras.
+    _TIMEFRAME_MINUTES = {
+        '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480,
+        '12h': 720, '1d': 1440, '3d': 4320, '1w': 10080,
+    }
+
+    def _validate_historical_coverage(self, frame, timeframe, start, end):
+        """A janela historica recebida cobre de fato o periodo pedido?
+
+        Um download truncado nao levanta erro: a exchange simplesmente devolve
+        menos barras. O treino entao roda sobre um pedaco do periodo, e o bot
+        ao vivo decide com um historico mais curto do que os indicadores
+        precisam, sem que nada apareca como falha.
+
+        Devolve (valido, relatorio); o relatorio sempre traz os numeros, mesmo
+        quando reprova, para o log dizer o que faltou.
+        """
+        import pandas as _pd
+
+        minutes = self._TIMEFRAME_MINUTES.get(str(timeframe).lower())
+        min_ratio = float(getattr(self.data_config, 'HISTORICAL_MIN_COVERAGE_RATIO', 0.995))
+        max_gap_multiplier = float(getattr(self.data_config, 'HISTORICAL_MAX_GAP_MULTIPLIER', 3.0))
+
+        report = {
+            'timeframe': str(timeframe),
+            'requested_start': str(start),
+            'requested_end': str(end),
+            'rows': 0 if frame is None else int(len(frame)),
+            'coverage_ratio': 0.0,
+            'start_ok': False,
+            'end_ok': False,
+            'largest_gap_bars': 0.0,
+            'reason': '',
+        }
+        if frame is None or len(frame) == 0 or minutes is None:
+            report['reason'] = 'frame vazio' if minutes is not None else f'timeframe desconhecido: {timeframe}'
+            return False, report
+
+        index = _pd.DatetimeIndex(frame.index)
+        start_ts, end_ts = _pd.Timestamp(start), _pd.Timestamp(end)
+        # Alinha fuso: comparar um indice consciente com um timestamp ingenuo
+        # levantaria excecao, e a origem do desalinhamento costuma ser o chamador.
+        if index.tz is not None and start_ts.tz is None:
+            start_ts, end_ts = start_ts.tz_localize(index.tz), end_ts.tz_localize(index.tz)
+        elif index.tz is None and start_ts.tz is not None:
+            index = index.tz_localize(None)
+            start_ts, end_ts = start_ts.tz_localize(None), end_ts.tz_localize(None)
+
+        bar = _pd.Timedelta(minutes=minutes)
+        expected = max(1, int((end_ts - start_ts) / bar))
+        report['expected_rows'] = expected
+        report['coverage_ratio'] = round(min(1.0, len(index) / expected), 6)
+        # Uma barra de tolerancia em cada ponta: a exchange pode devolver o
+        # candle seguinte ou omitir o ultimo ainda em formacao.
+        report['start_ok'] = bool(index.min() <= start_ts + bar)
+        report['end_ok'] = bool(index.max() >= end_ts - 2 * bar)
+
+        if len(index) > 1:
+            gaps = index.to_series().diff().dropna()
+            report['largest_gap_bars'] = round(float(gaps.max() / bar), 3) if len(gaps) else 0.0
+
+        problems = []
+        if report['coverage_ratio'] < min_ratio:
+            problems.append('cobertura %.4f abaixo de %.4f' % (report['coverage_ratio'], min_ratio))
+        if not report['start_ok']:
+            problems.append('inicio faltando')
+        if not report['end_ok']:
+            problems.append('fim faltando')
+        if report['largest_gap_bars'] > max_gap_multiplier:
+            problems.append('buraco de %.1f barras' % report['largest_gap_bars'])
+        report['reason'] = '; '.join(problems) if problems else 'ok'
+        return (not problems), report
+
     def __init__(self, connector: BinanceConnector, feature_pipeline: FeatureEngineeringPipeline):
         if not isinstance(connector, BinanceConnector):
             raise TypeError("🚨 [ERRO DATA PROVIDER] 'connector' deve ser uma instância de BinanceConnector.")
@@ -115,8 +189,11 @@ class DataProvider:
             df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             
-            # Convert OHLCV to numeric
-            for col in ['open', 'high', 'low', 'close', 'volume']:
+            # Convert OHLCV and Binance's taker-buy field to numeric.
+            # A API devolve tudo como texto; as colunas de fluxo mantidas mais
+            # abaixo precisam ser numericas para as features de tape.
+            for col in ['open', 'high', 'low', 'close', 'volume', 'taker_buy_base_asset_volume',
+                        'quote_asset_volume', 'number_of_trades', 'taker_buy_quote_asset_volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
             df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
@@ -142,6 +219,17 @@ class DataProvider:
             # 3. Realized volatility (rolling std of log-returns)
             df['realized_vol_20'] = df['log_return'].rolling(20, min_periods=5).std().fillna(0)
             df['realized_vol_100'] = df['log_return'].rolling(100, min_periods=20).std().fillna(0)
+
+            # Historical taker flow is available in Futures klines.  These
+            # features describe completed-candle aggression; they are not a
+            # synthetic order book and therefore remain causal.
+            sell_volume = (df['volume'] - df['taker_buy_base_asset_volume']).clip(lower=0.0)
+            delta = df['taker_buy_base_asset_volume'] - sell_volume
+            df['aggressor_imbalance'] = delta / df['volume'].clip(lower=1e-12)
+            df['taker_buy_ratio'] = df['taker_buy_base_asset_volume'] / df['volume'].clip(lower=1e-12)
+            delta_mean = delta.rolling(32, min_periods=8).mean()
+            delta_std = delta.rolling(32, min_periods=8).std().replace(0, np.nan)
+            df['aggressor_delta_z_32'] = ((delta - delta_mean) / delta_std).fillna(0.0).clip(-8, 8).astype('float32')
             
             # 4. Keep close ONLY as reference for position sizing (NOT for training)
             df['close_reference'] = df['close']
@@ -154,7 +242,14 @@ class DataProvider:
                 'hl_range_pct', 'oc_move_pct', 
                 'hc_wick_upper', 'lc_wick_lower',
                 'realized_vol_20', 'realized_vol_100',
-                'close_reference'
+                'close_reference', 'aggressor_imbalance', 'taker_buy_ratio', 'aggressor_delta_z_32',
+                # Colunas brutas do tape. Sao elas que alimentam as features de
+                # fluxo (tamanho medio de trade, intensidade, price improvement
+                # de compradores e vendedores) no modulo causal compartilhado com
+                # o treino. Descarta-las aqui zerava cinco features ao vivo que o
+                # especialista viu com valores reais durante todo o treino.
+                'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume',
             ]
             
             # 6. Clean infinities and remaining NaNs
@@ -216,11 +311,14 @@ class DataProvider:
                     combined_df = pd.concat([self.data_cache[cache_key], latest_klines_df])
                     self.data_cache[cache_key] = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
 
-                data_for_features = self.data_cache[cache_key].tail(required_data_points)
-                # Só candles fechados: o treino usa candles completos, e o candle em formação muda até fechar
-                _now_utc = pd.Timestamp.now(tz='UTC')
-                _closed_mask = (data_for_features.index + pd.Timedelta(milliseconds=interval_ms)) <= _now_utc
-                data_for_features = data_for_features[_closed_mask]
+                # Only closed candles become features. The regime detector decodes
+                # its whole window, so a still-forming candle at the end changed the
+                # regime and meta-model values of the last CLOSED bar on about 10%
+                # of bars (measured against a strictly causal rebuild), and the
+                # specialists were trained on closed candles only.
+                cached = self.data_cache[cache_key]
+                closed_mask = (cached.index.asi8 // 10**6 + interval_ms) <= current_time
+                data_for_features = cached.loc[closed_mask].tail(required_data_points)
                 if len(data_for_features) > 0:
                     raw_dfs_multi_tf[interval] = data_for_features
 
@@ -229,6 +327,28 @@ class DataProvider:
                 return None
             
             # Adicionamos a palavra-chave 'await' aqui, pois create_features é uma função assíncrona.
+            # Funding is published every eight hours. Align the last rate
+            # already published with each primary-timeframe candle.
+            primary_tf = self.trading_config.PRIMARY_TIMEFRAME_TRADING
+            primary_df = raw_dfs_multi_tf.get(primary_tf)
+            if primary_df is not None and not primary_df.empty:
+                try:
+                    start_ms = int((primary_df.index.min() - pd.Timedelta(days=1)).timestamp() * 1000)
+                    end_ms = int(primary_df.index.max().timestamp() * 1000)
+                    funding_rows = await self.connector.get_funding_rate_history(symbol, start_ms, end_ms)
+                    if funding_rows:
+                        funding = pd.DataFrame(funding_rows)
+                        funding.index = pd.to_datetime(funding['fundingTime'], unit='ms', utc=True)
+                        series = funding.sort_index()['fundingRate'].astype(float)
+                        primary_df = primary_df.copy()
+                        primary_df['funding_rate'] = series.reindex(primary_df.index, method='ffill').fillna(0.0)
+                        rates = primary_df['funding_rate']
+                        rate_std = rates.rolling(32, min_periods=4).std().replace(0.0, np.nan)
+                        primary_df['funding_rate_z_32'] = ((rates - rates.rolling(32, min_periods=4).mean()) / rate_std).fillna(0.0).clip(-8, 8).astype('float32')
+                        raw_dfs_multi_tf[primary_tf] = primary_df
+                except Exception as exc:
+                    logger.warning(f"[DATA PROVIDER] Funding unavailable; using neutral 0: {exc}")
+
             featured_df = await self.feature_pipeline.create_features(
                 raw_dfs_multi_tf,
                 symbol,

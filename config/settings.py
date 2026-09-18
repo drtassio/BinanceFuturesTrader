@@ -80,6 +80,15 @@ class Config:
 
 class TradingConfig(Config):
     """ConfiguraÃ§Ãµes especÃ­ficas para o sistema de trading e gerenciamento de risco."""
+    # Operate learned specialists by default, never silently replace them
+    # with the demonstration teacher used during guided training.
+    LIVE_POLICY = os.environ.get('LIVE_POLICY', 'sac').strip().lower()
+    # agent_mirror: the approved specialists listed here trade by replaying
+    # their environment over recent closed bars (trading/agent_mirror.py).
+    LIVE_AGENTS = os.environ.get('LIVE_AGENTS', 'bull')
+    # Exchange-side stop placed if a mirrored position is ever found unprotected.
+    # Exits come from the environment; this only covers the bot being down.
+    MIRROR_EMERGENCY_STOP_PCT = float(os.environ.get('MIRROR_EMERGENCY_STOP_PCT', 0.10))
     INITIAL_CAPITAL = float(os.environ.get('INITIAL_CAPITAL', 100.0))
     if INITIAL_CAPITAL <= 0:
         logger.error("â Œ [ERRO CONFIG] INITIAL_CAPITAL deve ser um valor positivo. Usando padrÃ£o 100000.0.")
@@ -351,6 +360,56 @@ class AIConfig(Config):
     REWARD_MAX_CLIP = float(os.environ.get('REWARD_MAX_CLIP', 15.0))
     REWARD_MIN_CLIP = float(os.environ.get('REWARD_MIN_CLIP', -15.0))
 
+    # O objetivo primário do RL deve ser o retorno líquido da carteira após
+    # taxas, funding e slippage.  Os componentes auxiliares de reward shaping
+    # são úteis para diagnóstico, mas não podem competir com o PnL ao treinar.
+    ECONOMIC_REWARD_ONLY = os.environ.get('ECONOMIC_REWARD_ONLY', 'True').lower() in ('true', '1', 't')
+    ECONOMIC_REWARD_SCALE = float(os.environ.get('ECONOMIC_REWARD_SCALE', 100.0))
+
+    # Teto de alavancagem sob o qual os especialistas sao treinados
+    # (_leverage_cap_hpo no ambiente). Producao nunca pode exceder este valor:
+    # um agente que aprendeu a gerir posicao a 3x, colocado a 8x, repete os
+    # mesmos trades com quase tres vezes o risco por operacao.
+    # Alterar aqui exige retreinar os agentes.
+    TRAINING_LEVERAGE_CAP = float(os.environ.get('TRAINING_LEVERAGE_CAP', 3.0))
+
+    # Timeframe whose ATR prices the environment's stops and sizing. A model is
+    # only valid with the value it was trained under; it is recorded in the
+    # run's feature_contract.json.
+    ENV_STOP_ATR_TIMEFRAME = os.environ.get('ENV_STOP_ATR_TIMEFRAME', '15m')
+
+    # Legacy profit/EMA exits exist only in the Ranger simulator. Disable
+    # them by default: learned exits must come from policy votes, while
+    # ordinary stops and emergency protection remain active. Opt-in is only
+    # for explicit legacy experiments and invalidates operational approval.
+    ENABLE_RANGER_RULE_BASED_EXITS = os.environ.get('ENABLE_RANGER_RULE_BASED_EXITS', 'False').lower() in ('true', '1', 't')
+
+    # Limiar de |voto| para converter a saida continua do SAC em BUY/SELL.
+    # Precisa acompanhar train_base_threshold do ambiente de treino: se
+    # producao exigir mais conviccao que o treino, a politica opera menos do
+    # que aprendeu a operar, e se exigir menos, opera mais.
+    INFERENCE_ACTION_THRESHOLD = float(os.environ.get('INFERENCE_ACTION_THRESHOLD', 0.064))
+
+    # Portao fora da amostra: nenhuma politica opera sem provar desempenho no
+    # holdout, e a aprovacao fica presa ao hash do arquivo avaliado — treinar de
+    # novo na nuvem e sobrescrever o .zip invalida a aprovacao automaticamente.
+    REQUIRE_OOS_POLICY_APPROVAL = os.environ.get(
+        'REQUIRE_OOS_POLICY_APPROVAL', 'True').lower() in ('true', '1', 't')
+    OOS_MIN_SHARPE = float(os.environ.get('OOS_MIN_SHARPE', 0.50))
+    OOS_MIN_PROFIT_FACTOR = float(os.environ.get('OOS_MIN_PROFIT_FACTOR', 1.10))
+    OOS_MAX_DRAWDOWN = float(os.environ.get('OOS_MAX_DRAWDOWN', 0.15))
+    OOS_MIN_NET_RETURN = float(os.environ.get('OOS_MIN_NET_RETURN', 0.0))
+    OOS_MIN_TRADES = int(os.environ.get('OOS_MIN_TRADES', 20))
+
+    # Portao de probabilidade de lucro: so vale com o ProfitabilityPredictor
+    # calibrado. Ligado sem calibracao, reprova todo sinal e o bot fica mudo.
+    ENABLE_PROFIT_PROBABILITY_GATE = os.environ.get(
+        'ENABLE_PROFIT_PROBABILITY_GATE', 'False').lower() in ('true', '1', 't')
+
+    # Cobertura minima aceita numa janela historica baixada.
+    HISTORICAL_MIN_COVERAGE_RATIO = float(os.environ.get('HISTORICAL_MIN_COVERAGE_RATIO', 0.995))
+    HISTORICAL_MAX_GAP_MULTIPLIER = float(os.environ.get('HISTORICAL_MAX_GAP_MULTIPLIER', 3.0))
+
     # Vote Misalignment: penalidade proporcional à confiança do predictor
     # Quando predictor diz BULL com 100% confiança e agente vota SHORT: penalidade máxima
     VOTE_MISALIGN_BASE_PENALTY = float(os.environ.get('VOTE_MISALIGN_BASE_PENALTY', 2.0))
@@ -409,8 +468,8 @@ class AIConfig(Config):
     MODEL_RETRAIN_DAYS = int(os.environ.get('MODEL_RETRAIN_DAYS', 90))
     # [FIX] 50k default: 1.5M / 50k = 30 checkpoints por treino final (era 1000 = 1500 checkpoints).
     # 1000 steps causava overhead massivo: 1500 eval × 10 episódios = 15k execuções de avaliação.
-    CHECKPOINT_FREQ: int = int(os.getenv("CHECKPOINT_FREQ", 50000))
-    PATIENCE_EARLY_STOPPING: int = int(os.getenv("PATIENCE_EARLY_STOPPING", 500))
+    CHECKPOINT_FREQ: int = int(os.getenv("CHECKPOINT_FREQ", 10000))
+    PATIENCE_EARLY_STOPPING: int = int(os.getenv("PATIENCE_EARLY_STOPPING", 4))
 
     EARLY_STOP_PATIENCE = int(os.environ.get('EARLY_STOP_PATIENCE', 100))
     EARLY_STOP_MIN_DELTA = float(os.environ.get('EARLY_STOP_MIN_DELTA', 0.001))

@@ -61,6 +61,166 @@ class AIController:
     [VERSO FINAL CORRIGIDA]
     Centraliza a inteligncia do Bot.
     """
+    # ── PORTAO OOS ────────────────────────────────────────────────────────────
+    # Nenhuma politica opera dinheiro sem ter provado desempenho fora da amostra,
+    # e a prova fica presa ao ARQUIVO exato que foi avaliado. Sem essa amarracao
+    # por hash, um relatorio aprovado continuaria valendo depois de alguem
+    # sobrescrever o .zip com um modelo novo e nao testado, que e justamente o
+    # que acontece a cada treino na nuvem.
+
+    _OOS_SPECIALISTS = ('bull', 'bear', 'ranger')
+
+    def _specialist_model_path(self, name):
+        from pathlib import Path as _Path
+        return _Path(str(self.config_ai.MODEL_DIR)) / ("%s_specialist_sac.zip" % name)
+
+    def _specialist_model_hashes(self):
+        """SHA-256 de cada arquivo de politica, ou None se ausente."""
+        import hashlib as _hashlib
+        hashes = {}
+        for name in self._OOS_SPECIALISTS:
+            path = self._specialist_model_path(name)
+            try:
+                hashes[name] = _hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                hashes[name] = None
+        return hashes
+
+    def _specialist_artifact_hashes(self):
+        """Approval binds the policy to its scaler and observation contract."""
+        import hashlib
+        from pathlib import Path
+
+        hashes = {}
+        directory = Path(str(self.config_ai.MODEL_DIR))
+        for name in self._OOS_SPECIALISTS:
+            for filename in (f'{name}_specialist_sac.zip',
+                             f'{name}_specialist_scaler.joblib',
+                             f'{name}_feature_contract.json'):
+                try:
+                    hashes[filename] = hashlib.sha256((directory / filename).read_bytes()).hexdigest()
+                except OSError:
+                    hashes[filename] = None
+        return hashes
+
+    def _validate_specialists_oos(self, holdout_df):
+        """Avalia cada especialista no holdout e grava o veredito assinado."""
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        from pathlib import Path as _Path
+
+        cfg = self.config_ai
+        thresholds = {
+            'min_sharpe': float(getattr(cfg, 'OOS_MIN_SHARPE', 0.5)),
+            'min_profit_factor': float(getattr(cfg, 'OOS_MIN_PROFIT_FACTOR', 1.1)),
+            'max_drawdown': float(getattr(cfg, 'OOS_MAX_DRAWDOWN', 0.15)),
+            'min_net_return': float(getattr(cfg, 'OOS_MIN_NET_RETURN', 0.0)),
+            'min_trades': int(getattr(cfg, 'OOS_MIN_TRADES', 20)),
+        }
+        results = {}
+        for name in self._OOS_SPECIALISTS:
+            specialist = (self.specialists or {}).get(name)
+            if specialist is None:
+                results[name] = {'passed': False, 'reason': 'especialista ausente', 'metrics': {}}
+                continue
+            try:
+                metrics = dict(specialist.evaluate(holdout_df) or {})
+            except Exception as exc:
+                results[name] = {'passed': False, 'reason': 'evaluate falhou: %s' % exc, 'metrics': {}}
+                continue
+
+            # One authoritative gate for cloud and local approvals. Missing
+            # deterministic/vote evidence, invalid risk metrics, and zero
+            # return must not pass a weaker local implementation.
+            from cloud.train_agent import judge, buy_and_hold_return
+            canonical = dict(metrics)
+            canonical['total_return_pct'] = metrics.get('net_return', float('nan'))
+            canonical['max_drawdown_pct'] = metrics.get('max_drawdown', float('nan'))
+            try:
+                verdict = judge(canonical, buy_and_hold_return(holdout_df), cfg)
+                checks = dict(verdict['checks'])
+                checks['net_return'] = checks.pop('net_return_positive')
+                checks['drawdown'] = checks.pop('drawdown_within_limit')
+                checks['trades'] = checks.pop('deterministic_policy_trades')
+            except (ValueError, TypeError, KeyError, IndexError) as exc:
+                results[name] = {'passed': False, 'reason': 'invalid evaluation: %s' % exc,
+                                 'metrics': metrics}
+                continue
+            failed = [k for k, ok in checks.items() if not ok]
+            results[name] = {
+                'passed': not failed,
+                'reason': 'ok' if not failed else 'reprovado em: %s' % ', '.join(failed),
+                'checks': checks,
+                'metrics': metrics,
+            }
+
+        artifact_hashes = self._specialist_artifact_hashes()
+        artifacts_present = all(artifact_hashes.values())
+        from trading.policy_runtime import runtime_fingerprint
+        runtime_hashes = runtime_fingerprint(self.config_ai, getattr(self, 'config_trading', None))
+        report = {
+            'generated_at': _dt.now(_tz.utc).isoformat(),
+            'thresholds': thresholds,
+            'specialists': results,
+            'all_passed': artifacts_present and all(runtime_hashes.values()) and all(r['passed'] for r in results.values()),
+            'artifacts_present': artifacts_present,
+            'model_hashes': self._specialist_model_hashes(),
+            'artifact_hashes': artifact_hashes,
+            'runtime_hashes': runtime_hashes,
+        }
+        try:
+            path = _Path(self.policy_validation_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(report, indent=2, default=str), encoding='utf-8')
+        except OSError as exc:
+            logger.error("[OOS] Nao foi possivel gravar o relatorio: %s", exc)
+
+        self.policy_oos_approved = bool(report['all_passed'])
+        self.last_oos_validation = report
+        if report['all_passed']:
+            logger.info("[OOS] Todas as politicas aprovadas para operar.")
+        else:
+            reproved = [n for n, r in results.items() if not r['passed']]
+            logger.warning("[OOS] Politicas reprovadas: %s", ', '.join(reproved) or 'nenhuma avaliada')
+        return report
+
+    def _load_policy_oos_approval(self):
+        """A aprovacao gravada ainda vale para os arquivos que estao em disco?"""
+        import json as _json
+        from pathlib import Path as _Path
+
+        if not bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            return True
+        try:
+            report = _json.loads(_Path(self.policy_validation_path).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            logger.warning("[OOS] Sem relatorio de validacao: operacao bloqueada.")
+            return False
+        if not report.get('all_passed'):
+            return False
+
+        recorded = report.get('model_hashes') or {}
+        current = self._specialist_model_hashes()
+        for name in self._OOS_SPECIALISTS:
+            digest = recorded.get(name)
+            if not digest or not current.get(name) or current.get(name) != digest:
+                logger.warning(
+                    "[OOS] '%s' mudou desde a validacao: aprovacao invalidada.", name
+                )
+                return False
+        recorded_artifacts = report.get('artifact_hashes') or {}
+        current_artifacts = self._specialist_artifact_hashes()
+        for filename, digest in current_artifacts.items():
+            if not digest or recorded_artifacts.get(filename) != digest:
+                logger.warning('[OOS] Artefato ausente, alterado ou nao validado: %s', filename)
+                return False
+        from trading.policy_runtime import runtime_fingerprint
+        current_runtime = runtime_fingerprint(self.config_ai, getattr(self, 'config_trading', None))
+        if not all(current_runtime.values()) or report.get('runtime_hashes') != current_runtime:
+            logger.warning('[OOS] Execution code or effective settings changed: approval invalidated.')
+            return False
+        return True
+
     def __init__(self, config: AIConfig, trading_config: TradingConfig, system_state: Dict[str, Any]):
         self.config_ai = config
         self.config_trading = trading_config
@@ -68,6 +228,26 @@ class AIController:
         self.last_trained_date = None
         self.last_adaptation_date = None
         
+        # Portao fora da amostra. O caminho fica junto dos modelos porque a
+        # aprovacao vale para AQUELES arquivos: o relatorio guarda o hash de
+        # cada .zip avaliado e perde a validade se algum for substituido.
+        import os as _os
+        self.policy_validation_path = _os.path.join(
+            str(getattr(config, 'MODEL_DIR', 'models_ai')), 'policy_oos_validation.json'
+        )
+        self.policy_oos_approved = False
+        self.last_oos_validation: Dict[str, Any] = {}
+
+        # Politica que opera: 'edge_teacher' (meta-modelo + regra, espelhando o
+        # ambiente de backtest) ou 'sac' (especialistas de RL via MoE).
+        self.live_policy = str(getattr(trading_config, 'LIVE_POLICY', 'sac')).strip().lower()
+        if self.live_policy not in ('sac', 'edge_teacher'):
+            raise ValueError('LIVE_POLICY must be sac or edge_teacher')
+        self.teacher_rules: Dict[str, Any] = {}
+        self.teacher_ready = False
+        self._teacher_cache = None
+        self._teacher_last_order = None
+
         # --- Componentes de Deciso ---
         # self.profitability_predictor = None # Removido: Mdulo obsoleto (substitudo pelo HRLMaster)
         # self.trend_predictor = None          # Removido: Mdulo obsoleto
@@ -1158,9 +1338,14 @@ class AIController:
             df_enriched['tp_prior_dir'] = np.select(conditions, choices, default=0.0)
             
             # Map One-Hot Regimes
-            df_enriched['tp_regime_up'] = (df_enriched['regime_val'] == 0).astype(float)
-            df_enriched['tp_regime_down'] = (df_enriched['regime_val'] == 1).astype(float)
-            df_enriched['tp_regime_sideways'] = (df_enriched['regime_val'] >= 2).astype(float)
+            # Ponderado pela confianca, igual a apply_hidden_features (caminho de
+            # decisao ao vivo) e ao dataset de treino. Antes este ramo gerava 0/1
+            # enquanto o outro gerava a confianca, e o especialista via numeros
+            # diferentes conforme o caminho que chamou.
+            _rc = df_enriched['regime_confidence']
+            df_enriched['tp_regime_up'] = np.where(df_enriched['regime_val'] == 0, _rc, 0.0)
+            df_enriched['tp_regime_down'] = np.where(df_enriched['regime_val'] == 1, _rc, 0.0)
+            df_enriched['tp_regime_sideways'] = np.where(df_enriched['regime_val'] >= 2, _rc, 0.0)
             
             # Legacy/Compat columns
             df_enriched['trend_pred_uptrend'] = df_enriched['tp_regime_up']
@@ -2421,12 +2606,212 @@ class AIController:
             return np.zeros(X.shape[0])
 
    
+    def prepare_teacher_policy(self) -> bool:
+        """Load the edge teacher and check its OOS approval still holds."""
+        from trading import teacher_policy as teacher
+
+        model_dir = Path(str(self.config_ai.MODEL_DIR))
+        try:
+            self.teacher_rules = teacher.load_rules(model_dir)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.critical("[TEACHER] Regras da professora ilegiveis: %s", exc)
+            self.teacher_ready = False
+            return False
+        approved = teacher.approval_is_valid(model_dir)
+        if not approved and bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            logger.critical("[TEACHER] Sem aprovacao OOS valida para os arquivos em disco "
+                            "(rode scripts/approve_teacher_oos.py). Nenhuma ordem sera enviada.")
+            self.teacher_ready = False
+            return False
+        self.teacher_ready = True
+        self.is_trained = True
+        logger.info("[TEACHER] Professora pronta: %s", {k: v.as_dict() for k, v in self.teacher_rules.items()})
+        return True
+
+    async def _teacher_decision(self, recent_market_df: pd.DataFrame) -> Signal:
+        """Mirror the position the backtest environment holds on the last closed bar."""
+        import time as _time
+        from trading import teacher_policy as teacher
+
+        symbol = self.config_trading.PRIMARY_PAIR
+
+        def hold(reason, **extra):
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": reason, "specialist": "EdgeTeacher",
+                                       "regime": "TEACHER", "policy": teacher.POLICY_NAME, **extra})
+
+        if not self.teacher_ready or not self.risk_manager or not self.portfolio:
+            return hold("professora indisponivel (aprovacao OOS, risco ou portfolio ausente)")
+
+        frame = self.feature_pipeline.apply_hidden_features(recent_market_df)
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        frame = teacher.closed_bars(frame, pd.Timestamp.now(tz="UTC"))
+        missing = [c for c in ("close", "ml_p_long", "ml_p_short", "ml_edge", "tp_prior_dir") if c not in frame.columns]
+        if missing:
+            return hold("entradas da professora ausentes: %s" % missing)
+        if len(frame) < teacher.MIN_REPLAY_BARS:
+            return hold("janela curta: %d barras fechadas" % len(frame))
+
+        bar = frame.index[-1]
+        if self._teacher_cache is None or self._teacher_cache[0] != bar:
+            shadows = []
+            for agent, rule in self.teacher_rules.items():
+                shadows.append(await asyncio.to_thread(teacher.replay, frame, agent, rule))
+            self._teacher_cache = (bar, shadows)
+            logger.info("[TEACHER] barra %s | p_long=%.3f p_short=%.3f edge=%+.3f prior=%+.2f | %s", bar,
+                        float(frame["ml_p_long"].iloc[-1]), float(frame["ml_p_short"].iloc[-1]),
+                        float(frame["ml_edge"].iloc[-1]), float(frame["tp_prior_dir"].iloc[-1]),
+                        " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))
+        shadows = self._teacher_cache[1]
+        return self._mirror_to_signal(shadows, bar, teacher.POLICY_NAME, "EdgeTeacher")
+
+    def _mirror_to_signal(self, shadows, bar, policy_name: str, label: str) -> Signal:
+        """Order that makes the account hold what the replayed environments hold."""
+        import time as _time
+        from trading import teacher_policy as teacher
+
+        symbol = self.config_trading.PRIMARY_PAIR
+
+        def hold(reason, **extra):
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": reason, "specialist": label,
+                                       "regime": label.upper(), "policy": policy_name, **extra})
+
+        position = self.portfolio.positions.get(symbol)
+        live_side = int(np.sign(position.quantity)) if position is not None and position.quantity else 0
+        decision = teacher.mirror(shadows, live_side)
+        details = {"bar": str(bar), "shadows": {s.agent: s.side for s in shadows}}
+        if decision.action == "hold":
+            return hold(decision.reason, **details)
+
+        key = (bar, decision.action, decision.side)
+        if self._teacher_last_order and self._teacher_last_order[0] == key \
+                and _time.monotonic() - self._teacher_last_order[1] < 180:
+            return hold("ordem desta barra ja enviada; aguardando execucao", **details)
+
+        cfg = self.config_trading
+        action = Action.BUY if decision.side > 0 else Action.SELL
+        explanation = {"reason": decision.reason, "specialist": label, "regime": label.upper(),
+                       "policy": policy_name, **details}
+        if decision.action == "close":
+            # position_size_pct >= 0.9 faz o ExecutionEngine fechar a quantidade
+            # exata com reduceOnly.
+            signal = Signal(symbol=symbol, action=action, confidence=1.0, position_size_pct=1.0,
+                            leverage=float(getattr(position, 'leverage', 1.0) or 1.0),
+                            stop_loss=0.0, take_profit=0.0, explanation=explanation)
+        else:
+            shadow = decision.shadow
+            fraction = float(shadow.notional_fraction)
+            # O ambiente limita o nocional, nao a margem. Na corretora a margem
+            # por posicao e limitada (MAX_POSITION_SIZE_PERCENT), entao a
+            # alavancagem da ordem e a menor que acomoda o MESMO nocional do
+            # backtest; o risco continua sendo nocional x distancia do stop.
+            max_margin = float(cfg.MAX_POSITION_SIZE_PERCENT) * 0.95
+            leverage = float(np.clip(np.ceil(fraction / max_margin), max(1.0, float(cfg.MIN_LEVERAGE_PER_TRADE)),
+                                     float(cfg.MAX_LEVERAGE_PER_TRADE)))
+            size_pct = float(np.clip(fraction / leverage, 0.0, max_margin))
+            # A saida real e a do ambiente, avaliada no fechamento da barra. O
+            # stop na corretora so cobre o bot parado: fica ao dobro da
+            # distancia do stop do ambiente.
+            stop_distance = abs((shadow.stop_price or 0.0) - shadow.entry_price) / max(shadow.entry_price, 1e-9)
+            catastrophe = float(np.clip(2.0 * stop_distance, 0.01, 0.20))
+            explanation.update(notional_fraction=fraction, env_stop_price=shadow.stop_price,
+                               env_entry_price=shadow.entry_price)
+            signal = Signal(symbol=symbol, action=action, confidence=1.0, position_size_pct=size_pct,
+                            leverage=leverage, stop_loss=catastrophe, take_profit=0.0, explanation=explanation)
+
+        approved, reason = self.risk_manager.check_trade_approval(signal)
+        if not approved:
+            return hold("vetado pelo risco: %s" % reason, **details)
+        self._teacher_last_order = (key, _time.monotonic())
+        logger.info("[%s] %s %s | margem %.1f%% x %.0fx | stop de catastrofe %.2f%% | %s", label,
+                    decision.action, action.value, signal.position_size_pct * 100, signal.leverage,
+                    (signal.stop_loss or 0.0) * 100, decision.reason)
+        return signal
+
+    async def prepare_agent_mirror(self) -> bool:
+        """Load the approved specialists and make sure the replay history is complete."""
+        from trading import agent_mirror as mirror
+
+        model_dir = Path(str(self.config_ai.MODEL_DIR))
+        names = [a.strip() for a in str(getattr(self.config_trading, 'LIVE_AGENTS', 'bull')).split(',') if a.strip()]
+        approved, detail = mirror.approval_is_valid(model_dir)
+        if not approved and bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
+            logger.critical("[MIRROR] Especialistas sem aprovacao valida (%s). Nenhuma ordem sera enviada.", detail)
+            self.teacher_ready = False
+            return False
+        self.mirror_agents = {}
+        for name in names:
+            try:
+                self.mirror_agents[name] = mirror.load_specialist(name, model_dir)
+            except Exception as exc:
+                logger.critical("[MIRROR] Nao foi possivel carregar %s: %s", name, exc)
+                self.teacher_ready = False
+                return False
+        self.mirror_history = mirror.LiveHistory()
+        newest = pd.Timestamp.now(tz="UTC").floor("15min") - mirror.BAR
+        missing = self.mirror_history.missing_since(newest)
+        if missing is not None:
+            logger.info("[MIRROR] Reconstruindo historico de candles fechados desde %s...", missing)
+            await mirror.rebuild(self.mirror_history, missing, newest + mirror.BAR)
+        self.teacher_ready = True
+        self.is_trained = True
+        logger.info("[MIRROR] Especialistas prontos: %s | historico %d barras ate %s", list(self.mirror_agents),
+                    len(self.mirror_history.frame), self.mirror_history.frame.index[-1])
+        return True
+
+    async def _agent_mirror_decision(self, recent_market_df: pd.DataFrame) -> Signal:
+        from trading import agent_mirror as mirror
+
+        symbol = self.config_trading.PRIMARY_PAIR
+        if not self.teacher_ready or not self.risk_manager or not self.portfolio:
+            return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                          explanation={"reason": "espelho indisponivel", "policy": mirror.POLICY_NAME})
+        now = pd.Timestamp.now(tz="UTC")
+        frame = recent_market_df.copy()
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        newest = self.mirror_history.append_newest(frame, now)
+        if not self.mirror_history.is_complete(newest):
+            start = self.mirror_history.missing_since(newest)
+            logger.warning("[MIRROR] Historico incompleto desde %s: reconstruindo antes de decidir.", start)
+            await mirror.rebuild(self.mirror_history, start, newest + mirror.BAR)
+            if not self.mirror_history.is_complete(newest):
+                return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "historico incompleto", "policy": mirror.POLICY_NAME})
+        if self._teacher_cache is None or self._teacher_cache[0] != newest:
+            history = self.mirror_history.frame.loc[:newest]
+            shadows = []
+            for name, (agent, contract) in self.mirror_agents.items():
+                shadows.append(await asyncio.to_thread(mirror.replay, agent, contract, history, name))
+            self._teacher_cache = (newest, shadows)
+            logger.info("[MIRROR] barra %s | %s", newest,
+                        " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))
+        return self._mirror_to_signal(self._teacher_cache[1], newest, mirror.POLICY_NAME, "AgentMirror")
+
     async def generate_trading_decision(self, recent_market_df: pd.DataFrame) -> Signal:
         """
         [VERSO FINAL COMPLETA - COM DRIFT DETECTOR]
         Orquestra o pipeline de deciso completo: features, verificao de drift,
         anlise de regime, seleo de especialista, modulao e risco.
         """
+        if self.live_policy == 'agent_mirror':
+            try:
+                return await self._agent_mirror_decision(recent_market_df)
+            except Exception as exc:
+                logger.critical("[MIRROR] Falha ao decidir: %s", exc, exc_info=True)
+                return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "falha do espelho: %s" % exc, "policy": "agent_mirror"})
+
+        if self.live_policy == 'edge_teacher':
+            try:
+                return await self._teacher_decision(recent_market_df)
+            except Exception as exc:
+                logger.critical("[TEACHER] Falha ao decidir: %s", exc, exc_info=True)
+                return Signal(symbol=self.config_trading.PRIMARY_PAIR, action=Action.HOLD, confidence=0.0,
+                              explanation={"reason": "falha da professora: %s" % exc, "policy": "edge_teacher"})
+
         if not self.is_trained or not all([self.specialists, self.risk_manager, self.portfolio]): # drift_detector opcional
             
             # [DEBUG GRANULAR] Diagnstico de falha
@@ -2818,12 +3203,162 @@ class AIController:
                         f" [AI] {active_specialist.__class__.__name__}: observação ao vivo incompatível com o contrato de treino. "
                         f"Especialista ignorado nesta decisão (retreine para gerar o contrato)."
                     )
-                    continue
+                    logger.debug(
+                        f" [FAST PATH] {active_specialist.__class__.__name__}: "
+                        f"shape {expert_observation.shape[0]}  (sem re-encode)"
+                    )
+                else:
+                    # Fallback: reconstrói obs com spec_cols (default 0.0 se coluna ausente)
+                    # Evita usar full_observation (base_feature_columns != feature_columns do treino)
+                    if _spec_cols:
+                        _mkt_fb = np.array([float(latest_row.get(c, 0.0)) for c in _spec_cols], dtype=np.float32)
+                        _mem_fb = np.array([_mem_live.get(k, 0.0) for k in _mem_keys], dtype=np.float32)
+                        _prior_fb = np.array([prior_dir_val, prior_conf_val], dtype=np.float32)
+                        expert_observation = np.concatenate([_mkt_fb, _mem_fb, agent_state, time_features, _prior_fb])
+                    else:
+                        expert_observation = full_observation.copy()
+                # 
+
+                # Identifica o target_shape
+                target_shape = None
+                if hasattr(active_specialist, 'model') and active_specialist.model is not None:
+                    if hasattr(active_specialist.model, 'observation_space'):
+                        target_shape = active_specialist.model.observation_space.shape
+
+                current_shape = expert_observation.shape
+                logger.debug(f" [DEBUG SHAPE] Specialist: {expert_key} | Current: {current_shape} | Target: {target_shape}")
+
+                _prepared_live = hasattr(active_specialist, 'prepare_live_observation')
+                if _prepared_live:
+                    try:
+                        expert_observation = active_specialist.prepare_live_observation(
+                            df_fully_enriched, agent_state
+                        )
+                    except Exception as exc:
+                        logger.error('[LIVE CONTRACT] %s blocked: %s', expert_key, exc)
+                        continue
+
+                if not _prepared_live and target_shape and current_shape != target_shape:
+                    logger.info(f" [AI SHAPE FIX] Adaptando observao ({current_shape[0]} -> {target_shape[0]}) para {active_specialist.__class__.__name__}")
+                    missing_dims = target_shape[0] - current_shape[0]
+                    
+                    if missing_dims > 0 and missing_dims <= 10:
+                        padding = np.zeros(missing_dims, dtype=np.float32)
+                        expert_observation = np.concatenate([expert_observation, padding])
+                        logger.info(f" [AI SHAPE FIX] Padding simples aplicado. Novo shape: {expert_observation.shape}")
+                    elif self.feature_pipeline and hasattr(self.feature_pipeline, 'temporal_autoencoder_pipeline') and self.feature_pipeline.temporal_autoencoder_pipeline.autoencoder:
+                        try:
+                            pipeline_ae = self.feature_pipeline.temporal_autoencoder_pipeline
+                            seq_len = pipeline_ae.hyperparams.get('seq_length', 32)
+                            
+                            if len(df_fully_enriched) >= seq_len:
+                                ae_input_cols = pipeline_ae.feature_columns
+                                available_ae_cols = [c for c in ae_input_cols if c in df_fully_enriched.columns]
+                                
+                                if len(available_ae_cols) < len(ae_input_cols):
+                                    seq_df = pd.DataFrame(0, index=df_fully_enriched.index[-seq_len:], columns=ae_input_cols)
+                                    for c in available_ae_cols:
+                                        seq_df[c] = df_fully_enriched[c].iloc[-seq_len:]
+                                    seq_data = seq_df.values.astype(np.float32)
+                                else:
+                                    seq_data = df_fully_enriched.iloc[-seq_len:][ae_input_cols].values.astype(np.float32)
+
+                                if hasattr(pipeline_ae, 'scaler') and pipeline_ae.scaler_fitted:
+                                    seq_data_scaled = pipeline_ae.scaler.transform(seq_data)
+                                    seq_data = seq_data_scaled.reshape(1, seq_len, -1)
+                                else:
+                                    seq_data = seq_data.reshape(1, seq_len, -1)
+                                    
+                                seq_tensor = torch.FloatTensor(seq_data).to(pipeline_ae.device)
+                                
+                                with torch.no_grad():
+                                    _r = latest_row.get('regime', 2)
+                                    current_regime = int(_r) if pd.notna(_r) else 2
+                                    regime_tensor = torch.LongTensor([current_regime]).to(pipeline_ae.device)
+                                    mu, _ = pipeline_ae.autoencoder.encode(seq_tensor, regime_labels=regime_tensor)
+                                    latent_features = mu.cpu().numpy().flatten()
+                                    
+                                prior_dir_val = float(latest_row.get('tp_prior_dir', 0.0))
+                                prior_conf_val = float(latest_row.get('tp_prior_conf', 0.0))
+                                memory_keys = ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']
+                                memory_extras = np.array([float(latest_row.get(k, 0.0)) for k in memory_keys], dtype=np.float32)
+
+                                def _build_cerebral_obs(row, _agent_state, _time_features, _prior_dir, _prior_conf, _physics):
+                                    spec_cols = getattr(active_specialist, 'feature_columns', [])
+                                    if not spec_cols:
+                                        fs = getattr(active_specialist, 'feature_scaler', None)
+                                        if fs is not None and hasattr(fs, 'feature_names_in_'):
+                                            spec_cols = list(fs.feature_names_in_)
+                                    
+                                    # 1. Market Features (Estatísticas/Técnicas)
+                                    mkt = np.array([float(row.get(c, 0.0)) for c in spec_cols], dtype=np.float32) if spec_cols else np.zeros(65, dtype=np.float32)
+                                    
+                                    # 2. Memory Extras (Distâncias OHLC)
+                                    mem = np.array([_mem_live.get(k, 0.0) for k in ['dist_to_max_20', 'dist_to_min_20', 'dist_to_max_50', 'dist_to_min_50']], dtype=np.float32)
+                                    
+                                    # 3. State & Time & Prior
+                                    prior_2 = np.array([_prior_dir, _prior_conf], dtype=np.float32)
+                                    
+                                    # 4. Physics Extras (Entropy & Hurst) - Unificando a visão "Cerebral"
+                                    return np.concatenate([mkt, mem, _agent_state, _time_features, prior_2, _physics])
+
+                                # --- Sensores de Fisica (Dr. Tensor) ---
+                                market_entropy = quantum_metrics.get('shannon_entropy', 0.0)
+                                market_hurst = quantum_metrics.get('hurst_exponent', 0.5)
+                                physics_extras = np.array([market_entropy, market_hurst], dtype=np.float32)
+
+                                if target_shape[0] in (304, 312): # Sequencial temporal n_stack=4 (4x76 ou 4x78)
+                                    n_rows = len(df_fully_enriched)
+                                    steps_seq = []
+                                    phys_arg = physics_extras if target_shape[0] == 312 else np.array([], dtype=np.float32)
+                                    for offset in range(3, -1, -1):
+                                        idx = max(0, n_rows - 1 - offset)
+                                        past_row = df_fully_enriched.iloc[idx]
+                                        steps_seq.append(_build_cerebral_obs(past_row, agent_state, time_features, prior_dir_val, prior_conf_val, phys_arg))
+                                    expert_observation = np.concatenate(steps_seq)
+                                elif target_shape[0] >= 80: # Novo Formato Cerebral (78 + 2)
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
+                                elif target_shape[0] == 78: # Formato de transicao (sem fisica)
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
+                                elif target_shape[0] == 76: # Base sem fisica
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, np.array([], dtype=np.float32))
+                                elif target_shape[0] == 65:
+                                    tau_val = float(latest_row.get('tp_tau', 0.0))
+                                    primary_signal_val = float(latest_row.get('tp_primary_signal', 0.0))
+                                    uncertainty_val = float(latest_row.get('tp_uncertainty', 0.0))
+                                    p_extras = np.array([prior_dir_val, prior_conf_val, tau_val, primary_signal_val, uncertainty_val], dtype=np.float32)
+                                    expert_observation = np.concatenate([latent_features, agent_state, time_features, p_extras])
+                                else:
+                                    # Fallback Geral
+                                    expert_observation = _build_cerebral_obs(latest_row, agent_state, time_features, prior_dir_val, prior_conf_val, physics_extras)
+                                
+                                if expert_observation.shape[0] > target_shape[0]:
+                                    expert_observation = expert_observation[:target_shape[0]]
+                                elif expert_observation.shape[0] < target_shape[0]:
+                                    expert_observation = np.pad(expert_observation, (0, target_shape[0] - len(expert_observation)))
+                            else:
+                                if current_shape[0] < target_shape[0]:
+                                    pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
+                                    expert_observation = np.concatenate([expert_observation, pad])
+                                else:
+                                    expert_observation = expert_observation[:target_shape[0]]
+                        except Exception as e:
+                            logger.error(f" [AI SHAPE FIX] Erro durante encoding: {e}. Fallback emergencial.")
+                            if current_shape[0] < target_shape[0]:
+                                pad = np.zeros(target_shape[0] - current_shape[0], dtype=np.float32)
+                                expert_observation = np.concatenate([expert_observation, pad])
+                            else:
+                                expert_observation = expert_observation[:target_shape[0]]
 
                 # Gerar sinal para o especialista especfico
                 try:
                     specialist_display_name = active_specialist.__class__.__name__
-                    strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row, pre_normalized=True)
+                    if _prepared_live:
+                        strategic_signal_ind = active_specialist.decide_action(
+                            expert_observation, latest_row, observation_is_normalized=True
+                        )
+                    else:
+                        strategic_signal_ind = active_specialist.decide_action(expert_observation, latest_row)
                     if strategic_signal_ind:
                         if strategic_signal_ind.explanation is not None:
                             strategic_signal_ind.explanation['specialist'] = specialist_display_name
@@ -3089,6 +3624,17 @@ class AIController:
                     }
                 )
             
+            # A close agreed by the ensemble reduces an existing position;
+            # entry confidence/market-context vetoes must not turn it into HOLD.
+            from trading.policy_exit import preserve_policy_exit
+            exit_position = self.portfolio.positions.get(strategic_signal.symbol)
+            strategic_signal = preserve_policy_exit(
+                strategic_signal, expert_signals,
+                getattr(exit_position, 'quantity', 0.0))
+            if (strategic_signal.explanation or {}).get('position_exit'):
+                # ExecutionEngine revalidates the position and uses reduceOnly.
+                return strategic_signal
+
             # 4. Explicar a deciso (Apenas se no estivermos em uma chamada recursiva do SHAP)
             if strategic_signal.action == Action.HOLD and not getattr(self, '_is_explaining', False):
                 try:

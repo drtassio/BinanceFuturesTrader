@@ -75,17 +75,28 @@ def get_market_chaos_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         else:
             label = "ESTÁVEL"
             
+        # Duas grafias para a mesma coisa, de proposito.
+        #
+        # Esta funcao devolvia apenas 'entropy' e 'hurst', mas TODOS os
+        # consumidores — ambiente de treino, construcao da observacao e o filtro
+        # de contra-tendencia ao vivo — leem 'shannon_entropy' e
+        # 'hurst_exponent'. Nenhum deles jamais recebeu um valor: o .get()
+        # caia no default e as duas dimensoes de fisica da observacao eram as
+        # constantes 0.0 e 0.5, enquanto o calculo, responsavel por 72% do
+        # tempo de CPU do ambiente, era integralmente descartado.
         return {
             "entropy": round(entropy, 2),
             "hurst": round(hurst, 2),
-            "chaos_label": label,
-            # Chaves lidas pelo AIController e pelo ambiente de treino
             "shannon_entropy": round(entropy, 2),
             "hurst_exponent": round(hurst, 2),
-            "market_state": label,
+            "chaos_label": label,
         }
     except Exception:
-        return {"entropy": 0.0, "hurst": 0.5, "chaos_label": "Erro no Sensor", "shannon_entropy": 0.0, "hurst_exponent": 0.5, "market_state": "Erro no Sensor"}
+        return {
+            "entropy": 0.0, "hurst": 0.5,
+            "shannon_entropy": 0.0, "hurst_exponent": 0.5,
+            "chaos_label": "Erro no Sensor",
+        }
 
 
 def rolling_chaos_metrics(close, lookback: int = 30):

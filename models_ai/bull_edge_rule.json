@@ -1,0 +1,29 @@
+{
+  "agent": "bull",
+  "rule": {
+    "enter_probability": 0.5,
+    "enter_edge": 0.1,
+    "exit_edge": 0.0,
+    "require_regime": true,
+    "sl_mult": 5.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "train": {
+    "trades": 93,
+    "net_return": 0.4157273363616383,
+    "profit_factor": 1.4226350791100029,
+    "max_drawdown": 0.12980825189823625,
+    "win_rate": 65.59139784946237,
+    "avg_duration": 32.83870967741935
+  },
+  "validation": {
+    "trades": 51,
+    "net_return": 0.21335319745683615,
+    "profit_factor": 1.8319266474531122,
+    "max_drawdown": 0.11527128191248809,
+    "win_rate": 62.745098039215684,
+    "avg_duration": 32.23529411764706
+  },
+  "selected_on": "train_only"
+}

@@ -349,10 +349,17 @@ class RiskManager:
                             f"abaixo do mínimo aceitável ({self.config.MIN_CONFIDENCE_FOR_TRADE:.2%}).")
 
         # 2. Checagem de Probabilidade de Lucratividade (Predictive Probability)
-        # O modelo 'Profit Predictor' estima a chance de sucesso do trade.
-        if signal.profit_probability < self.config.MIN_PROFIT_PROBABILITY:
-             return False, (f"❌ [QUALIDADE] Probabilidade de lucro estimada ({signal.profit_probability:.2%}) "
-                            f"abaixo do limiar de segurança ({self.config.MIN_PROFIT_PROBABILITY:.2%}).")
+        #
+        # Este portao so vale quando o ProfitabilityPredictor esta calibrado.
+        # Com ele desligado, profit_probability carrega o valor neutro do
+        # Signal, que fica abaixo de MIN_PROFIT_PROBABILITY e reprovaria TODO
+        # sinal — o bot ficaria em silencio sem que nada aparecesse como erro.
+        # Ligar explicitamente e uma decisao de quem opera; desligado, o portao
+        # nao pode bloquear nada.
+        if getattr(self.config, 'ENABLE_PROFIT_PROBABILITY_GATE', False):
+            if signal.profit_probability < self.config.MIN_PROFIT_PROBABILITY:
+                return False, (f"❌ [QUALIDADE] Probabilidade de lucro estimada ({signal.profit_probability:.2%}) "
+                               f"abaixo do limiar de segurança ({self.config.MIN_PROFIT_PROBABILITY:.2%}).")
 
         return True, "✅ Sinal Aprovado"
 

@@ -1,0 +1,29 @@
+{
+  "agent": "bear",
+  "rule": {
+    "enter_probability": 0.3,
+    "enter_edge": 0.1,
+    "exit_edge": -0.05,
+    "require_regime": true,
+    "sl_mult": 5.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "train": {
+    "trades": 206,
+    "net_return": 0.11519151731279594,
+    "profit_factor": 1.0970191288224027,
+    "max_drawdown": 0.15912747446900052,
+    "win_rate": 65.53398058252428,
+    "avg_duration": 31.106796116504853
+  },
+  "validation": {
+    "trades": 55,
+    "net_return": 0.10035968386625665,
+    "profit_factor": 2.2916890000910857,
+    "max_drawdown": 0.1017319675501195,
+    "win_rate": 69.0909090909091,
+    "avg_duration": 32.92727272727273
+  },
+  "selected_on": "train"
+}

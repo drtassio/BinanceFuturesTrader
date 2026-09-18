@@ -519,10 +519,29 @@ class ExecutionEngine:
             logger.error(f"❌ [ERRO EXEC] Tentativa de submeter objeto não-Signal. Ignorando: {signal}")
             return
 
+        if (signal.explanation or {}).get('position_exit'):
+            current = self.portfolio.positions.get(signal.symbol)
+            quantity = float(current.quantity) if current is not None else 0.0
+            if not ((quantity > 0 and signal.action == Action.SELL)
+                    or (quantity < 0 and signal.action == Action.BUY)):
+                logger.warning('[EXEC] Stale position-exit vote rejected: %s', signal.symbol)
+                return
+
         # [POSITION LIMIT] Verifica se já existe uma posição aberta
         has_position = await self._check_position_limit(signal.symbol)
         current_pos = self.portfolio.positions.get(signal.symbol)
         is_reducing = False
+        if (signal.explanation or {}).get('position_exit'):
+            # The awaited exchange check may refresh/remove the position.
+            # A policy close must always remain reduceOnly, even if that check
+            # returns False while the portfolio still contains a position.
+            live_quantity = float(getattr(current_pos, 'quantity', 0.0))
+            if not math.isfinite(live_quantity) or not (
+                    (live_quantity > 0 and signal.action == Action.SELL)
+                    or (live_quantity < 0 and signal.action == Action.BUY)):
+                logger.warning('[EXEC] Position changed while validating policy close: %s', signal.symbol)
+                return
+            has_position = True
         
         if has_position:
             if signal.action == Action.CLOSE:
@@ -712,7 +731,10 @@ class ExecutionEngine:
                         self._margin_veto_registry.pop(symbol, None)
 
                 # [PROFIT SHIELD v2.0] Aplica lógica de proteção de lucro antes de gerenciar stops normais
-                await self._apply_profit_protection_logic(symbol, position)
+                if not self._mirror_policy_active():
+                    # Break-even, partial take and aggressive trailing are not
+                    # part of what a mirrored policy was approved on.
+                    await self._apply_profit_protection_logic(symbol, position)
 
                 # Só o Stop Loss fixo conta como proteção: um trailing ainda não armado não limita a perda
                 open_orders = await self.connector.get_open_orders(symbol)
@@ -755,7 +777,24 @@ class ExecutionEngine:
                         f"[MONITOR] Posicao exposta: {symbol} ({position.quantity}). "
                         f"Criando stop de emergencia (tentativa #{fail_count + 1})..."
                     )
-                    result = await self._place_emergency_stop(symbol, position)
+                    position_side = OrderSide.BUY if position.quantity > 0 else OrderSide.SELL
+                    qty = abs(position.quantity)
+
+                    if self._mirror_policy_active():
+                        # Catastrophe-only protection, fixed from the entry.
+                        emergency_pct = float(getattr(self.config, "MIRROR_EMERGENCY_STOP_PCT", 0.10))
+                        stop_price = position.entry_price * (
+                            1.0 - emergency_pct if position.quantity > 0 else 1.0 + emergency_pct)
+                        result = await self.connector.place_stop_loss_order(
+                            symbol=symbol, side="SELL" if position.quantity > 0 else "BUY",
+                            quantity=qty, stop_price=stop_price)
+                    else:
+                        result = await self._place_trailing_stop(
+                            symbol=symbol,
+                            side=position_side,
+                            quantity=qty,
+                            stop_loss_pct=self.config.DEFAULT_STOP_LOSS_PCT
+                        )
 
                     if result:
                         # Stop colocado com sucesso: reseta contador
@@ -908,10 +947,42 @@ class ExecutionEngine:
             self.system_state["command_feedback"] = f"Ordem {order.id} ({order.signal.symbol}) REJEITADA."
 
 
+    MIRROR_POLICIES = ("edge_teacher", "agent_mirror")
+
+    def _is_mirror_signal(self, signal: Signal) -> bool:
+        return (signal.explanation or {}).get("policy") in self.MIRROR_POLICIES
+
+    def _mirror_policy_active(self) -> bool:
+        return str(getattr(self.config, "LIVE_POLICY", "sac")) in self.MIRROR_POLICIES
+
+    async def _cancel_protective_orders(self, symbol: str) -> None:
+        """Cancel every open stop/take-profit for symbol, standard and algo orders."""
+        try:
+            orders = await self.connector.get_open_orders(symbol)
+        except Exception as exc:
+            logger.error("[EXEC] Nao foi possivel listar ordens para cancelar protecoes de %s: %s", symbol, exc)
+            return
+        for item in orders or []:
+            order_id = item.get("orderId")
+            if not order_id:
+                continue
+            try:
+                if item.get("is_algo"):
+                    await self.connector._make_request("DELETE", "/fapi/v1/algoOrder",
+                                                       params={"symbol": symbol, "algoId": order_id}, signed=True)
+                else:
+                    await self.connector.cancel_order(symbol, order_id=order_id)
+            except Exception as exc:
+                logger.error("[EXEC] Falha ao cancelar ordem %s de %s: %s", order_id, symbol, exc)
+
     def _choose_smart_strategy(self, signal: Signal) -> str:
         """
         Lógica para a estratégia SMART escolher a melhor execução.
         """
+        if self._is_mirror_signal(signal):
+            # The backtest filled at the bar close; slicing into limit orders
+            # could leave the mirror half in or out of the position.
+            return "MARKET"
         # Calcular o valor nocional da ordem em relação ao portfólio
         portfolio_value = self.portfolio.get_total_value()
         notional_value_usd = portfolio_value * signal.position_size_pct * signal.leverage
@@ -1170,8 +1241,36 @@ class ExecutionEngine:
                     self.portfolio.update_from_trade(new_trade)
                     logger.debug(f"✅ [LIVE] Portfolio atualizado com trade real: {new_trade.side.value} {new_trade.quantity:.4f} @ {new_trade.executed_price:.2f}")
 
-                    # [SAFETY] Entrada → bracket SL/TP/Trailing; saída total → cancela proteções restantes
-                    await self._handle_protections_after_fill(order, new_trade)
+                    # [SAFETY] Bracket Orders (Server-Side) ativado imediatamente
+                    sl_pct = order.signal.stop_loss if (order.signal.stop_loss is not None and order.signal.stop_loss > 0) else self.config.DEFAULT_STOP_LOSS_PCT
+                    tp_pct = order.signal.take_profit if (order.signal.take_profit is not None and order.signal.take_profit > 0) else self.config.DEFAULT_TAKE_PROFIT_PCT
+                    
+                    if order.reduce_only:
+                        # A close must not arm new protections, and the stops of
+                        # the closed position must go: a closePosition stop left
+                        # behind would later close whatever position is open.
+                        await self._cancel_protective_orders(new_trade.symbol)
+                    elif self._is_mirror_signal(order.signal):
+                        # Mirrored policies exit through their environment, bar
+                        # by bar. Only the wide catastrophe stop goes to the
+                        # exchange; a take profit or trailing stop would cut the
+                        # trends the policy was approved for.
+                        await self._place_initial_hard_stop(new_trade, sl_pct)
+                    else:
+                        # 1. Stop Loss na Exchange (Condicional)
+                        await self._place_initial_hard_stop(new_trade, sl_pct)
+
+                        # 2. Take Profit na Exchange (Condicional)
+                        if tp_pct > 0:
+                            await self._place_initial_take_profit(new_trade, tp_pct)
+
+                        # 3. Trailing Stop (Híbrido)
+                        await self._place_trailing_stop(
+                            symbol=new_trade.symbol,
+                            side=new_trade.side,
+                            quantity=abs(new_trade.quantity),
+                            stop_loss_pct=sl_pct
+                        )
                 else:
                     logger.warning(f"⚠️ [SAFETY] Nao foi possivel obter objeto Trade para colocar protecoes em {order.id}.")
             else:

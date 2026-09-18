@@ -58,3 +58,10 @@ tensorboard/
 .project
 .pydevproject
 .settings/
+
+# Datasets derivados: reconstruidos por scripts/build_causal_dataset.py e
+# scripts/build_meta_features.py. Versionar geraria arquivos de centenas de MB
+# que ficam desatualizados em relacao ao codigo que os produz.
+data/featured_data_causal.parquet
+data/featured_data_causal.parquet.*
+cloud/artifacts/

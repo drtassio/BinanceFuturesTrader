@@ -194,15 +194,56 @@ class FeatureEngineeringPipeline:
         # Estratégia correta:
         #   1. ffill() → propaga o último valor conhecido de cada TF (ex: valor 4h é válido
         #                até o próximo bar 4h; merge_asof já faz isso, mas pode falhar na borda)
-        #   2. bfill() → preenche o início absoluto (primeiras linhas sem barra anterior)
+        #   2. não usar bfill(): ele preenche uma linha passada com informação
+        #      de uma barra futura e contamina o treino/backtest.
         #   3. dropna(subset=OHLCV) → só remove linhas sem dados de preço (impossível operar)
         #   4. fillna(0) → NaN residuais em indicadores viram 0 (neutro)
         #
         # Resultado esperado: ~600 linhas ao invés de ~40 → AE e especialistas funcionam.
         required_ohlcv = [c for c in ['open', 'high', 'low', 'close', 'volume'] if c in featured_df_combined.columns]
-        featured_df_combined = featured_df_combined.ffill().bfill()
+        featured_df_combined = featured_df_combined.ffill()
         featured_df_combined.dropna(subset=required_ohlcv, inplace=True)
         featured_df_combined = featured_df_combined.fillna(0.0)
+
+        # [CAUSALIDADE] Mesmo tratamento usado para construir o dataset de treino.
+        #
+        # Sem isto o merge_asof acima expoe um candle 1h/4h a partir da sua
+        # ABERTURA, quando ele so existe ao FECHAR: o bot leria aqui o fechamento
+        # de um candio 4h ate 3h45 antes de ele acontecer. Isso nao apenas vaza o
+        # futuro no backtest como descasa treino de producao, porque ao vivo esse
+        # candle esta em andamento e o valor e outro.
+        #
+        # As features cz_* (estrutura de tendencia e fluxo do tape) tambem nascem
+        # aqui, no mesmo codigo do treino, para que o contrato de observacao do
+        # especialista seja reproduzivel em tempo real.
+        try:
+            from feature_engineering.causal_features import build_causal_features
+            featured_df_combined, _causal_meta = build_causal_features(featured_df_combined)
+            featured_df_combined = featured_df_combined.ffill().fillna(0.0)
+            logger.info(
+                "[CAUSAL] HTF deslocado para candles fechados; +%d features de tendencia, +%d de tape.",
+                len(_causal_meta.get('trend_features', [])),
+                len(_causal_meta.get('tape_features', [])),
+            )
+        except Exception as causal_error:
+            # Falhar aqui em silencio produziria observacoes diferentes das do
+            # treino, entao o erro precisa aparecer.
+            logger.error("[CAUSAL] Falha ao aplicar features causais: %s", causal_error, exc_info=True)
+            raise
+
+        # A live tape snapshot belongs only to the latest bar. Applying it to
+        # historical rows would leak future order-book state into features.
+        if tape_metrics:
+            tape_map = {
+                'score': 'tape_score', 'obi': 'tape_obi', 'vpin': 'tape_vpin',
+                'delta': 'tape_delta', 'relative_volume': 'tape_relative_volume',
+                'depth_quality': 'tape_depth_quality',
+                'zone_imbalance_near': 'tape_zone_imbalance_near',
+                'zone_imbalance_mid': 'tape_zone_imbalance_mid',
+            }
+            for source, target in tape_map.items():
+                featured_df_combined[target] = 0.0
+                featured_df_combined.loc[featured_df_combined.index[-1], target] = float(tape_metrics.get(source, 0.0))
 
         rows_before = len(featured_df_combined)
         if featured_df_combined.empty:
@@ -211,15 +252,48 @@ class FeatureEngineeringPipeline:
 
         # ETAPA 7: ADICIONAR REGIME LABELS (Hamilton 1989)
         try:
-            from feature_engineering.scientific_data_processor import ScientificDataProcessor
-            data_processor = ScientificDataProcessor()
+            from feature_engineering.scientific_data_processor import create_data_processor
+            # Never overwrite the fitted normalization contract during a live
+            # inference cycle.  The old code saved an empty new processor.
+            data_processor = create_data_processor(self.config.MODEL_DIR)
             featured_df_combined = data_processor.add_regime_labels(featured_df_combined)
             logger.info(f"Regime labels adicionados: {featured_df_combined['regime'].value_counts().to_dict()}")
         except Exception as e:
             logger.warning(f"Falha ao adicionar regime labels: {e}")
         
         logger.info(f"Features criadas com sucesso. Shape: {featured_df_combined.shape}")
+        featured_df_combined = self._add_meta_features(featured_df_combined)
         return featured_df_combined
+
+    def _add_meta_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Colunas ml_* ao vivo, com o modelo salvo por build_meta_features.
+
+        Os especialistas foram treinados com ml_p_long, ml_p_short, ml_edge e
+        ml_conf. Sem este passo elas nao existiriam em producao e a observacao
+        receberia zeros no lugar das quatro features mais informativas. Os
+        priors de regime sao recalculados aqui pela mesma funcao do treino,
+        porque o meta-modelo pode usa-los e eles so seriam criados mais adiante.
+        """
+        import os
+        bundle_path = os.path.join(os.getcwd(), "models_ai", "meta_labeler.joblib")
+        if not os.path.exists(bundle_path):
+            logger.error("[META] %s ausente: colunas ml_* nao serao geradas ao vivo.", bundle_path)
+            return df
+        try:
+            import joblib
+            from feature_engineering.causal_features import add_regime_priors
+            from learning.meta_labeler import predict_bundle
+            if not hasattr(self, "_meta_bundle"):
+                self._meta_bundle = joblib.load(bundle_path)
+            scoring_frame, _ = add_regime_priors(df)
+            ml = predict_bundle(self._meta_bundle, scoring_frame)
+            for column in ml.columns:
+                df[column] = ml[column].to_numpy()
+        except Exception as meta_error:
+            # Nao silenciar: sem ml_* a observacao difere da do treino.
+            logger.error("[META] Falha ao gerar colunas ml_*: %s", meta_error, exc_info=True)
+            raise
+        return df
 
     def apply_hidden_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """

@@ -135,6 +135,15 @@ class ClippedSAC(BaseSAC):
     Suporta FP16 Mixed Precision para aceleração na GPU.
     """
 
+    # Dados da professora usados pelo regularizador de clonagem vivem so durante
+    # o treino. Sem esta exclusao, salvar o modelo embutiria ~120 MB de
+    # observacoes no .zip que o bot carrega.
+    _BC_RUNTIME_ATTRIBUTES = ("bc_observations", "bc_actions", "bc_sample_weights",
+                              "bc_weight", "actor_frozen")
+
+    def _excluded_save_params(self):
+        return list(super()._excluded_save_params()) + list(self._BC_RUNTIME_ATTRIBUTES)
+
     def __init__(self, *args, max_grad_norm: Optional[float] = 1.0, use_fp16: bool = False,
                  learning_monitor: Optional["LearningMonitor"] = None, **kwargs):
         self.max_grad_norm = None
@@ -239,8 +248,31 @@ class ClippedSAC(BaseSAC):
                 q_values_pi = torch.cat(self.critic(replay_data.observations, actions_pi), dim=1)
                 min_qf_pi, _ = torch.min(q_values_pi, dim=1, keepdim=True)
                 actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+
+                # Regularizador de clonagem (estilo TD3+BC), desligado por padrao.
+                # Mantem a politica deterministica perto de uma professora
+                # lucrativa enquanto o critico ainda aprende; sem ele, os primeiros
+                # gradientes de um critico sem treino apagam o que a clonagem
+                # ensinou e a politica volta a oscilar em torno do limiar.
+                bc_observations = getattr(self, 'bc_observations', None)
+                bc_weight = float(getattr(self, 'bc_weight', 0.0) or 0.0)
+                if bc_observations is not None and bc_weight > 0.0:
+                    pick = torch.randint(0, bc_observations.shape[0], (batch_size,),
+                                         device=bc_observations.device)
+                    predicted = self.actor(bc_observations[pick], deterministic=True)
+                    sample_weight = self.bc_sample_weights[pick]
+                    per_sample = ((predicted - self.bc_actions[pick]) ** 2).mean(dim=1)
+                    bc_loss = (sample_weight * per_sample).sum() / sample_weight.sum()
+                    actor_loss = actor_loss + bc_weight * bc_loss
             actor_losses.append(actor_loss.detach())
-            
+
+            if getattr(self, 'actor_frozen', False):
+                # Aquecimento do critico: so os valores Q aprendem.
+                if gradient_step % self.target_update_interval == 0:
+                    polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+                    polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+                continue
+
             # Actor backward com scaler
             self.actor.optimizer.zero_grad(set_to_none=True)
             if use_amp:
@@ -370,7 +402,14 @@ class TrendFollowingEnv(gym.Env):
         self._feature_scaler = feature_scaler
         # <<< CORREÃƒâ€¡ÃƒÆ'O: Torna o ambiente ciente do timeframe >>>
         self.primary_tf = self.trading_config.PRIMARY_TIMEFRAME_TRADING
-        self.atr_col = f'atr_{self.primary_tf}'
+        # Stops, trailing, grace, sizing and slippage are all measured in this
+        # ATR. On 15m ATR a 4-day trend is closed by the first 1% pullback
+        # (Donchian 480/240 teacher: 32-bar trades, validation -1.5%); on 4h ATR
+        # the same teacher holds ~300 bars (validation +11.6%, forward +8.1%).
+        stop_tf = str(getattr(self.config, 'ENV_STOP_ATR_TIMEFRAME', '') or self.primary_tf)
+        self.atr_col = f'atr_{stop_tf}'
+        if self.atr_col not in self.df.columns:
+            raise ValueError(f'ENV_STOP_ATR_TIMEFRAME={stop_tf}: coluna {self.atr_col} ausente do dataset')
         ema_candidate = f'ema_trend_{self.primary_tf}'
         if ema_candidate in self.df.columns:
             self.ema_trend_col = ema_candidate
@@ -383,7 +422,7 @@ class TrendFollowingEnv(gym.Env):
                 logger.warning("[ENV ELITE] Coluna de tendencia EMA nao encontrada no dataset. Gating usara valor neutro.")
         self.mode = mode
         self.disable_time_stop = True  # Agente decide quando sair, sem limite de tempo fixo
-        self.disable_normal_sl = True  # 🔬 SISTEMA 3 CAMADAS: SL normal desativado, agente livre
+        self.disable_normal_sl = False  # Risk protection also applies during learning.
         self.profitability_predictor = profitability_predictor
         self.initial_balance = self.trading_config.INITIAL_CAPITAL
         self.specialist_name = specialist_name
@@ -618,6 +657,31 @@ class TrendFollowingEnv(gym.Env):
             
         return float(notional * funding_rate * position_sign * boundary_count)
 
+    def _funding_rate_from_row(self, row):
+        """Canonical causal data first; retain compatibility with old datasets.
+
+        None means no historical funding column. A genuine zero rate must not
+        trigger the synthetic financing fallback.
+        """
+        for column in ('funding_rate', 'funding_rate_15m'):
+            if column in self.df.columns:
+                value = float(row[column])
+                if not np.isfinite(value):
+                    raise ValueError(f"Non-finite historical funding: {column}")
+                return value
+        return None
+
+    @staticmethod
+    def _resting_stop_fill(position, stop, candle_open, candle_high, candle_low):
+        """Fill a stop placed before this candle; adverse gaps fill at open."""
+        if stop is None or position == 0:
+            return None
+        if position > 0 and candle_low <= stop:
+            return min(float(stop), float(candle_open))
+        if position < 0 and candle_high >= stop:
+            return max(float(stop), float(candle_open))
+        return None
+
     def set_anti_scalping_config(self, config_params: Dict[str, Any]):
                 # FASE 1 desativada: nenhuma configuracao anti-scalping aplicada
         try:
@@ -826,15 +890,19 @@ class TrendFollowingEnv(gym.Env):
         self._current_trade_aligned = None  # [FIX] rastreia alinhamento da entrada atual
         # tp_level removido (seguidor de tendÃƒÂªncia nÃƒÂ£o define take profit fixo)
         self.sl_level = None
+        self._stop_was_trailed = False
         self.time_stop_step = None
         # [TRAILING CATASTROPHE SL] Rastreia pico de preço para ratchet do CSL
         self._peak_price_since_entry = None
+        self._initial_risk_pct = 0.0
         self._catastrophe_sl_floor = None
         self.episode_peak_net_worth = self.initial_balance
         self.episode_max_drawdown = 0.0
         self.episode_trades = 0
         self.episode_wins = 0
         self.exit_reason_counts = {"agent": 0, "stop_loss": 0, "catastrophe": 0, "time_stop": 0, "ruin": 0, "other": 0}  # Track exit reasons
+        self.policy_exit_requests = {'requested_steps': 0, 'blocked_by_grace_steps': 0,
+                                     'eligible_steps': 0}
         self.regime_counters = {"up": {"wins": 0, "trades": 0}, "down": {"wins": 0, "trades": 0}, "side": {"wins": 0, "trades": 0}}
         self._trend_regime_sum = {"up": 0.0, "down": 0.0, "side": 0.0}
         self._trend_sample_count = 0
@@ -988,9 +1056,12 @@ class TrendFollowingEnv(gym.Env):
 
         # 🔬 Dr. Tensor: Injeção de Física na Observação
         # Calcula em tempo real para o estado atual
-        # Física pré-calculada por candle (mesma função usada ao vivo)
-        market_entropy = float(self._physics_entropy[_safe_idx])
-        market_hurst = float(self._physics_hurst[_safe_idx])
+        # Lidas do dataframe, onde causal_features ja as calculou com a mesma
+        # formula. Antes eram recomputadas a cada passo sobre uma janela de 100
+        # barras — 72% do tempo de CPU do ambiente — e o resultado era perdido,
+        # porque este .get() procurava chaves que a funcao nao devolvia. As duas
+        # dimensoes eram constantes 0.0 e 0.5.
+        market_entropy, market_hurst = self._chaos_metrics(row_all)
         physics_state = np.array([market_entropy, market_hurst], dtype=np.float32)
 
         return np.concatenate([
@@ -1001,6 +1072,33 @@ class TrendFollowingEnv(gym.Env):
             np.array([prior_dir_val, prior_conf_val], dtype=np.float32),
             physics_state
         ])
+
+    def _chaos_metrics(self, row) -> Tuple[float, float]:
+        """Entropia de Shannon e expoente de Hurst da linha atual.
+
+        Pre-calculados por feature_engineering.causal_features com a mesma
+        formula de utils.physics_sensors. O fallback recomputa a janela apenas
+        quando o dataset nao traz as colunas, o que mantem compatibilidade com
+        parquets antigos ao custo de velocidade.
+        """
+        try:
+            entropy = float(row.get('cz_entropy', np.nan))
+            hurst = float(row.get('cz_hurst', np.nan))
+            if np.isfinite(entropy) and np.isfinite(hurst) and hurst != 0.0:
+                return entropy, hurst
+        except Exception:
+            pass
+        try:
+            start = max(0, self.start_idx + self.current_step - 100)
+            end = self.start_idx + self.current_step + 1
+            window = self.df.iloc[start:end]
+            if len(window) >= 30:
+                metrics = get_market_chaos_metrics(window)
+                return (float(metrics.get('shannon_entropy', 0.0)),
+                        float(metrics.get('hurst_exponent', 0.5)))
+        except Exception:
+            pass
+        return 0.0, 0.5
 
     def _get_ema_trend_value(self, row: _TrendNpRow) -> float:
         # [FIX #6] Removido código morto de _simulate_slippage que estava colado aqui
@@ -1017,8 +1115,9 @@ class TrendFollowingEnv(gym.Env):
             mark_to_market = 0.0
         self.net_worth -= mark_to_market
         self.net_worth += float(pnl_realized)
-        # Taxa de saída cobrada em TODO fechamento (agente, stops, fim de episódio/segmento)
-        self.net_worth -= float(self.initial_notional_value or 0.0) * float(self.trading_config.TAKER_FEE)
+        # Every liquidation pays an exit fee: agent, ordinary stop,
+        # catastrophe, time stop and episode end all share this method.
+        self.net_worth -= float(self.initial_notional_value) * self.trading_config.TAKER_FEE
         # [FIX] Floor de liquidação ao fechar posição também
         _margin_minimum = self.initial_balance * 0.001
         if self.net_worth < _margin_minimum:
@@ -1051,7 +1150,13 @@ class TrendFollowingEnv(gym.Env):
         Alvo: ~50-60 features | obs space ~65-73 com estado do agente.
         """
         # 1. Features sem sufixo de timeframe: latents + meta — SEMPRE incluir
-        _ALWAYS_PREFIXES = ('hidden_feature',)
+        #
+        # 'cz_' sao as features causais de estrutura de tendencia e de fluxo do
+        # tape (feature_engineering/causal_features.py), e 'ml_' as saidas do
+        # meta-modelo supervisionado. Ambas ja nascem estacionarias e em escala
+        # comparavel entre regimes, e sao produzidas pelo MESMO codigo no treino
+        # e ao vivo — por isso entram sempre, sem passar pelo filtro de timeframe.
+        _ALWAYS_PREFIXES = ('hidden_feature', 'cz_', 'ml_')
         _ALWAYS_CONTAINS = ('sdae_recon', 'regime_conf', 'tp_prior')
 
         # 2. Timeframes a EXCLUIR das features técnicas
@@ -1073,6 +1178,7 @@ class TrendFollowingEnv(gym.Env):
             'hc_wick', 'lc_wick',           # tamanho de sombras — sinal de reversão
             'money_flow', 'volume_pressure',
             'ema_trend', 'psar_trend',
+            'aggressor_imbalance', 'aggressor_delta_z', 'taker_buy_ratio', 'funding_rate',
         )
 
         core: List[str] = []
@@ -1096,6 +1202,18 @@ class TrendFollowingEnv(gym.Env):
 
             # Excluir timeframes ruidosos/redundantes ANTES de checar padrões técnicos
             if any(fl.endswith(tf) or (tf + '_') in fl for tf in _EXCLUDED_TF):
+                continue
+
+            # Colunas "*_tf_*" nao existem no pipeline ao vivo: o especialista
+            # receberia zero em producao no lugar do valor visto no treino.
+            if '_tf_' in fl:
+                continue
+
+            # Diferenciacao fracionaria com janela expansiva depende de quanto
+            # historico existe antes da barra. Medido por
+            # scripts/verify_live_parity.py: close_frac_1h vale 11057.8 no treino e
+            # 12074.7 ao vivo na mesma barra (8%), porque o bot so tem 852 barras.
+            if '_frac' in fl:
                 continue
 
             # Features técnicas em _15m e _1h (substring match restrito)
@@ -1137,34 +1255,39 @@ class TrendFollowingEnv(gym.Env):
     def _init_dynamic_risk_controls(self) -> None:
         """Calcula valores de refer?ncia din?micos para car?ncia e SL a partir do dataset."""
         # BUG N6 FIX: Calcular baseline sobre o episódio atual, e não sobre o dataset inteiro.
-        start_idx = getattr(self, 'start_idx', 0)
-        end_idx = min(len(self.df), start_idx + getattr(self, 'max_steps', len(self.df)))
-        episode_df = self.df.iloc[start_idx:end_idx]
+        # Risk calibration may only see bars available at the current decision.
+        # Episode-wide percentiles leaked future volatility/duration into stops
+        # and made identical bars behave differently in a live replay window.
+        start_idx = getattr(self, 'start_idx', 0) + getattr(self, 'current_step', 0)
+        # Cache causal rolling statistics once: no pandas slicing/quantiles on
+        # every training step, particularly important on a CPU-only machine.
+        if not hasattr(self, '_causal_risk_cache'):
+            cached = {}
+            if 'tp_duration_median' in self.df.columns:
+                values = pd.to_numeric(self.df['tp_duration_median'], errors='coerce').replace([np.inf, -np.inf], np.nan)
+                rolling = values.rolling(256, min_periods=1)
+                cached['duration'] = [rolling.quantile(q).to_numpy() for q in (0.25, 0.5, 0.75)]
+            if self.atr_col in self.df.columns and 'close' in self.df.columns:
+                atr_values = pd.to_numeric(self.df[self.atr_col], errors='coerce')
+                close_values = pd.to_numeric(self.df['close'], errors='coerce').replace(0.0, np.nan)
+                values = (atr_values / close_values).replace([np.inf, -np.inf], np.nan)
+                cached['atr'] = values.rolling(256, min_periods=1).median().to_numpy()
+            self._causal_risk_cache = cached
 
-        durations = None
-        if 'tp_duration_median' in episode_df.columns:
-            try:
-                durations = pd.to_numeric(episode_df['tp_duration_median'], errors='coerce')
-            except Exception:
-                durations = None
-        if durations is not None:
-            valid = durations[np.isfinite(durations)]
-            if not valid.empty:
-                self._grace_floor = max(5, int(np.nanpercentile(valid, 25)))
-                self._grace_median = max(self.scalp_penalty_min_duration, int(np.nanmedian(valid)))
-                self._grace_cap = max(self._grace_median + 5, int(np.nanpercentile(valid, 75) * 1.5))
-                self.scalp_penalty_min_duration = int(self._grace_median)
-        if self.atr_col in episode_df.columns and 'close' in episode_df.columns:
-            try:
-                atr_series = pd.to_numeric(episode_df[self.atr_col], errors='coerce')
-                close_series = pd.to_numeric(episode_df['close'], errors='coerce').replace(0.0, np.nan)
-                atr_pct_series = (atr_series / close_series).replace([np.inf, -np.inf], np.nan).dropna()
-                if not atr_pct_series.empty:
-                    self._atr_pct_baseline = float(np.nanmedian(atr_pct_series))
-            except Exception:
-                pass
+        self._grace_floor = 10
+        self._grace_median = self.scalp_penalty_min_duration
+        self._grace_cap = max(90, self.scalp_penalty_min_duration * 2)
+        self._atr_pct_baseline = 0.01
+        duration = self._causal_risk_cache.get('duration')
+        if duration is not None and all(np.isfinite(values[start_idx]) for values in duration):
+            q25, median, q75 = (values[start_idx] for values in duration)
+            self._grace_floor = max(5, int(q25))
+            self._grace_median = max(self.scalp_penalty_min_duration, int(median))
+            self._grace_cap = max(self._grace_median + 5, int(q75 * 1.5))
+        atr_baseline = self._causal_risk_cache.get('atr')
+        if atr_baseline is not None and np.isfinite(atr_baseline[start_idx]):
+            self._atr_pct_baseline = float(atr_baseline[start_idx])
         self._atr_pct_baseline = max(self._atr_pct_baseline, 1e-3)
-        self._active_grace_period = 0
 
     def _compute_trade_grace_period(self, atr_pct: float, duration_hint: float, prior_strength: float, trend_bias: float) -> int:
         base = max(self._grace_floor, min(self._grace_cap, int(round(duration_hint)) if duration_hint > 0 else self._grace_median))
@@ -1472,10 +1595,16 @@ class TrendFollowingEnv(gym.Env):
         # NAO reseta _episode_trades_log — chamado no eval_env que persiste entre trials
 
     def _store_episode_summary(self) -> None:
+        # The matrix logger clears its trade buffer; capture before logging.
+        from learning.exit_diagnostics import summarize_exits
+        exit_diagnostics = summarize_exits(self._episode_trades_log)
         # Imprime matriz de trades antes de resetar os dados
         self._log_episode_matrix()
         summary = self._build_financial_snapshot(list(self._current_episode_returns), self._current_episode_durations)
         summary['episode_reward'] = float(self._episode_reward_accumulator)
+        summary['exit_reason_counts'] = self.get_exit_reason_counts()
+        summary['exit_diagnostics'] = exit_diagnostics
+        summary['policy_exit_requests'] = dict(getattr(self, 'policy_exit_requests', {}))
         logger.debug("[FASE 1 DEBUG] Episode summary -> trades=%s avg_duration=%.2f", summary.get('num_trades'), summary.get('avg_trade_duration', 0.0))
         self._last_episode_summary = summary
         self._episode_summaries.append(summary)
@@ -1518,6 +1647,11 @@ class TrendFollowingEnv(gym.Env):
         _safe_step = min(_raw_step, len(self.df) - 1)
         row_vals = self._rnp_values[_safe_step]
         current_row = _TrendNpRow(row_vals, self._col_idx_map)
+        # A funcao de recompensa le a linha atual para medir a oportunidade
+        # disponivel. Antes ela chamava getattr(env, 'current_row') sem que nada
+        # jamais atribuisse o atributo, de modo que todo o ramo do Ranger que
+        # dependia dele estava morto.
+        self.current_row = current_row
         if isinstance(getattr(self, "_gate_stats", None), Counter):
             self._gate_stats["total_steps"] += 1
         current_price = current_row.get('close', 0.0)
@@ -1528,6 +1662,7 @@ class TrendFollowingEnv(gym.Env):
         if np.isnan(atr) or atr <= 1e-9:
             atr = current_price * 0.01
         atr_pct = float(atr / (current_price + 1e-9)) if current_price else 0.0
+        self._init_dynamic_risk_controls()
         # Ajuste din?mico dos multiplicadores de SL conforme volatilidade
         sl_min_bound, sl_max_bound = self._dynamic_sl_bounds(atr_pct)
         sl_mult = float(np.clip(sl_mult_raw, sl_min_bound, sl_max_bound))
@@ -1686,7 +1821,15 @@ class TrendFollowingEnv(gym.Env):
             prev_timestamp = self.df.index[_ts_prev]
             current_timestamp = self.df.index[_ts_curr]
             delta_hours = max(1e-6, (current_timestamp - prev_timestamp).total_seconds() / 3600.0)
-            funding_cost = self.initial_notional_value * self.trading_config.LEVERAGE_COST_PER_DAY_PCT * (delta_hours / 24.0)
+            historical_rate = self._funding_rate_from_row(current_row)
+            if historical_rate is not None:
+                funding_cost = self._historical_funding_cost(
+                    self.initial_notional_value, float(np.sign(self.position)),
+                    historical_rate,
+                    prev_timestamp, current_timestamp,
+                )
+            else:
+                funding_cost = self.initial_notional_value * self.trading_config.LEVERAGE_COST_PER_DAY_PCT * (delta_hours / 24.0)
             self.net_worth -= funding_cost
             # [SCIENTIFIC] Funding reward movido para scientific_corrections.py
         # --- LÃƒâ€œGICA DE DECISÃƒÆ'O "LUZ VERDE" ---
@@ -1754,11 +1897,19 @@ class TrendFollowingEnv(gym.Env):
         # Ela criava conflito com o entry penalty e dominava o sinal científico.
         # Mantemos apenas o bônus positivo abaixo para incentivar o comportamento core.
             
-        # Se voto está bem calibrado → Bonus (só quando flat: incentiva entradas alinhadas,
-        # não fechamentos de trades — evita reward positivo em trades negativos fechados por Agent Decision)
+        # [REMOVIDO] Bonus de +0.2 por voto "calibrado" enquanto FLAT.
+        #
+        # Com as colunas tp_* ausentes do dataset, prior_conf_dyn e sempre 0.5,
+        # de modo que a condicao virava |voto| entre 0.2 e 0.8 com posicao zero:
+        # +0.2 por passo, para sempre, por nao operar. Num episodio de 3000 passos
+        # isso somava +600 sem abrir um unico trade, enquanto um trade de 2%
+        # rende +2.0 de reward economico e custa -0.8 de entrada.
+        #
+        # Ficar parado era a politica OTIMA desta recompensa. Era essa, e nao um
+        # colapso do SAC, a causa de a politica deterministica ficar 100% em HOLD
+        # no holdout enquanto a exploracao estocastica ainda negociava: o ruido
+        # cruzava o action_threshold, a media aprendida nunca.
         vote_confidence_alignment = 1.0 - abs(vote_magnitude - prior_conf_dyn)
-        if vote_confidence_alignment > 0.7 and self.position == 0:
-            reward += 0.2
 
         # BUG N4 FIX: Removido penalidade estrutural dupla ('directional_misalignment')
         # O método 'compute_scientific_reward' já aplica a punição via _regime_mismatch,
@@ -2081,7 +2232,22 @@ class TrendFollowingEnv(gym.Env):
         # [FIX CIENTÍFICO] Low confidence gate softened
         # 🔬 Dr. Tensor: Removido o bloqueio rígido (action_side = 0).
         # Agora o mismatch/low-confidence é tratado via reward penalties.
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        # Directional specialists use a constrained action space: invalid
+        # exploratory proposals become HOLD before order/PnL processing.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
+        is_opening_or_reversing = should_open_long or should_open_short
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         if low_confidence_gate:
             # [BUG 6 FIX] Nunca reutilizar _regime_mismatch aqui.
             # _regime_mismatch é específico para Bull tentando Short (e vice-versa).
@@ -2128,8 +2294,23 @@ class TrendFollowingEnv(gym.Env):
                     self._gate_stats["scalping_penalty"] += 1
         
         # Atualiza is_opening_or_reversing após possíveis bloqueios de flip
+        # Direction is a hard safety invariant for directional specialists.
+        # Project invalid exploratory actions to HOLD before order/PnL handling:
+        # Bull can never open SHORT and Bear can never open LONG.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
         is_opening_or_reversing = should_open_long or should_open_short
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         # LUZ AMARELA/VERMELHA (Fechamento Ativo)
         # BUG 6 FIX: Removido reset de info (era info: Dict[str, Any] = {})
         prior_threshold = float(getattr(self, "prior_flip_threshold", 0.3))
@@ -2159,11 +2340,16 @@ class TrendFollowingEnv(gym.Env):
         if self.position != 0 and is_in_grace_period:
             should_open_long = False
             should_open_short = False
+        # Histerese: abrir exige |voto| acima do limiar, e fechar exige o voto
+        # cruzar o limiar do lado OPOSTO — nao metade dele. Com meia banda, um
+        # voto que oscila perto de zero abria e fechava a mesma posicao a cada
+        # poucas barras: 2621 trades em 50 mil barras no treino, com o custo
+        # de ida e volta consumindo o edge inteiro.
         if self.position > 0:
-            agent_wants_close = agent_vote_strength <= -(action_threshold * 0.5)
+            agent_wants_close = agent_vote_strength <= -action_threshold
             agent_wants_reverse = agent_vote_strength <= -action_threshold
         elif self.position < 0:
-            agent_wants_close = agent_vote_strength >= (action_threshold * 0.5)
+            agent_wants_close = agent_vote_strength >= action_threshold
             agent_wants_reverse = agent_vote_strength >= action_threshold
         else:
             agent_wants_close = False
@@ -2227,6 +2413,10 @@ class TrendFollowingEnv(gym.Env):
             should_open_short = False
 
         agent_confirms_close = (agent_wants_close or agent_wants_reverse) and not is_in_grace_period
+        if self.position != 0 and (agent_wants_close or agent_wants_reverse):
+            self.policy_exit_requests['requested_steps'] += 1
+            key = 'eligible_steps' if agent_confirms_close else 'blocked_by_grace_steps'
+            self.policy_exit_requests[key] += 1
         closing_due_to_prior = bool(prior_penalty > 0 and agent_confirms_close)
         closing_due_to_agent = agent_confirms_close
         is_closing_trade = agent_confirms_close and (self.position != 0)
@@ -2261,7 +2451,21 @@ class TrendFollowingEnv(gym.Env):
             should_open_short = False
         # Atualiza direção final após possíveis ajustes
         is_opening_or_reversing = should_open_long or should_open_short
-        action_side = 1 if should_open_long else (-1 if should_open_short else int(np.sign(agent_vote_strength)))
+        # Final hard projection for Bull/Bear directional action spaces.
+        if getattr(self, '_specialist_long_only', False):
+            should_open_short = False
+        if getattr(self, '_specialist_short_only', False):
+            should_open_long = False
+
+        is_opening_or_reversing = should_open_long or should_open_short
+        if should_open_long:
+            action_side = 1
+        elif should_open_short:
+            action_side = -1
+        elif getattr(self, '_specialist_long_only', False) or getattr(self, '_specialist_short_only', False):
+            action_side = 0
+        else:
+            action_side = int(np.sign(agent_vote_strength))
         
         # [FIX CIENTÍFICO] Penalidade de baixa confiança já aplicada na linha ~1908.
         # Remover duplicata: a punição de -1.0 abaixo causava -2.0 no mesmo step.
@@ -2271,10 +2475,30 @@ class TrendFollowingEnv(gym.Env):
         trade_was_closed = False
         closed_trade_duration = None
         closed_trade_side = None
-        closed_entry_price = None
+        # Existing protection is checked BEFORE adjusting trailing levels with
+        # this candle. A close-only test misses stop hits followed by rebounds.
+        stop_fill = self._resting_stop_fill(
+            self.position, self.sl_level,
+            current_row.get('open', current_price),
+            current_row.get('high', current_price),
+            current_row.get('low', current_price),
+        )
+        if stop_fill is not None and not self.disable_normal_sl:
+            trade_was_closed = True
+            closed_trade_side = 'long' if self.position > 0 else 'short'
+            close_price = self._simulate_slippage(
+                stop_fill, atr, OrderSide.SELL if self.position > 0 else OrderSide.BUY)
+            pnl_realized = self.initial_notional_value * (
+                (close_price - self.entry_price) / (self.entry_price + 1e-9)
+            ) * np.sign(self.position)
+            self._apply_realized_pnl(pnl_realized)
+            self._prev_unrealized_return = 0.0
+            closed_trade_duration = self.steps_in_position
+            info['exit_reason'] = 'Stop Loss'
+            info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
         # Stop de CatÃƒÂ¡strofe baseado em ATR (rede de seguranÃƒÂ§a do ambiente)
         # 🔬 [SCIENTIFIC FIX] Catastrophe SL deve SEMPRE estar ativo, mesmo durante o grace period.
-        if self.position != 0:
+        if self.position != 0 and not trade_was_closed:
             catastrophe_multiplier = self._compute_catastrophe_multiplier(atr_pct, self._last_prior_dir_val, int(np.sign(self.position)))
             # [FIX OPTION B] CSL em duas fases — buffer largo para o agente aprender a sair.
             # Fase 1 (+1 ATR): protege apenas breakeven (entry + fees). Sem trail ainda.
@@ -2376,6 +2600,7 @@ class TrendFollowingEnv(gym.Env):
                     closed_trade_side = 'long'
                     closed_entry_price = float(self.entry_price)
                     info['exit_reason'] = 'Stop Loss'
+                    info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
             else:
                 if self.sl_level is not None and current_price >= self.sl_level:  # [FIX #1] condição restaurada
                     trade_was_closed = True
@@ -2387,6 +2612,7 @@ class TrendFollowingEnv(gym.Env):
                     closed_trade_side = 'short'
                     closed_entry_price = float(self.entry_price)
                     info['exit_reason'] = 'Stop Loss'
+                    info['stop_protection_kind'] = 'trailing' if self._stop_was_trailed else 'initial'
         
         # [NEW] Ranger Quick Exit Logic
         if not trade_was_closed and self.position != 0:
@@ -2400,31 +2626,50 @@ class TrendFollowingEnv(gym.Env):
                 closed_trade_side = 'long' if self.position > 0 else 'short'
                 closed_entry_price = float(self.entry_price)
                 info['exit_reason'] = 'Quick Exit (TP)'
-        # Trailing Stop simples baseado em ATR quando em lucro
-        if self.position != 0 and not trade_was_closed and self.pnl_since_entry > (atr / (self.entry_price + 1e-9)):
-            trail_mult = 0.5 * sl_mult  # aproxima o SL conforme o lucro cresce
+        # --- APERTO DO STOP: so depois que o trade conquistou espaco ---
+        #
+        # Os tres mecanismos abaixo (trailing simples, Chandelier e PSAR) eram
+        # aplicados desde a PRIMEIRA barra da posicao, cada um com max()/min(),
+        # de modo que o mais apertado sempre vencia e o sl_mult escolhido pelo
+        # agente virava decoracao.
+        #
+        # O Chandelier era o pior: olhava a maxima das ultimas 22 barras,
+        # INCLUINDO barras anteriores a entrada. Ao entrar numa correcao, essa
+        # maxima fica acima do preco de entrada e 'maxima - 3 ATR' podia nascer
+        # ACIMA da propria entrada — stop ja violado antes da primeira barra.
+        # Resultado medido: 915 trades em 4000 barras, duracao media de 3.4
+        # barras, praticamente todos encerrados por Stop Loss. Seguir uma
+        # tendencia era mecanicamente impossivel.
+        #
+        # Regra agora: nada aperta o stop enquanto o trade nao pagar 1R, isto e,
+        # enquanto o lucro nao cobrir a distancia de risco inicial. E o
+        # Chandelier passa a olhar apenas o extremo ALCANCADO DESDE A ENTRADA,
+        # que e a definicao correta do indicador para uma posicao aberta.
+        initial_risk_pct = float(getattr(self, '_initial_risk_pct', 0.0) or 0.0)
+        r_multiple = (self.pnl_since_entry / initial_risk_pct) if initial_risk_pct > 1e-9 else 0.0
+        may_tighten = self.position != 0 and not trade_was_closed and r_multiple >= 1.0
+        stop_before_tightening = self.sl_level
+
+        if may_tighten:
+            # Trailing proporcional ao risco assumido, nao a metade dele.
+            trail_mult = max(1.0, sl_mult)
             if self.position > 0:
-                new_sl = max(self.sl_level or -np.inf, current_price - atr * trail_mult)
-                self.sl_level = new_sl
+                self.sl_level = max(self.sl_level or -np.inf, current_price - atr * trail_mult)
             else:
-                new_sl = min(self.sl_level or np.inf, current_price + atr * trail_mult)
-                self.sl_level = new_sl
-        # Chandelier Exit (ATR-based)
-        if self.position != 0 and not trade_was_closed:
-            lookback = 22
+                self.sl_level = min(self.sl_level or np.inf, current_price + atr * trail_mult)
+
+        if may_tighten:
+            # Chandelier sobre o extremo desde a entrada.
             atr_mult = 3.0
-            _abs_end = min(self.start_idx + self.current_step, len(self.df) - 1)
-            start = max(0, _abs_end - lookback + 1)
-            window_high = float(np.max(self.df['high'].iloc[start:_abs_end + 1])) if 'high' in self.df.columns else current_price
-            window_low = float(np.min(self.df['low'].iloc[start:_abs_end + 1])) if 'low' in self.df.columns else current_price
             if self.position > 0:
-                chandelier_sl = window_high - atr_mult * atr
-                self.sl_level = max(self.sl_level or -np.inf, chandelier_sl)
+                peak = float(getattr(self, '_peak_price_since_entry', current_price) or current_price)
+                self.sl_level = max(self.sl_level or -np.inf, peak - atr_mult * atr)
             else:
-                chandelier_sl = window_low + atr_mult * atr
-                self.sl_level = min(self.sl_level or np.inf, chandelier_sl)
+                trough = float(getattr(self, '_peak_price_since_entry', current_price) or current_price)
+                self.sl_level = min(self.sl_level or np.inf, trough + atr_mult * atr)
+
         # Parabolic SAR simplificado
-        if self.position != 0 and not trade_was_closed:
+        if may_tighten:
             if self._psar is None:
                 if self.position > 0:
                     self._psar_trend = 1
@@ -2450,6 +2695,8 @@ class TrendFollowingEnv(gym.Env):
                         self._psar_af = min(self._psar_af + 0.02, 0.2)
                     self._psar = self._psar + self._psar_af * (self._psar_ep - self._psar)
                     self.sl_level = min(self.sl_level or np.inf, self._psar)
+        if may_tighten and self.sl_level != stop_before_tightening:
+            self._stop_was_trailed = True
         # Time-based stop: respeita o per?odo de car?ncia e s? fecha por neutralidade ou invers?o clara do EMA
         if self.position != 0 and not trade_was_closed and (not getattr(self, 'disable_time_stop', False)) and self.time_stop_step is not None and self.current_step >= self.time_stop_step and not is_in_grace_period:
             row_curr = self.df.iloc[self.start_idx + self.current_step]
@@ -2508,21 +2755,47 @@ class TrendFollowingEnv(gym.Env):
                 # Ajusta alavancagem conforme novo espaÃƒÂ§o de aÃƒÂ§ÃƒÂ£o (ÃƒÂ­ndice 2)
                 self.current_leverage = np.clip(desired_leverage, self.action_space.low[2], self.action_space.high[2])
                 
-                # --- CORREÇÃO: POSITION SIZING BASEADO EM CONFIANÇA PURA ---
-                # A confiança vem da Rede Neural (tp_prior_conf), ajustada apenas pela incerteza.
-                # Não misturamos mais com o voto do agente para dimensionamento.
-                # Tamanho da posição: com prior de confiança nos dados, escala pela confiança; sem ele (caso atual),
-                # usa a alocação cheia e a alavancagem escolhida pelo agente controla o risco. Antes o notional
-                # ficava <= 3% do patrimônio (10% x 0.1) e o PnL por passo era ruído perto da entropia do SAC.
-                if 'tp_prior_conf' in self._col_idx_map:
-                    raw_conf = float(current_row.get('tp_prior_conf', 0.5))
-                    uncertainty = float(current_row.get('tp_uncertainty', 0.0))
-                    adjusted_conf = raw_conf * (1.0 - min(uncertainty, 0.5))
-                    position_size_pct = np.clip((adjusted_conf - 0.5) * 2.0, 0.1, 1.0)
-                else:
-                    position_size_pct = 1.0
-                base_allocation = self.net_worth * float(getattr(self.trading_config, 'ENV_BASE_ALLOCATION', 1.0))
-                self.initial_notional_value = base_allocation * self.current_leverage * position_size_pct
+                # --- POSITION SIZING POR ORCAMENTO DE RISCO ---
+                #
+                # A formula anterior dimensionava por 'tp_prior_conf', coluna que
+                # NAO existe no dataset. O get() devolvia 0.5 sempre, entao
+                # (0.5 - 0.5) * 2 = 0.0 e o clip travava no piso 0.1. Toda posicao
+                # ficava presa em 10% de uma alocacao de 10%, ou seja 1% do
+                # patrimonio vezes alavancagem: com capital 100 e alavancagem 2, o
+                # nocional era 2.00. Um movimento de 10% no preco mexia 0.3% na
+                # conta, de modo que o reward economico ficava perto de zero e as
+                # penalidades de shaping, que valem varios pontos cada, dominavam
+                # o sinal inteiro. Nenhum ajuste de recompensa poderia funcionar
+                # enquanto o lucro estivesse escalado para nada.
+                #
+                # O tamanho agora sai do risco: arrisca-se uma fracao fixa do
+                # patrimonio por trade e a distancia do stop determina o nocional.
+                # Assim um stop custa sempre o mesmo em percentual da conta,
+                # independente da volatilidade, e um trend trade que corre tres
+                # vezes a distancia do stop ganha tres vezes o risco — a assimetria
+                # de que o trend-following vive.
+                conviction = float(np.clip(abs(position_action_raw), 0.0, 1.0))
+                size_factor = float(np.clip(0.30 + 0.70 * conviction, 0.30, 1.0))
+                # Confianca do meta-modelo supervisionado, quando presente.
+                ml_conf = float(current_row.get('ml_conf', 0.5))
+                if np.isfinite(ml_conf):
+                    size_factor *= float(np.clip(0.5 + ml_conf, 0.5, 1.5))
+
+                risk_budget = (
+                    self.net_worth
+                    * float(getattr(self.trading_config, 'MAX_PORTFOLIO_RISK_PERCENT', 0.02))
+                    * size_factor
+                )
+                # Piso na distancia do stop para nao explodir o nocional quando a
+                # volatilidade colapsa.
+                stop_distance_pct = max(float(sl_mult) * atr / (current_price + 1e-9), 0.0015)
+                notional = risk_budget / stop_distance_pct
+                # A acao de alavancagem limita a exposicao; o risco a define.
+                max_notional = self.net_worth * float(max(self.current_leverage, 1.0))
+                self.initial_notional_value = float(
+                    np.clip(notional, self.net_worth * 0.05, max_notional)
+                )
+                position_size_pct = self.initial_notional_value / (self.net_worth + 1e-9)
                 
                 # Fee de entrada
                 entry_fee = (self.initial_notional_value or 0) * self.trading_config.TAKER_FEE
@@ -2563,6 +2836,7 @@ class TrendFollowingEnv(gym.Env):
                 # 🔬 Dr. Tensor: Reduzido de 2.5x para 1.5x (era 2.5x na auditoria)
                 # para evitar que perdas isoladas destruam o PnL do episódio.
                 sl_base_multiplier = sl_mult * 1.5 
+                self._stop_was_trailed = False
                 
                 if self.position > 0:
                     self.sl_level = self.entry_price - atr * sl_base_multiplier
@@ -2577,6 +2851,13 @@ class TrendFollowingEnv(gym.Env):
                         self.sl_level = self.entry_price - atr * sl_base_multiplier * sl_unc_mult
                     else:
                         self.sl_level = self.entry_price + atr * sl_base_multiplier * sl_unc_mult
+                # Distancia de risco inicial (1R). Os mecanismos de aperto do
+                # stop so passam a agir depois que o trade paga esse valor, o que
+                # da a uma tendencia espaco para se desenvolver antes de o stop
+                # comecar a persegui-la.
+                self._initial_risk_pct = abs(
+                    float(self.sl_level) - float(self.entry_price)
+                ) / (abs(float(self.entry_price)) + 1e-9)
                 # Define time stop usando duraÃƒÂ§ÃƒÂ£o mediana (robustecido por regime)
                 dur_med_raw = self.df.iloc[self.start_idx + self.current_step].get('tp_duration_median', 0)
                 try:
@@ -2661,7 +2942,7 @@ class TrendFollowingEnv(gym.Env):
                         logger.debug('[FASE 1 DEBUG] Entries disabled - trades limit atingido')
                 exit_reason = info.get('exit_reason', 'Agent Decision')
                 # Track exit reasons for diagnostics
-                if exit_reason == 'Agent Decision':
+                if str(exit_reason).startswith('Agent Decision'):
                     self.exit_reason_counts["agent"] += 1
                 elif exit_reason == 'Stop Loss':
                     self.exit_reason_counts["stop_loss"] += 1
@@ -2715,6 +2996,7 @@ class TrendFollowingEnv(gym.Env):
                     'pnl_usd': float(pnl_realized),
                     'pnl_pct': float(trade_return_pct) * 100.0,
                     'exit_reason': exit_reason or 'Agent Decision',
+                    'stop_protection_kind': info.get('stop_protection_kind'),
                     'net_worth': float(self.net_worth),
                 })
             else:
@@ -2824,7 +3106,8 @@ class TrendFollowingEnv(gym.Env):
         self.current_step += 1
         # Limite de duraÃƒÂ§ÃƒÂ£o do episÃƒÂ³dio: roda atÃƒÂ© consumir todo o dataset
         quota_exhausted = getattr(self, 'disable_new_entries', False) and getattr(self, 'trades_remaining', 0) == 0 and self.position == 0
-        done = self.current_step >= self.max_steps or quota_exhausted
+        ruin_reached = self.net_worth / (self.initial_balance + 1e-9) < getattr(self, 'ruin_threshold', 0.50)
+        done = self.current_step >= self.max_steps or quota_exhausted or ruin_reached
         
         # [BUG 4 FIX] Force close at episode end
         # Se um trade foi carregado atÃ© o fim do eval set (surfando a trend sem time stop),
@@ -2835,7 +3118,12 @@ class TrendFollowingEnv(gym.Env):
         if (done or at_segment_end) and self.position != 0:
             close_price = self._simulate_slippage(current_price, atr, OrderSide.SELL if self.position > 0 else OrderSide.BUY)
             pnl_realized = self.initial_notional_value * ((close_price - self.entry_price) / (self.entry_price + 1e-9)) * np.sign(self.position)
-            trade_return_pct = (close_price - self.entry_price) / (self.entry_price + 1e-9) * np.sign(self.position)
+            # Forced liquidation pays the same taker fee as an ordinary exit.
+            # Its reported return must also use the ordinary margin basis,
+            # rather than mixing unleveraged returns into leveraged statistics.
+            leverage_used = max(abs(float(self.current_leverage)), 1e-9)
+            margin_basis = max(self.initial_notional_value / leverage_used, 1e-6)
+            trade_return_pct = pnl_realized / margin_basis
             
             self._apply_realized_pnl(pnl_realized)
             info['exit_reason'] = 'Episode End' if done else 'Segment End'
@@ -2876,7 +3164,6 @@ class TrendFollowingEnv(gym.Env):
             self.current_leverage = 1.0
         if done:
             logger.debug("[FASE 1 DEBUG] Trades no episodio: %s | cooldown_base=%s", self._trades_in_episode, getattr(self, 'post_trade_cooldown_base', None))
-            self._store_episode_summary()
             self._trades_in_episode = 0
             self.trades_remaining = self.max_trades_per_episode if self.max_trades_per_episode is not None else float('inf')
             self.disable_new_entries = False
@@ -2940,18 +3227,26 @@ class TrendFollowingEnv(gym.Env):
             
         # --- Sensores de Física (Dr. Tensor) ---
         # Calcula caos e ruído do mercado para o motor de recompensa
-        physics_metrics = {
-            'shannon_entropy': float(self._physics_entropy[_safe_step]),
-            'hurst_exponent': float(self._physics_hurst[_safe_step]),
-        }
+        # Mesma leitura barata usada em _get_observation.
+        _entropy_now, _hurst_now = self._chaos_metrics(current_row)
 
         info.update({
             'prior_dir_val': prior_dir_val,
             'prior_conf_val': prior_conf_dyn,
             '_regime_mismatch': bool(is_mismatch or info.get('_regime_mismatch', False)),
-            'market_entropy': physics_metrics.get('shannon_entropy', 0.0),
-            'market_hurst': physics_metrics.get('hurst_exponent', 0.5)
+            'market_entropy': _entropy_now,
+            'market_hurst': _hurst_now,
         })
+
+        # Retorno econômico causal do passo: calculado após PnL marcado a
+        # mercado, fees, funding e eventual fechamento. Este é o sinal que a
+        # política deve maximizar; não depende do futuro.
+        _economic_base = max(abs(float(prev_net_worth)), 1e-9)
+        info['economic_step_return'] = float(
+            (float(self.net_worth) - float(prev_net_worth)) / _economic_base
+        )
+        if bool(getattr(self.config, 'ECONOMIC_REWARD_ONLY', True)):
+            reward = 0.0
         
         # Se o trade fechou AGORA, passamos os dados dele. Senão, 0.0.
         pnl_to_pass = float(getattr(self, '_last_pnl_realized', 0.0))
@@ -3005,7 +3300,6 @@ class TrendFollowingEnv(gym.Env):
                 f"Final Reward: {reward:.4f}"
             )
         
-        self._episode_reward_accumulator += float(reward)
         self._prev_net_worth = self.net_worth
         
         # 🔬 SISTEMA 3 CAMADAS: Ruin Buffer Penalty
@@ -3016,7 +3310,8 @@ class TrendFollowingEnv(gym.Env):
         ruin_buffer_threshold = getattr(self, 'ruin_buffer_threshold', 0.80)
         ruin_threshold = getattr(self, 'ruin_threshold', 0.50)
         
-        if capital_ratio < ruin_buffer_threshold:
+        economic_only = bool(getattr(self.config, 'ECONOMIC_REWARD_ONLY', True))
+        if capital_ratio < ruin_buffer_threshold and not economic_only:
             # Penalidade progressiva: até -10 quando chega em ruin_threshold
             ruin_penalty = -10.0 * (ruin_buffer_threshold - capital_ratio) / (ruin_buffer_threshold - ruin_threshold + 1e-9)
             reward += ruin_penalty  # Adicionado AO reward bruto, antes da normalização
@@ -3028,15 +3323,20 @@ class TrendFollowingEnv(gym.Env):
         #   1ª camada (Welford): instável nos primeiros ~200 steps (running_std ≈ 1.0 artificial)
         #   2ª camada (VecNormalize): recebe sinal já distorcido e aplica outra transformação
         # Resultado: SAC recebia gradientes completamente descorrelacionados do PnL real.
-        reward_normalized = float(np.clip(reward, -self._reward_norm_clip, self._reward_norm_clip))
+        reward_normalized = (float(reward) if economic_only else
+                             float(np.clip(reward, -self._reward_norm_clip, self._reward_norm_clip)))
         
         # 🔬 SISTEMA 3 CAMADAS: Episódio Terminal por Ruína
         if capital_ratio < ruin_threshold:
             done = True
-            reward_normalized = -self._reward_norm_clip  # Penalidade máxima
+            if not economic_only:
+                reward_normalized = -self._reward_norm_clip
             info['exit_reason'] = 'Ruin (Capital < 50%)'
             logger.warning("[RUIN TERMINAL] Episódio encerrado por ruína. Capital ratio: %.2f", capital_ratio)
         
+        self._episode_reward_accumulator += float(reward_normalized)
+        if done:
+            self._store_episode_summary()
         return self._get_observation(), np.float32(reward_normalized), done, False, info
 
 class OnlineFeatureCalculator:
@@ -3144,6 +3444,7 @@ class TrendSpecialist:
             'adx', 'plus_di', 'minus_di', 'bb_width', 'atr_percentage',
             'bb_squeeze', 'bb_expansion', 'rsi_oversold', 'rsi_overbought',
             'money_flow', 'volume_pressure', 'ema_trend', 'psar_trend',
+            'aggressor_imbalance', 'aggressor_delta_z', 'taker_buy_ratio', 'funding_rate',
             'hidden_feature', 'sdae_recon', 'regime_conf', 'tp_prior',
         ]
         # Preserva todas as latents e meta-features
@@ -3334,12 +3635,15 @@ class TrendSpecialist:
         return {
             "learning_rate": 4.6e-5,
             "buffer_size": 50000,
-            "batch_size": 1024,
+            "batch_size": 256,
             "gamma": 0.982,
             "tau": 0.015,
             "train_freq": 16,
-            "use_sde": True,
-            "ent_coef": 'auto_0.1',
+            # State-dependent exploration was numerically unstable on the
+            # stacked LSTM observations (actor variance became NaN on GPU).
+            # Ordinary squashed Gaussian SAC is stable and still explores.
+            "use_sde": False,
+            "ent_coef": 'auto_0.05',
         }
 
     def _load_hyperparams(self):
@@ -4905,7 +5209,9 @@ class TrendSpecialist:
             # [SANIDADE NUMÉRICA] Substitui Infs por NaNs e limita valores numéricos extremos
             num_cols_feat = featured_df.select_dtypes(include=np.number).columns
             featured_df[num_cols_feat] = featured_df[num_cols_feat].replace([np.inf, -np.inf], np.nan)
-            featured_df[num_cols_feat] = featured_df[num_cols_feat].ffill().bfill().fillna(0.0)
+            # A training row must never receive an indicator from a future
+            # row.  Warm-up gaps are neutral, not backfilled.
+            featured_df[num_cols_feat] = featured_df[num_cols_feat].ffill().fillna(0.0)
             featured_df[num_cols_feat] = featured_df[num_cols_feat].clip(lower=-1e9, upper=1e9)
 
             _regime_col = None
@@ -4913,6 +5219,11 @@ class TrendSpecialist:
                 if _col in featured_df.columns:
                     _regime_col = _col
                     break
+            # Specialists see the complete chronological trajectory.  Filtering
+            # to only bull/bear rows made non-adjacent candles artificial
+            # neighbors and rewarded the trivial always-in-market policy.
+            # Regime remains an observation/gate, not a data-row filter.
+            _regime_col = None
             if _regime_col is not None:
                 _orig_len = len(featured_df)
                 if 'bull' in _sname and 'bear' not in _sname:
@@ -5029,7 +5340,13 @@ class TrendSpecialist:
                 logger.info(f"[FASE 2] Hiperparâmetros carregados de '{self.hyperparams_path}'. Pulando otimização.")
             
             # Só roda otimização se: modo granular OU forçado OU não tem hyperparams
-            should_run_phase2 = self.force_optuna_retrain or (not self._hyperparams_loaded_from_file and not os.path.exists(self.hyperparams_path))
+            skip_optuna = os.environ.get('TREND_SKIP_OPTUNA', '0').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+            should_run_phase2 = (not skip_optuna) and (
+                self.force_optuna_retrain or
+                (not self._hyperparams_loaded_from_file and not os.path.exists(self.hyperparams_path))
+            )
+            if skip_optuna:
+                logger.info("[FASE 2] Optuna desabilitado por TREND_SKIP_OPTUNA; usando hiperparâmetros estáveis.")
             if should_run_phase2:
                 setup_phase_logger("TrendSpecialist_Phase2_Hyperparams", logger.name)
                 logger.info("[FASE 2] Iniciando otimizaÃƒÂ§ÃƒÂ£o de hiperparÃƒÂ¢metros SAC...")
@@ -5112,7 +5429,7 @@ class TrendSpecialist:
             for df_tmp in (train_df, eval_df):
                 num_cols_tmp = df_tmp.select_dtypes(include=np.number).columns
                 df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].replace([np.inf, -np.inf], np.nan)
-                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].ffill().bfill().fillna(0)
+                df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].ffill().fillna(0)
                 df_tmp.loc[:, num_cols_tmp] = df_tmp[num_cols_tmp].clip(lower=-1e9, upper=1e9)
             
             # [FIX CIENTÍFICO] Define contrato de features ANTES do fit do scaler
@@ -5177,8 +5494,15 @@ class TrendSpecialist:
             # Exporta para uso em produção
             scaler = scaler_pipeline # Para manter compatibilidade com as linhas de dump abaixo
             std_scaler_main = scaler_pipeline # Para manter compatibilidade com as linhas de dump abaixo (embora repetitivo)
-            # Persiste o contrato de features e o scaler para uso consistente em produÃ§Ã£o/inferÃªncia
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            # Persiste o contrato de features e o scaler JUNTO DO MODELO.
+            #
+            # Antes o scaler ia sempre para os.getcwd()/models_ai enquanto o .zip
+            # ia para config.MODEL_DIR. Num treino isolado (nuvem, ou uma pasta de
+            # execucao local) isso deixava models_ai com o scaler novo e o modelo
+            # antigo: producao montaria a observacao com colunas de um treino e a
+            # entregaria a uma politica de outro. Em producao MODEL_DIR ja e
+            # models_ai, entao nada muda para o bot.
+            models_dir = str(getattr(self.config, 'MODEL_DIR', None) or os.path.join(os.getcwd(), "models_ai"))
             os.makedirs(models_dir, exist_ok=True)
             scaler_path = os.path.join(models_dir, f"{self.specialist_name}_scaler.joblib")
             std_scaler_path = scaler_path  # Usa o mesmo path, pois estão no mesmo ColumnTransformer
@@ -5488,14 +5812,32 @@ class TrendSpecialist:
                 # Substitui o AttentionMLP (seq_len=1 = apenas ponderação de features)
                 # pelo LSTM que agora recebe os últimos N_STACK_FRAMES candles como
                 # sequência temporal genuína — captura tendência, momentum e reversão.
-                from specialists.scientific_corrections import get_hybrid_lstm_policy_kwargs
-                policy_kwargs = get_hybrid_lstm_policy_kwargs(
-                    n_stack=N_STACK_FRAMES,
-                    features_dim=128,
-                    lstm_hidden_size=64,
-                    num_heads=4,
-                    dropout=0.15,
-                )
+                # A capacidade do extractor vem dos hiperparametros, com os
+                # valores atuais como padrao. Sinal fino com 90 mil barras pune
+                # rede grande: o meta-modelo supervisionado sobre os mesmos dados
+                # foi de AUC 0.952 treino / 0.560 holdout com capacidade alta
+                # para 0.725 / 0.574 com capacidade baixa. Poder testar o mesmo
+                # eixo aqui, sem editar codigo, e o que torna a comparacao viavel.
+                # policy_arch="mlp" troca o extractor LSTM+Attention por uma MLP
+                # simples sobre as mesmas observacoes empilhadas. O contrato de
+                # observacao e o de acao nao mudam, entao producao carrega os
+                # dois tipos de modelo sem distincao.
+                policy_arch = str(self.hyperparams.get("policy_arch", "hybrid_lstm")).lower()
+                if policy_arch == "mlp":
+                    width = int(self.hyperparams.get("net_width", 256))
+                    depth = int(self.hyperparams.get("net_depth", 2))
+                    layers = [width] * max(1, depth)
+                    policy_kwargs = {"net_arch": {"pi": list(layers), "qf": list(layers)}}
+                    logger.info("[TREND SAC] Politica MLP %s (pi e qf).", layers)
+                else:
+                    from specialists.scientific_corrections import get_hybrid_lstm_policy_kwargs
+                    policy_kwargs = get_hybrid_lstm_policy_kwargs(
+                        n_stack=N_STACK_FRAMES,
+                        features_dim=int(self.hyperparams.get("features_dim", 128)),
+                        lstm_hidden_size=int(self.hyperparams.get("lstm_hidden_size", 64)),
+                        num_heads=int(self.hyperparams.get("num_heads", 4)),
+                        dropout=float(self.hyperparams.get("dropout", 0.15)),
+                    )
 
                 # 🔬 LINEAR LR DECAY SCHEDULER (evita overshoot no final do treinamento)
                 # LR decai linearmente de valor_inicial até 10% no final
@@ -5566,18 +5908,11 @@ class TrendSpecialist:
                     logger.error("[TREND SAC] Falha ao salvar modelo parcial: %s", _save_err)
                 raise  # Re-lança para o shutdown handler do bot processar normalmente
             self.is_trained = True
-            # Modelo final = checkpoint com maior retorno econômico no conjunto de avaliação (EvalCallback),
-            # não simplesmente o último passo do treino.
-            _best_path = os.path.join(checkpoint_dir, "best_model.zip")
-            if os.path.exists(_best_path):
-                try:
-                    self.model.set_parameters(_best_path, exact_match=True, device=self.model.device)
-                    logger.info(f"[TREND SAC] Modelo final = melhor checkpoint de avaliação ({_best_path}).")
-                except Exception as _best_err:
-                    logger.warning(f"[TREND SAC] Não foi possível carregar o melhor checkpoint: {_best_err}")
+            self.last_training_timesteps = self.model.num_timesteps
+            if os.path.exists(best_model_path):
+                self.model = type(self.model).load(best_model_path, env=train_env, device=self.model.device)
             self.model.save(self.model_path)
-            self._save_observation_contract()
-            logger.info("[TREND SAC] Treinamento do TrendSpecialist concluido. Total de timesteps: %s" % self.model.num_timesteps)
+            logger.info("[TREND SAC] Best validation checkpoint saved; training steps: %s", self.last_training_timesteps)
 
             # [MONITOR] Verifica circuit breaker apos treino — para o bot se necessario
             try:
@@ -5600,13 +5935,13 @@ class TrendSpecialist:
             # [MONITOR] Avaliação pós-treino e log do relatorio de convergencia
             try:
                 final_mean_reward, _ = evaluate_policy(
-                    self.model, train_env, n_eval_episodes=1, deterministic=True
+                    self.model, eval_env, n_eval_episodes=1, deterministic=True
                 )
                 # Coleta sumário do episodio para extrair metricas de qualidade
                 _sums = []
-                if hasattr(train_env, 'env_method'):
+                if hasattr(eval_env, 'env_method'):
                     try:
-                        _batches = train_env.env_method("consume_episode_summaries")
+                        _batches = eval_env.env_method("consume_episode_summaries")
                         _sums = [s for batch in _batches for s in batch] if _batches else []
                     except Exception:
                         pass
@@ -5630,120 +5965,87 @@ class TrendSpecialist:
             except Exception as _e:
                 logger.debug("[MONITOR] Falha ao registrar episodio pos-treino: %s", _e)
 
-            return self.model.num_timesteps
+            return self.last_training_timesteps
         except Exception as e:
             logger.error(f"[ERRO TREND SAC] Falha catastrofica durante o treinamento: {e}", exc_info=True)
             self.is_trained = False
-            return self.model.num_timesteps if self.model else 0
+            raise
 
-    def _observation_contract_path(self) -> str:
-        return os.path.join(os.getcwd(), "models_ai", f"{self.specialist_name}_obs_contract.json")
+    def prepare_live_observation(self, frame: pd.DataFrame, agent_state: np.ndarray) -> np.ndarray:
+        """Build exactly the training observation and retain real candle frames.
 
-    def _save_observation_contract(self) -> None:
-        """Salva o layout exato da observação do treino (colunas, extras, frames) para a inferência reproduzir."""
-        try:
-            env = getattr(self, 'specialist_env', None)
-            if env is None or self.model is None:
-                return
-            extras = [k for k in env.extra_feature_keys if k not in env.numeric_df.columns]
-            frame_dim = int(env.observation_space.shape[0])
-            obs_dim = int(self.model.observation_space.shape[0])
-            contract = {
-                "specialist": self.specialist_name,
-                "feature_columns": list(env.feature_columns),
-                "extra_feature_keys": extras,
-                "frame_dim": frame_dim,
-                "n_stack": obs_dim // frame_dim if frame_dim else 1,
-                "obs_dim": obs_dim,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            with open(self._observation_contract_path(), 'w', encoding='utf-8') as fh:
-                json.dump(contract, fh, indent=2)
-            logger.info(
-                f"[CONTRACT] {self.specialist_name}: {len(contract['feature_columns'])} features + "
-                f"{len(extras)} extras + 13 de estado × {contract['n_stack']} frames = {obs_dim}"
-            )
-        except Exception as exc:
-            logger.error(f"[CONTRACT] Falha ao salvar contrato de observação: {exc}")
-
-    def _load_observation_contract(self) -> Optional[Dict[str, Any]]:
-        path = self._observation_contract_path()
-        if not os.path.exists(path):
-            logger.warning(f"[CONTRACT] {self.specialist_name}: contrato de observação ausente — retreine para operar ao vivo.")
-            return None
-        try:
-            with open(path, 'r', encoding='utf-8') as fh:
-                return json.load(fh)
-        except Exception as exc:
-            logger.error(f"[CONTRACT] Falha ao ler {path}: {exc}")
-            return None
-
-    def build_live_observation(self, df: pd.DataFrame, agent_state_at) -> Optional[np.ndarray]:
+        Repeated polling of one candle replaces its frame, never advances the
+        stack. Startup and time gaps use the same zero history as VecFrameStack.
         """
-        Monta ao vivo a observação exatamente como TrendFollowingEnv + VecFrameStack no treino:
-        [frame(t-n+1), ..., frame(t)], frame = features escaladas + extras + estado do agente + tempo + prior + física.
-        `agent_state_at(offset)` devolve o estado do agente `offset` candles atrás.
-        Retorna None (recusa) se o contrato estiver ausente ou não bater com o modelo.
-        """
-        contract = getattr(self, 'observation_contract', None)
-        if not contract or self.model is None or self.feature_scaler is None:
-            return None
-        feature_columns = contract["feature_columns"]
-        extras = contract["extra_feature_keys"]
-        n_stack = int(contract["n_stack"])
-        frame_dim = int(contract["frame_dim"])
-        if int(self.model.observation_space.shape[0]) != int(contract["obs_dim"]) or len(df) < n_stack:
-            return None
-        missing = [c for c in feature_columns if c not in df.columns]
+        from collections import deque
+        from specialists.bull_specialist import BullTradingEnv
+        from specialists.bear_specialist import BearTradingEnv
+        from specialists.ranger_specialist import RangerTradingEnv
+
+        if self.feature_scaler is None or not self.feature_columns:
+            raise ValueError('Missing live scaler or feature contract')
+        missing = [c for c in self.feature_columns if c not in frame.columns]
         if missing:
-            logger.error(f"[CONTRACT] {self.specialist_name}: features ausentes ao vivo: {missing[:8]}")
-            return None
+            raise ValueError(f'Missing live features: {missing[:8]}')
+        name = self.specialist_name.lower()
+        env_class = (BullTradingEnv if 'bull' in name else
+                     BearTradingEnv if 'bear' in name else RangerTradingEnv)
+        # The live frame carries columns training never had; left in, they
+        # shrink the observation's extras and change stops (training_schema).
+        from feature_engineering.training_schema import align_to_training_frame
+        frame = align_to_training_frame(frame)
+        raw = self._make_trend_env(frame.tail(100).copy(), mode='training',
+                                   env_class=env_class, feature_columns=self.feature_columns)
+        try:
+            raw.start_idx = 0
+            raw.current_step = len(raw.df) - 1
+            raw.position = float(agent_state[0])
+            raw.pnl_since_entry = float(agent_state[1])
+            raw.steps_in_position = float(agent_state[2]) * 100.0
+            current = raw._get_observation().astype(np.float32)
+        finally:
+            raw.close()
+        expected = tuple(self.model.observation_space.shape)
+        if expected != (len(current) * 4,):
+            raise ValueError(f'Live observation contract mismatch: {len(current)} x4 != {expected}')
+        timestamp = frame.index[-1]
+        previous = getattr(self, '_live_frame_timestamp', None)
+        history = getattr(self, '_live_frame_history', None)
+        interval = frame.index.to_series().diff().dropna().median()
+        reset = (history is None or previous is None or timestamp < previous or
+                 (timestamp > previous and pd.notna(interval) and timestamp - previous > interval))
+        if reset:
+            history = deque([np.zeros_like(current) for _ in range(3)], maxlen=4)
+        elif timestamp == previous:
+            history.pop()
+        history.append(current.copy())
+        self._live_frame_history = history
+        self._live_frame_timestamp = timestamp
+        observation = np.concatenate(list(history))
+        if not np.isfinite(observation).all():
+            raise ValueError('Non-finite live observation')
+        return observation
 
-        window = df.iloc[-max(n_stack + 60, 60):].copy()
-        for w in (20, 50):  # mesmas features de memória calculadas pelo ambiente de treino
-            roll_max = window['high'].rolling(w).max()
-            roll_min = window['low'].rolling(w).min()
-            window[f'dist_to_max_{w}'] = ((window['close'] - roll_max) / (roll_max + 1e-9)).fillna(0.0)
-            window[f'dist_to_min_{w}'] = ((window['close'] - roll_min) / (roll_min + 1e-9)).fillna(0.0)
-        entropy_arr, hurst_arr = rolling_chaos_metrics(window['close'].to_numpy(dtype=float))
+    @staticmethod
+    def _is_position_exit(observation: np.ndarray, action: Action) -> bool:
+        # The newest frame ends in agent_state(3), time(4), prior(2), physics(2).
+        # Its position sign is raw (only market features are scaled).
+        values = np.asarray(observation).reshape(-1)
+        if values.size < 11 or not np.isfinite(values[-11]):
+            return False
+        side = float(values[-11])
+        return ((side == 1.0 and action == Action.SELL)
+                or (side == -1.0 and action == Action.BUY))
 
-        market = window[feature_columns].iloc[-n_stack:].astype(float)
-        market = market.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        scaled = np.asarray(self.feature_scaler.transform(market), dtype=np.float32)
-        scaled = np.nan_to_num(scaled, nan=0.0, posinf=3.0, neginf=-3.0)
-
-        frames = []
-        n = len(window)
-        for k in range(n_stack):
-            i = n - n_stack + k
-            row = window.iloc[i]
-            ts = window.index[i]
-            extras_vals = np.nan_to_num(np.array([float(row.get(key, 0.0)) for key in extras], dtype=np.float32))
-            time_features = np.array([
-                np.sin(2 * np.pi * ts.hour / 24), np.cos(2 * np.pi * ts.hour / 24),
-                np.sin(2 * np.pi * ts.dayofweek / 7), np.cos(2 * np.pi * ts.dayofweek / 7),
-            ], dtype=np.float32)
-            prior = np.nan_to_num(np.array([
-                float(row.get('tp_prior_dir', 0.0)),
-                float(np.clip(float(row.get('tp_prior_conf', 0.0)), 0.0, 1.0)),
-            ], dtype=np.float32))
-            physics = np.array([entropy_arr[i], hurst_arr[i]], dtype=np.float32)
-            state = np.asarray(agent_state_at(n_stack - 1 - k), dtype=np.float32)
-            frame = np.concatenate([scaled[k], extras_vals, state, time_features, prior, physics])
-            if frame.shape[0] != frame_dim:
-                logger.error(f"[CONTRACT] {self.specialist_name}: frame com {frame.shape[0]} valores, contrato exige {frame_dim}.")
-                return None
-            frames.append(frame)
-        return np.concatenate(frames).astype(np.float32)
-
-    def decide_action(self, observation: np.ndarray, df_row: pd.Series, pre_normalized: bool = False) -> Optional[Signal]:
+    def decide_action(self, observation: np.ndarray, df_row: pd.Series,
+                      observation_is_normalized: bool = False) -> Optional[Signal]:
         if not self.is_trained or self.model is None:
             return None
         try:
             # Aplica o scaler APENAS nas market features (primeiras n_features_in_ dims).
             # O scaler foi treinado só nas features de mercado; agent_state/time/prior
             # são concatenados crus depois e NÃO devem ser escalados.
-            if self.feature_scaler is not None and not pre_normalized:
+            if self.feature_scaler is not None and not observation_is_normalized:
                 try:
                     market_dim = getattr(self.feature_scaler, 'n_features_in_', len(self.feature_columns) if self.feature_columns else 65)
                     obs_subset = observation[:market_dim].reshape(1, -1)
@@ -5764,6 +6066,7 @@ class TrendSpecialist:
 
             action_values, _ = self.model.predict(observation, deterministic=True)
             position_action_raw, sl_mult_raw, desired_leverage_raw = action_values
+            learned_position_vote = float(position_action_raw)
             
             # [DEBUG] Log raw model outputs to detect policy collapse
             logger.info(f"[DEBUG MODEL] Raw outputs: pos={position_action_raw:.4f}, sl={sl_mult_raw:.4f}, lev={desired_leverage_raw:.4f}")
@@ -5786,15 +6089,31 @@ class TrendSpecialist:
             # Dimensionamento de alavancagem guiado pela confiança do TrendPredictor
             gating_active = False
             lev_min = float(self.trading_config.MIN_LEVERAGE_PER_TRADE)
-            lev_max = float(self.trading_config.MAX_LEVERAGE_PER_TRADE)
+            # A alavancagem NUNCA pode passar do teto sob o qual o agente treinou.
+            #
+            # A versao anterior derivava a alavancagem apenas da confianca do
+            # regime e descartava a acao de alavancagem que o proprio agente
+            # emite. Como tp_prior_conf tem media 0.878 neste historico, a
+            # formula entregava 8x na media e 15x no limite, enquanto o
+            # action_space do treino limita a 3x (_leverage_cap_hpo). O agente
+            # aprendia a gerir posicao a 3x e ia operar a 8x: a mesma sequencia
+            # de trades que ele viu no treino levaria a conta a ruina.
+            #
+            # Agora a alavancagem sai da acao do agente, e a confianca de regime
+            # so pode REDUZI-LA, nunca aumenta-la.
+            training_cap = float(getattr(self.config, 'TRAINING_LEVERAGE_CAP', 3.0))
+            lev_max = min(float(self.trading_config.MAX_LEVERAGE_PER_TRADE), training_cap)
+            agent_leverage = float(np.clip(desired_leverage_raw, lev_min, lev_max))
+
             activation_threshold = 0.60
             prior_conf_f = float(prior_conf) if prior_conf is not None else 0.5
             if prior_conf_f <= activation_threshold:
-                calculated_leverage = lev_min
+                confidence_ceiling = lev_min
             else:
                 factor = (prior_conf_f - activation_threshold) / (1.0 - activation_threshold)
-                calculated_leverage = lev_min + (lev_max - lev_min) * (factor ** 2)
-            gated_leverage = float(round(calculated_leverage))
+                confidence_ceiling = lev_min + (lev_max - lev_min) * (factor ** 2)
+            gated_leverage = float(round(min(agent_leverage, confidence_ceiling)))
+            gated_leverage = float(np.clip(gated_leverage, lev_min, lev_max))
             # Se há incerteza alta, reduz para o mínimo
             if uncertainty is not None:
                 try:
@@ -5805,12 +6124,19 @@ class TrendSpecialist:
                 except Exception:
                     pass
             final_action = Action.HOLD
-            # Threshold dinamico por regime: permite surfar em tendencias claras
-            action_threshold = 0.10
+            # Limiar de conviccao ancorado no valor usado no TREINO.
+            #
+            # Producao usava 0.10 enquanto o ambiente de treino resolve para
+            # cerca de 0.064, de modo que o bot exigia mais conviccao do que a
+            # politica aprendeu a produzir e ficava em HOLD em situacoes nas
+            # quais teria operado durante o treino. A modulacao por regime
+            # continua, mas agora em torno do valor correto.
+            base_threshold = float(getattr(self.config, 'INFERENCE_ACTION_THRESHOLD', 0.064))
+            action_threshold = base_threshold
             if regime_up > 0.4 or regime_down > 0.4 or abs(prior_dir) > 0.3:
-                action_threshold = 0.05  # Mercado em tendencia: permite ao especialista surfar
+                action_threshold = base_threshold * 0.75  # tendencia clara: deixa surfar
             elif regime_side > 0.5:
-                action_threshold = 0.15
+                action_threshold = base_threshold * 1.5   # lateral: exige mais conviccao
             explanation = {"specialist": "TrendSpecialist"}
             
             # [FIX] Initialize all variables BEFORE conditional logic to avoid UnboundLocalError
@@ -5862,21 +6188,39 @@ class TrendSpecialist:
             if gating_active and abs(position_action_raw) < (action_threshold * 1.5):
                 final_action = Action.HOLD
                 position_size_pct = float(self.trading_config.MAX_POSITION_SIZE_PERCENT * confidence * 0.5)  # Reduce size
+
+            # Entry priors must not veto the actor's decision to reduce risk.
+            # Use the unmodified policy vote and the configured inference
+            # threshold, not the entry-only regime/prior modulation above.
+            exit_action = (Action.BUY if learned_position_vote > base_threshold
+                           else Action.SELL if learned_position_vote < -base_threshold
+                           else Action.HOLD)
+            if self._is_position_exit(observation, exit_action):
+                final_action = exit_action
+                explanation['reason'] = 'Learned policy requested position close'
                 
             # [FIX PRODUÇÃO] Filtro de direção — replica _specialist_long_only do ambiente de treino.
             # Bull: apenas BUY (long_only). Bear: apenas SELL (short_only).
             # Se o modelo gerar sinal contrário à especialidade, converte em HOLD.
             specialist_direction = getattr(self, '_specialist_direction', None)  # 'long_only' | 'short_only' | None
-            if specialist_direction == 'long_only' and final_action == Action.SELL:
+            closing_position = self._is_position_exit(observation, final_action)
+            if specialist_direction == 'long_only' and final_action == Action.SELL and not closing_position:
                 logger.info(f"🐂 [REGIME FILTER] BullSpecialist: SELL bloqueado → HOLD (long_only em produção)")
                 final_action = Action.HOLD
                 explanation['reason'] = 'BullSpecialist: sinal SELL bloqueado (long_only)'
                 confidence = 0.0
-            elif specialist_direction == 'short_only' and final_action == Action.BUY:
+            elif specialist_direction == 'short_only' and final_action == Action.BUY and not closing_position:
                 logger.info(f"🐻 [REGIME FILTER] BearSpecialist: BUY bloqueado → HOLD (short_only em produção)")
                 final_action = Action.HOLD
                 explanation['reason'] = 'BearSpecialist: sinal BUY bloqueado (short_only)'
                 confidence = 0.0
+
+            if closing_position:
+                # ExecutionEngine closes the exact opposite position with
+                # reduceOnly when size >= .9; never open/reverse with this vote.
+                position_size_pct = 1.0
+                confidence = 1.0
+                explanation['position_exit'] = True
 
             return Signal(
                 symbol=self.trading_config.PRIMARY_PAIR, action=final_action, confidence=confidence, 
@@ -5958,8 +6302,11 @@ class TrendSpecialist:
     def load_model(self):
         self._initialize_model()
         # [SCIENTIFIC FIX] Carrega o contrato de features para garantir consistência com o scaler
+        # Artefatos lidos do mesmo diretorio do modelo, pelo mesmo motivo do
+        # salvamento: scaler e politica precisam vir do mesmo treino.
+        artifacts_dir = os.path.dirname(os.path.abspath(self.model_path))
         try:
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            models_dir = artifacts_dir
             metadata_path = os.path.join(models_dir, "training_metadata.json")
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r', encoding='utf-8') as f:
@@ -5973,7 +6320,7 @@ class TrendSpecialist:
         # [SCIENTIFIC FIX] Tenta carregar o scaler correspondente
         try:
             import joblib
-            models_dir = os.path.join(os.getcwd(), "models_ai")
+            models_dir = artifacts_dir
             scaler_filename = f"{self.specialist_name}_scaler.joblib"
             scaler_path = os.path.join(models_dir, scaler_filename)
             

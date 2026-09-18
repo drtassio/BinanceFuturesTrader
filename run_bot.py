@@ -1215,7 +1215,9 @@ async def main_trading_loop():
                 time_since_last_adaptation >= adaptation_interval_hours and 
                 len(adaptation_data_buffer) >= 100 and  # Mínimo de dados para adaptação
                 ai_controller.is_trained and
-                ai_controller.is_trained  # [ARCH] Drift gate removido - adaptacao nao bloqueia
+                # An approved, mirrored policy must stay the artifact that was
+                # approved: online adaptation would change what trades.
+                str(getattr(TradingConfig, 'LIVE_POLICY', 'sac')) not in ('agent_mirror', 'edge_teacher')
             )
             
             if should_adapt:
@@ -1426,8 +1428,20 @@ async def main():
     status = ai_controller.get_training_status()
     needs_training_this_session = False
 
+    live_policy = str(getattr(TradingConfig, 'LIVE_POLICY', 'sac'))
+    if live_policy in ('agent_mirror', 'edge_teacher'):
+        # Mirrored policies operate approved artifacts or nothing: they never
+        # train at startup, and an invalid approval stops the bot here.
+        if live_policy == 'agent_mirror':
+            ready = await ai_controller.prepare_agent_mirror()
+        else:
+            ready = ai_controller.prepare_teacher_policy()
+        if not ready:
+            logger.critical("🚨 [%s] Politica sem aprovacao ou artefatos validos. Encerrando." % live_policy)
+            return
+
     # Cenário 1: Retreinamento completo é OBRIGATÓRIO (modelos muito antigos ou corrompidos)
-    if ai_controller.is_retraining_due(AIConfig.MODEL_RETRAIN_DAYS):
+    elif ai_controller.is_retraining_due(AIConfig.MODEL_RETRAIN_DAYS):
         valid_models_count = sum(1 for v in status.values() if v and v != 'all_trained')
         total_models = len([k for k in status.keys() if k != 'all_trained'])
         

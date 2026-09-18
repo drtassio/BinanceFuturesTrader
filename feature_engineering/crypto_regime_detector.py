@@ -1073,6 +1073,31 @@ class CryptoRegimeDetector:
 ScientificRegimeDetector = CryptoRegimeDetector
 
 
+def canonical_detector_matches(path: Optional[str] = None) -> Tuple[bool, str]:
+    """Is the detector on disk the one the training dataset was labelled with?
+
+    The regime feeds tp_prior_dir, regime_confidence and three meta-model
+    inputs. A refit saved over models_ai/crypto_regime_detector.pkl does not
+    fail anywhere: it just labels live bars differently from the bars the
+    specialists learned on. That happened once (a 54 KB refit that never
+    emitted Bear replaced the 588 KB detector behind the dataset, agreeing with
+    its labels on about half the bars). The expected hash is pinned in
+    models_ai/crypto_regime_detector.sha256 and changes only together with a
+    rebuilt dataset, meta-model and retrained specialists.
+    """
+    import hashlib
+
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models_ai")
+    path = path or os.path.join(root, "crypto_regime_detector.pkl")
+    try:
+        expected = open(os.path.join(root, "crypto_regime_detector.sha256"), encoding="utf-8").read().split()[0]
+        with open(path, "rb") as handle:
+            actual = hashlib.sha256(handle.read()).hexdigest()
+    except OSError as exc:
+        return False, str(exc)
+    return actual == expected, "esperado %s..., em disco %s..." % (expected[:12], actual[:12])
+
+
 def create_regime_detector(config: Optional[RegimeConfig] = None, load_if_exists: bool = True) -> CryptoRegimeDetector:
     """
     Factory function to create or load regime detector.
