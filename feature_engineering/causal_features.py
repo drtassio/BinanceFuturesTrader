@@ -172,8 +172,10 @@ def add_staircase_structure(df: pd.DataFrame, atr: pd.Series) -> Dict[str, pd.Se
     structure stop (lowest low / highest high of the last two CLOSED 4h candles,
     widened by half a 4h ATR), in 15m ATR. Negative: the structure broke.
     """
-    open_ = df["open"].astype(float)
     close = df["close"].astype(float)
+    # Training and live frames carry the open; a frame without it (some tests)
+    # falls back to the previous close, which is where the candle opened.
+    open_ = df["open"].astype(float) if "open" in df.columns else close.shift(1)
     high = df["high"].astype(float)
     low = df["low"].astype(float)
     body = (close - open_) / atr

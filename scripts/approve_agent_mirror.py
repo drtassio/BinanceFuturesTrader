@@ -50,6 +50,9 @@ def main() -> int:
     parser.add_argument("--agent", required=True, choices=sorted(SIDE))
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, default=ROOT / "models_ai")
+    parser.add_argument("--min-trades", type=int, default=20,
+                        help="trades minimos por bloco; so outro valor se registrado antes do treino "
+                             "(reports/leg_confirm_preregistration.json: 10)")
     args = parser.parse_args()
 
     agent = args.agent
@@ -77,11 +80,11 @@ def main() -> int:
         "validacao: retorno > 0": val["net"] > 0,
         "validacao: PF >= 1.2": val["pf"] >= 1.2,
         "validacao: DD <= 15%": val["dd"] <= 0.15,
-        "validacao: >= 20 trades": val["trades"] >= 20,
+        "validacao: >= %d trades" % args.min_trades: val["trades"] >= args.min_trades,
         "holdout: politica deterministica": hold["deterministic"],
         "holdout: PF >= 1.1": hold["pf"] >= 1.1,
         "holdout: DD <= 15%": hold["dd"] <= 0.15,
-        "holdout: >= 20 trades": hold["trades"] >= 20,
+        "holdout: >= %d trades" % args.min_trades: hold["trades"] >= args.min_trades,
         "holdout: bate buy and hold": hold["net"] > benchmark,
         ("holdout: perda <= 5%% (mercado %+.0f%% contra o lado)" % (100 * benchmark) if adverse
          else "holdout: retorno > 0"): hold["net"] >= -0.05 if adverse else hold["net"] > 0,
