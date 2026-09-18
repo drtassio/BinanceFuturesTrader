@@ -1,0 +1,15 @@
+{
+  "lado": "LONG",
+  "pernas": 1380,
+  "periodo": [
+    "2024-09-18 16:15:00",
+    "2026-09-17 14:30:00"
+  ],
+  "movimento_mediano_pct": 1.55,
+  "capturado_liquido_mediano_pct": 0.54,
+  "soma_capturado_liquido_pct": 1116.1,
+  "acerto_pct": 84.5,
+  "duracao_mediana_h": 3.8,
+  "candles_posicionado_pct": 43.0,
+  "aviso": "marcacoes feitas com o grafico pronto (sabem onde cada perna termina): sao exemplos para ensinar, nao uma estrategia reproduzivel ao vivo"
+}

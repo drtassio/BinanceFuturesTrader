@@ -1,0 +1,5 @@
+{
+  "agent": "bear",
+  "rule": {"kind": "marked_legs", "labels_path": "data/teacher_leg_labels_fino.parquet", "sl_mult": 3.0, "leverage": 3.0, "vote": 0.8},
+  "selected_on": "fine marks drawn on the finished chart (scripts/mark_legs.py --tag fino --swing 0.006 --leg-min 0.009 --speed 0.0005 --confirm 0.0025), matching the user's hand marks of the week of 2025-07-16"
+}
