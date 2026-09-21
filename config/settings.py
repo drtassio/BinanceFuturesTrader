@@ -86,6 +86,9 @@ class TradingConfig(Config):
     # agent_mirror: the approved specialists listed here trade by replaying
     # their environment over recent closed bars (trading/agent_mirror.py).
     LIVE_AGENTS = os.environ.get('LIVE_AGENTS', 'bull')
+    # Testnet only: agents that failed approval but trade on the testnet for
+    # diagnosis, loaded from models_ai/shadow/. Refused outside the testnet.
+    TESTNET_DIAGNOSTIC_AGENTS = os.environ.get('TESTNET_DIAGNOSTIC_AGENTS', '')
     # Exchange-side stop placed if a mirrored position is ever found unprotected.
     # Exits come from the environment; this only covers the bot being down.
     MIRROR_EMERGENCY_STOP_PCT = float(os.environ.get('MIRROR_EMERGENCY_STOP_PCT', 0.10))

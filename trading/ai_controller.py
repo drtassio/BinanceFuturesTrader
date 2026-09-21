@@ -2737,6 +2737,14 @@ class AIController:
 
         model_dir = Path(str(self.config_ai.MODEL_DIR))
         names = [a.strip() for a in str(getattr(self.config_trading, 'LIVE_AGENTS', 'bull')).split(',') if a.strip()]
+        diagnostic = [a.strip() for a in str(getattr(self.config_trading, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',')
+                      if a.strip()]
+        if diagnostic and not bool(getattr(self.config_trading, 'BINANCE_TESTNET', False)):
+            logger.critical("[MIRROR] TESTNET_DIAGNOSTIC_AGENTS=%s so vale na testnet. Nenhuma ordem sera enviada.",
+                            diagnostic)
+            self.teacher_ready = False
+            return False
+        names = [n for n in names if n not in diagnostic]
         approved, detail = mirror.approval_is_valid(model_dir)
         if approved:
             # A valid approval of one agent must not let another, unapproved
@@ -2760,6 +2768,16 @@ class AIController:
                 logger.critical("[MIRROR] Nao foi possivel carregar %s: %s", name, exc)
                 self.teacher_ready = False
                 return False
+        for name in diagnostic:
+            # Failed approval: trades only on the testnet, to diagnose it on
+            # bars no model has seen.
+            try:
+                self.mirror_agents[name] = mirror.load_specialist(name, model_dir / "shadow")
+            except Exception as exc:
+                logger.critical("[MIRROR] Nao foi possivel carregar %s (diagnostico): %s", name, exc)
+                self.teacher_ready = False
+                return False
+            logger.warning("[MIRROR] %s NAO APROVADO operando na TESTNET para diagnostico (models_ai/shadow).", name)
         self.mirror_history = mirror.LiveHistory()
         newest = pd.Timestamp.now(tz="UTC").floor("15min") - mirror.BAR
         missing = self.mirror_history.missing_since(newest)
