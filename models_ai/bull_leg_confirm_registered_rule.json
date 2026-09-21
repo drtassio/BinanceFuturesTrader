@@ -1,0 +1,5 @@
+{
+  "agent": "bull",
+  "rule": {"kind": "leg_confirm", "min_steps": 3, "min_steps_5m": 2, "require_trend_4h": false, "sl_mult": 3.0, "leverage": 3.0, "vote": 0.8},
+  "selected_on": "train block only: scripts/research_5m_patterns.py (282 variants, train PF) then the 4h-trend filter dropped because, in the training env, train return per drawdown was higher without it for both agents (bull 4.2 vs 2.6, bear 1.66 vs 0.76)"
+}
