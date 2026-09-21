@@ -248,6 +248,7 @@ class AIController:
         self.teacher_ready = False
         self._teacher_cache = None
         self._teacher_last_order = None
+        self.mirror_view = None
 
         # --- Componentes de Deciso ---
         # self.profitability_predictor = None # Removido: Mdulo obsoleto (substitudo pelo HRLMaster)
@@ -2668,6 +2669,8 @@ class AIController:
         symbol = self.config_trading.PRIMARY_PAIR
 
         def hold(reason, **extra):
+            if self.mirror_view is not None:
+                self.mirror_view["reason"] = reason
             return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
                           explanation={"reason": reason, "specialist": label,
                                        "regime": label.upper(), "policy": policy_name, **extra})
@@ -2676,6 +2679,16 @@ class AIController:
         live_side = int(np.sign(position.quantity)) if position is not None and position.quantity else 0
         decision = teacher.mirror(shadows, live_side)
         details = {"bar": str(bar), "shadows": {s.agent: s.side for s in shadows}}
+        # What the terminal panel shows (run_bot.log_mirror_panel): each agent's
+        # simulated trade, the account and what the bot does about them.
+        history = getattr(self, "mirror_history", None)
+        close = None
+        if history is not None and not history.frame.empty and "close" in history.frame:
+            close = float(history.frame["close"].iloc[-1])
+        self.mirror_view = {"bar": bar, "close": close, "shadows": list(shadows), "account_side": live_side,
+                            "account_qty": abs(float(position.quantity)) if live_side else 0.0,
+                            "action": decision.action, "reason": decision.reason,
+                            "diagnostic": list(getattr(self, "mirror_diagnostic", []))}
         # The account holds the environment's position: hand its current stop
         # to the execution engine, which moves the exchange stop when it tightens.
         self.mirror_stop_target = None
@@ -2745,6 +2758,7 @@ class AIController:
             self.teacher_ready = False
             return False
         names = [n for n in names if n not in diagnostic]
+        self.mirror_diagnostic = diagnostic
         approved, detail = mirror.approval_is_valid(model_dir)
         if approved:
             # A valid approval of one agent must not let another, unapproved

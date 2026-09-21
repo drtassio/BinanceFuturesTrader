@@ -133,11 +133,15 @@ def replay(agent, contract: dict, history: pd.DataFrame, agent_name: str) -> Sha
     if last_bar not in path.index:
         raise RuntimeError("replay terminou antes do ultimo candle fechado")
     row = path.loc[last_bar]
+    entries = path.loc[:last_bar]
+    entries = entries.index[entries["entered"].to_numpy()]
+    entry_bar = entries[-1] if int(row["side"]) != 0 and len(entries) else None
     return ShadowState(agent=agent_name, bar=last_bar, side=int(row["side"]),
                        entered_on_last_bar=bool(row["entered"]),
                        notional_fraction=float(row["notional_fraction"]),
                        entry_price=float(row["entry_price"]),
-                       stop_price=None if pd.isna(row["stop_price"]) else float(row["stop_price"]))
+                       stop_price=None if pd.isna(row["stop_price"]) else float(row["stop_price"]),
+                       entry_bar=entry_bar)
 
 
 class LiveHistory:

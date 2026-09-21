@@ -156,7 +156,12 @@ def log_portfolio_status(portfolio_name: str, portfolio_data: Dict):
 
 def log_system_status():
     """Registra um resumo geral do status operacional do sistema."""
-    mode = "LIVE TRADING (REAL)" if system_state['live_trading_enabled'] else "PAPER TRADING (SIMULADO)"
+    if not system_state['live_trading_enabled']:
+        mode = "PAPER TRADING (SIMULADO)"
+    elif TradingConfig.BINANCE_TESTNET:
+        mode = "TESTNET (ordens na testnet, dinheiro de teste)"
+    else:
+        mode = "PRODUCAO (DINHEIRO REAL)"
 
     # --- Regime atual (via tape_pulse ou latest_features) ---
     tape = system_state.get('tape_pulse', {})
@@ -180,15 +185,23 @@ def log_system_status():
 
     divider = "─" * 60
     tape_score = tape.get('score', 0.0)
+    info, policy_line = "", ""
+    if _mirror_policy():
+        info = "  (so informativo)"
+        agents = [a.strip() for a in str(getattr(TradingConfig, 'LIVE_AGENTS', '')).split(',') if a.strip()]
+        diag = {a.strip() for a in str(getattr(TradingConfig, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',') if a.strip()}
+        policy_line = "   🪞 POLITICA:    espelho dos agentes: %s\n" % ", ".join(
+            "%s (%s)" % (a, "diagnostico" if a in diag else "aprovado") for a in agents)
     log_message = (
         f"\n💡 {divider}\n"
         f"   📊 STATUS GERAL ({datetime.now().strftime('%H:%M:%S')})\n"
         f"   {divider}\n"
         f"   🚀 MODO:        {mode}\n"
+        f"{policy_line}"
         f"   🏥 SAÚDE:       {system_state['system_health'].upper()} | CONEXÃO: {system_state['binance_connection'].upper()}\n"
-        f"   🧠 IA STATUS:   {system_state['ai_status'].upper()} | REGIME: {regime_str}\n"
-        f"   📟 TAPE PULSE:  {tape_pulse_str:<10} (Score: {tape_score:+.2f})\n"
-        f"   🧠 SENTIMENT:    {system_state['onchain_pulse']['signal']} ({system_state['onchain_pulse'].get('score', 50)})\n"
+        f"   🧠 IA STATUS:   {system_state['ai_status'].upper()} | REGIME: {regime_str}{info}\n"
+        f"   📟 TAPE PULSE:  {tape_pulse_str:<10} (Score: {tape_score:+.2f}){info}\n"
+        f"   🧠 SENTIMENT:    {system_state['onchain_pulse']['signal']} ({system_state['onchain_pulse'].get('score', 50)}){info}\n"
         f"   ⚙️ ADAPTAÇÕES:  {adapt_str}\n"
         f"💡 {divider}\n"
     )
@@ -319,6 +332,108 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
             )
         except Exception as e:
             logger.error(f"⚠️ [MONITOR] Falha ao registrar evento no AIMonitor: {e}")
+
+
+# --- Painel do espelho (LIVE_POLICY=agent_mirror) ---------------------------
+# No espelho quem decide sao os agentes Bull e Bear repassados no ambiente de
+# treino; regime, tape, sentimento e SHAP nao entram na ordem. O painel mostra
+# o que decide: a posicao de cada agente na simulacao, a conta e o que o bot faz.
+_MIRROR_REASONS = {
+    "trade da professora ja em curso: nao persegue":
+        "o agente entrou ANTES (bot desligado ou candle anterior). Entrar agora seria atrasado, "
+        "com preco e stop diferentes do testado: aguardando a proxima entrada nova.",
+    "professora saiu da posicao": "o agente SAIU na simulacao: fechando a posicao da conta (reduceOnly).",
+    "sombras em conflito: zerar": "Bull e Bear em lados opostos: zerando a conta por seguranca.",
+    "sombras em conflito: ficar de fora": "Bull e Bear em lados opostos: ficando de fora.",
+    "ordem desta barra ja enviada; aguardando execucao": "ordem deste candle ja enviada: aguardando execucao.",
+    "espelho indisponivel": "espelho ainda nao carregado.",
+    "historico incompleto": "historico de candles incompleto: reconstruindo antes de decidir.",
+}
+_last_mirror_panel = {"key": None}
+
+
+def _mirror_policy() -> bool:
+    return str(getattr(TradingConfig, "LIVE_POLICY", "sac")).strip().lower() == "agent_mirror"
+
+
+def _mirror_reason_text(view) -> str:
+    reason = str(view.get("reason") or "")
+    if reason.startswith("professora ") and reason.endswith(" entrou"):
+        agent = reason.split()[1].upper()
+        return "NOVA ENTRADA do %s no candle que acabou de fechar: abrindo a mesma posicao na conta." % agent
+    if reason.startswith("vetado pelo risco"):
+        return "entrada VETADA pelo gestor de risco (%s)." % reason.split(":", 1)[-1].strip()
+    if reason == "posicao igual a da professora" and view.get("account_side", 0) == 0:
+        return "nenhum agente em posicao: aguardando uma escada confirmada (2+ degraus) para entrar."
+    if reason == "posicao igual a da professora":
+        return "conta igual a simulacao: mantendo a posicao; o stop na corretora so aperta."
+    return _MIRROR_REASONS.get(reason, reason or "sem motivo")
+
+
+def log_mirror_panel(ai_controller, signal) -> None:
+    """Painel por candle: posicao de cada agente, conta e acao do bot."""
+    view = getattr(ai_controller, "mirror_view", None) if ai_controller else None
+    if not view:
+        reason = (signal.explanation or {}).get("reason", "N/A") if signal else "N/A"
+        logger.info("🪞 [ESPELHO] %s", _MIRROR_REASONS.get(reason, reason))
+        return
+    local_tz = datetime.now().astimezone().tzinfo
+    bar_close = pd.Timestamp(view["bar"]) + pd.Timedelta(minutes=15)
+    if bar_close.tzinfo is not None:
+        when = "%s UTC (%s no seu horario)" % (bar_close.strftime("%d/%m %H:%M"),
+                                               bar_close.tz_convert(local_tz).strftime("%H:%M"))
+    else:
+        when = bar_close.strftime("%d/%m %H:%M")
+    price = view.get("close")
+    diagnostic = set(view.get("diagnostic") or [])
+    icons = {"bull": "🐂", "bear": "🐻"}
+    agent_lines, compact = [], []
+    for sh in view.get("shadows", []):
+        tag = "diagnostico" if sh.agent in diagnostic else "aprovado"
+        name = "%s %s (%s)" % (icons.get(sh.agent, "•"), sh.agent.upper(), tag)
+        if sh.side == 0:
+            state = "FORA"
+            compact.append("%s FORA" % sh.agent)
+        else:
+            side_txt = "COMPRADO" if sh.side > 0 else "VENDIDO"
+            pnl = sh.side * (price / sh.entry_price - 1) * 100 if price and sh.entry_price else 0.0
+            since = ""
+            if getattr(sh, "entry_bar", None) is not None:
+                eb = pd.Timestamp(sh.entry_bar) + pd.Timedelta(minutes=15)
+                since = " desde %s UTC" % eb.strftime("%d/%m %H:%M")
+            stop = " | stop {:,.1f}".format(sh.stop_price) if sh.stop_price else ""
+            new = "  ★ NOVA ENTRADA" if sh.entered_on_last_bar else ""
+            state = "%s%s @ {:,.1f}%s | %+.2f%%%s".format(sh.entry_price) % (side_txt, since, stop, pnl, new)
+            compact.append("%s %s %+.2f%%%s" % (sh.agent, side_txt, pnl, " ★" if sh.entered_on_last_bar else ""))
+        agent_lines.append("   %-27s na simulacao: %s" % (name, state))
+    acc_side = view.get("account_side", 0)
+    account = "SEM POSICAO" if acc_side == 0 else "%s %.4f BTC" % (
+        "COMPRADA" if acc_side > 0 else "VENDIDA", view.get("account_qty", 0.0))
+    action = {"open": "ABRIR POSICAO", "close": "FECHAR POSICAO", "hold": "AGUARDAR"}.get(view.get("action"), "AGUARDAR")
+    if signal is not None and signal.action == Action.HOLD:
+        action = "AGUARDAR"
+    reason_text = _mirror_reason_text(view)
+    key = (str(view["bar"]), action, reason_text, acc_side, tuple(s.side for s in view.get("shadows", [])))
+    if key == _last_mirror_panel["key"]:
+        logger.info("🪞 [ESPELHO] candle %s | %s | conta %s | %s", bar_close.strftime("%H:%M"),
+                    " | ".join(compact), account, action)
+        return
+    _last_mirror_panel["key"] = key
+    divider = "─" * 72
+    price_txt = "{:,.1f}".format(price) if price else "n/d"
+    logger.info(
+        "\n🪞 " + divider + "\n"
+        "   🪞 ESPELHO DOS AGENTES  •  candle de 15m fechado " + when + "\n"
+        "   " + divider + "\n"
+        "   💲 BTCUSDT: " + price_txt + "\n" +
+        "\n".join(agent_lines) + "\n"
+        "   🏦 CONTA (Binance):         " + account + "\n"
+        "   ▶  ACAO DO BOT:             " + action + "\n"
+        "   📌 POR QUE:                 " + reason_text + "\n"
+        "   ⏭  PROXIMA ORDEM:           quando um agente mostrar ★ NOVA ENTRADA, ou quando o\n"
+        "                               agente que esta na conta sair na simulacao.\n"
+        "   ℹ️  Regime, tape, OBI, sentimento e SHAP sao so informativos: nao decidem a ordem.\n"
+        "🪞 " + divider)
 
 
 # --- Funções de Verificação Pré-voo ---
@@ -1026,7 +1141,10 @@ async def main_trading_loop():
             # Etapa 3: Gerar e executar a decisão
             if ai_controller.is_trained:
                 signal = await ai_controller.generate_trading_decision(featured_df)
-                log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
+                if _mirror_policy():
+                    log_mirror_panel(ai_controller, signal)
+                else:
+                    log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
 
                 # Mirrored policies: keep the exchange stop on the environment's
                 # stop, so a stop fills inside the bar as in the backtest.
@@ -1075,7 +1193,9 @@ async def main_trading_loop():
                         execution_engine.register_margin_veto(signal.symbol)
 
                 # ── NARRATOR: análise LLM local no terminal ──────────────────
-                if narrator and signal:
+                # No espelho o narrador so via regime/tape/SHAP, que nao decidem:
+                # o texto dele contradizia o que o bot faz.
+                if narrator and signal and not _mirror_policy():
                     try:
                         tape_state  = system_state.get('tape_pulse', {})
                         regime_map  = {0: "bull", 1: "bear", 2: "ranger"}
@@ -1192,7 +1312,10 @@ async def monitor_and_log_loop():
     while not shutdown_event.is_set():
         try:
             log_system_status()
-            if portfolio := system_components.get("portfolio"):
+            portfolio = system_components.get("portfolio")
+            # Ao vivo o portfolio interno so espelha a Binance: mostrar os dois
+            # repetia o mesmo saldo com rotulos diferentes.
+            if portfolio and not system_state["live_trading_enabled"]:
                 log_portfolio_status("Portfólio de Papel", portfolio.get_detailed_status())
             
             if system_state["live_trading_enabled"] and system_state["binance_connection"] == "conectado":

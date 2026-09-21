@@ -44,6 +44,7 @@ class ShadowState:
     notional_fraction: float
     entry_price: float
     stop_price: Optional[float]
+    entry_bar: Optional[pd.Timestamp] = None  # bar the shadow's current trade opened on
 
 
 @dataclass(frozen=True)
