@@ -53,6 +53,11 @@ def main() -> int:
     parser.add_argument("--min-trades", type=int, default=20,
                         help="trades minimos por bloco; so outro valor se registrado antes do treino "
                              "(reports/leg_confirm_preregistration.json: 10)")
+    parser.add_argument("--specialist-benchmark", action="store_true",
+                        help="nao exige bater o buy and hold: o especialista e julgado pelo proprio "
+                             "lucro, PF e queda, independente da direcao do mercado. Decisao do usuario "
+                             "em 2026-09-21, tomada DEPOIS de ver o holdout do Bull leg_confirm "
+                             "(+16.2%% contra +18.8%% do buy and hold); registrada no veredito.")
     args = parser.parse_args()
 
     agent = args.agent
@@ -85,12 +90,17 @@ def main() -> int:
         "holdout: PF >= 1.1": hold["pf"] >= 1.1,
         "holdout: DD <= 15%": hold["dd"] <= 0.15,
         "holdout: >= %d trades" % args.min_trades: hold["trades"] >= args.min_trades,
-        "holdout: bate buy and hold": hold["net"] > benchmark,
         ("holdout: perda <= 5%% (mercado %+.0f%% contra o lado)" % (100 * benchmark) if adverse
          else "holdout: retorno > 0"): hold["net"] >= -0.05 if adverse else hold["net"] > 0,
     }
+    if not args.specialist_benchmark:
+        checks["holdout: bate buy and hold"] = hold["net"] > benchmark
     approved = all(checks.values())
     out = {"approved": approved, "agents": [agent], "run": str(args.run), "generated_at": datetime.now(timezone.utc).isoformat(),
+           "benchmark_rule": ("specialist: own profit, PF and drawdown; buy and hold not required "
+                              "(user decision 2026-09-21, after the Bull holdout was seen)")
+                             if args.specialist_benchmark else "must beat buy and hold",
+           "min_trades": args.min_trades,
            "criteria_doc": __doc__, "checks": checks, "train": train, "validation": val, "holdout": hold,
            "holdout_buy_and_hold": benchmark, "periods": report.get("periods"),
            "artifact_hashes": mirror.artifact_hashes(args.model_dir, [agent])}

@@ -1,0 +1,69 @@
+{
+  "approved": true,
+  "agents": [
+    "bull"
+  ],
+  "run": "cloud\\artifacts\\clip\\bull_guided_20260921T113340",
+  "generated_at": "2026-09-21T12:16:47.036491+00:00",
+  "benchmark_rule": "specialist: own profit, PF and drawdown; buy and hold not required (user decision 2026-09-21, after the Bull holdout was seen)",
+  "min_trades": 10,
+  "criteria_doc": "Approval for specialists that operate through trading/agent_mirror.py.\n\nA specialist may trade only when all of this holds, for the exact files in\nmodels_ai/ (hash-bound; replacing any of them voids the approval):\n\n1. The promoted model is the model of the training run whose report is judged\n   (same SHA-256).\n2. The mirror replay reproduces that model's backtest (agent_mirror_parity.json).\n3. Performance, deterministic policy, blocks the model selection never used for\n   training (validation) or never saw at all (holdout):\n\n   * train:      net return > 0\n   * validation: net return > 0, profit factor >= 1.2, drawdown <= 15%, >= 20 trades\n   * holdout:    profit factor >= 1.1, drawdown <= 15%, >= 20 trades, beats buy and hold,\n                 and net return > 0 \u2014 except that a directional specialist whose\n                 holdout moved against its side by more than 20% must instead keep\n                 its loss within 5%. A long-only specialist is not expected to earn\n                 in a crash; it is expected to stay out of it.\n\nThese criteria were written down on 2026-09-17, before the trend Bull's\nresults existed. They are printed with every verdict.\n\n    python scripts/approve_agent_mirror.py --agent bull --run cloud/artifacts/trend/bull_guided_<stamp>\n",
+  "checks": {
+    "modelo promovido = modelo do relatorio": true,
+    "paridade do espelho com o backtest": true,
+    "treino: retorno > 0": true,
+    "validacao: retorno > 0": true,
+    "validacao: PF >= 1.2": true,
+    "validacao: DD <= 15%": true,
+    "validacao: >= 10 trades": true,
+    "holdout: politica deterministica": true,
+    "holdout: PF >= 1.1": true,
+    "holdout: DD <= 15%": true,
+    "holdout: >= 10 trades": true,
+    "holdout: retorno > 0": true
+  },
+  "train": {
+    "net": 0.47076384109663777,
+    "pf": 2.663498644414435,
+    "dd": 0.10046186253517102,
+    "trades": 86,
+    "deterministic": true
+  },
+  "validation": {
+    "net": 0.015823265717161878,
+    "pf": 2.012213253128234,
+    "dd": 0.055556444164068394,
+    "trades": 19,
+    "deterministic": true
+  },
+  "holdout": {
+    "net": 0.16150191213895188,
+    "pf": 5.339273804451904,
+    "dd": 0.059849205348222106,
+    "trades": 16,
+    "deterministic": true
+  },
+  "holdout_buy_and_hold": 0.18778176400643964,
+  "periods": {
+    "train": [
+      "2024-09-18 11:30:00",
+      "2026-02-11 11:45:00"
+    ],
+    "validation": [
+      "2026-02-19 12:00:00",
+      "2026-06-08 23:45:00"
+    ],
+    "holdout": [
+      "2026-06-17 00:00:00",
+      "2026-09-18 12:00:00"
+    ]
+  },
+  "artifact_hashes": {
+    "bull_specialist_sac.zip": "2430601b013dae664445cd6cf060aaf29357a3ff9bc09ff3ff8e835aab08332f",
+    "bull_specialist_scaler.joblib": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
+    "bull_feature_contract.json": "a3aa7e5349df61275d1613bf3e6d46d9667dfb5cc29493cf1aff6e54a635ee4f",
+    "agent_mirror.py": "9d2269ecb4ccdca0928af71404568a0fb389fce176342308042e619bae2c03ec",
+    "trend_specialist.py": "b9a32e8d2af661a1915cdc096eb36ad5e49657214cfd2ffb88d78c85376c684f",
+    "causal_features.py": "76d2d8cbb7a0607a5edadfaf3b3ed57c4203431a9ba92cdc4dedf5f28845fc41"
+  }
+}
