@@ -258,6 +258,11 @@ class LegConfirmRule:
     require_trend_1h: bool = False
     require_ema_trend_4h: bool = False
     require_macd_4h: bool = False
+    # Short-side options (the Bear's own rule): falls end in sharp squeezes, so
+    # it can also leave when the 1h trend turns against it, and enter only
+    # while the 4h trend is strong.
+    exit_trend_1h: bool = False
+    min_adx_4h: float = 0.0
     sl_mult: float = 3.0
     leverage: float = 3.0
     vote: float = 0.8
@@ -282,6 +287,10 @@ def leg_confirm_inputs(rule: "LegConfirmRule", agent: str) -> tuple:
         extras.append("ema_trend_4h")
     if getattr(rule, "require_macd_4h", False):
         extras.append("macd_hist_4h")
+    if getattr(rule, "exit_trend_1h", False) and "ema_trend_1h" not in extras:
+        extras.append("ema_trend_1h")
+    if getattr(rule, "min_adx_4h", 0.0) > 0.0:
+        extras.append("adx_4h")
     return cols + tuple(extras)
 
 
@@ -298,7 +307,10 @@ def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule")
     steps5 = values[inputs[4]]
     structure = values[inputs[5]]
     if int(np.sign(position)) == side:
-        vote = side * rule.vote if structure >= 0.0 else -side * rule.vote
+        holding = structure >= 0.0
+        if getattr(rule, "exit_trend_1h", False):
+            holding = holding and side * values.get("ema_trend_1h", 0.0) >= 0.0
+        vote = side * rule.vote if holding else -side * rule.vote
     else:
         confirmed = (steps >= rule.min_steps and side * breakout > 0.0 and side * body > 0.0
                      and side * cvd > 0.0 and steps5 >= rule.min_steps_5m)
@@ -310,6 +322,8 @@ def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule")
             confirmed = confirmed and side * values.get("ema_trend_4h", 0.0) > 0.0
         if getattr(rule, "require_macd_4h", False):
             confirmed = confirmed and side * values.get("macd_hist_4h", 0.0) > 0.0
+        if getattr(rule, "min_adx_4h", 0.0) > 0.0:
+            confirmed = confirmed and values.get("adx_4h", 0.0) >= rule.min_adx_4h
         vote = side * rule.vote if confirmed else -side * rule.vote
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 
