@@ -350,7 +350,10 @@ def main() -> int:
 
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True
-    run_dir = args.output.resolve() / ("%s_guided_%s" % (args.agent, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")))
+    # The process id keeps two runs of the same agent started in the same
+    # second from sharing a directory and overwriting each other's checkpoints.
+    run_dir = args.output.resolve() / ("%s_guided_%s_p%d" % (
+        args.agent, datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"), os.getpid()))
     config.MODEL_DIR = str(run_dir / "models")
     config.CHECKPOINT_DIR = str(run_dir / "checkpoints")
     Path(config.MODEL_DIR).mkdir(parents=True, exist_ok=True)
