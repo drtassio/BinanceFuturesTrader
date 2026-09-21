@@ -96,15 +96,39 @@ def main() -> int:
     if not args.specialist_benchmark:
         checks["holdout: bate buy and hold"] = hold["net"] > benchmark
     approved = all(checks.values())
-    out = {"approved": approved, "agents": [agent], "run": str(args.run), "generated_at": datetime.now(timezone.utc).isoformat(),
-           "benchmark_rule": ("specialist: own profit, PF and drawdown; buy and hold not required "
-                              "(user decision 2026-09-21, after the Bull holdout was seen)")
-                             if args.specialist_benchmark else "must beat buy and hold",
-           "min_trades": args.min_trades,
-           "criteria_doc": __doc__, "checks": checks, "train": train, "validation": val, "holdout": hold,
-           "holdout_buy_and_hold": benchmark, "periods": report.get("periods"),
-           "artifact_hashes": mirror.artifact_hashes(args.model_dir, [agent])}
-    mirror.approval_path(args.model_dir).write_text(json.dumps(out, indent=2), encoding="utf-8")
+    verdict = {"approved": approved, "run": str(args.run), "generated_at": datetime.now(timezone.utc).isoformat(),
+               "benchmark_rule": ("specialist: own profit, PF and drawdown; buy and hold not required "
+                                  "(user decision 2026-09-21, after the Bull holdout was seen)")
+                                 if args.specialist_benchmark else "must beat buy and hold",
+               "min_trades": args.min_trades, "checks": checks, "train": train, "validation": val,
+               "holdout": hold, "holdout_buy_and_hold": benchmark, "periods": report.get("periods")}
+
+    # One approval file covers every live agent. An agent's verdict replaces
+    # its own earlier one and keeps the others', provided their files are
+    # still the ones they were approved on; the file approves the set only
+    # if every agent in it passed.
+    path = mirror.approval_path(args.model_dir)
+    per_agent = {}
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+        per_agent = previous.get("per_agent") or {a: previous for a in previous.get("agents", [])}
+    except (OSError, ValueError):
+        pass
+    per_agent = {a: v for a, v in per_agent.items() if a != agent}
+    for other in list(per_agent):
+        current = mirror.artifact_hashes(args.model_dir, [other])
+        recorded = (per_agent[other].get("artifact_hashes") or {})
+        if any(recorded.get(name) != digest for name, digest in current.items()):
+            print("  aprovacao anterior de %s descartada: arquivos mudaram" % other)
+            per_agent.pop(other)
+    verdict["artifact_hashes"] = mirror.artifact_hashes(args.model_dir, [agent])
+    per_agent[agent] = verdict
+    agents = sorted(per_agent)
+    out = {"approved": all(v.get("approved") for v in per_agent.values()), "agents": agents,
+           "generated_at": verdict["generated_at"], "criteria_doc": __doc__, "per_agent": per_agent,
+           "artifact_hashes": mirror.artifact_hashes(args.model_dir, agents)}
+    path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    print("agentes na aprovacao: %s | conjunto aprovado: %s" % (", ".join(agents), out["approved"]))
     for name, passed in checks.items():
         print("  [%s] %s" % ("OK " if passed else "NAO", name))
     print("treino %+.1f%% | validacao %+.1f%% PF %.2f DD %.1f%% %d trades | holdout %+.1f%% PF %.2f DD %.1f%% %d trades (B&H %+.1f%%)" % (

@@ -2738,6 +2738,16 @@ class AIController:
         model_dir = Path(str(self.config_ai.MODEL_DIR))
         names = [a.strip() for a in str(getattr(self.config_trading, 'LIVE_AGENTS', 'bull')).split(',') if a.strip()]
         approved, detail = mirror.approval_is_valid(model_dir)
+        if approved:
+            # A valid approval of one agent must not let another, unapproved
+            # agent listed in LIVE_AGENTS trade next to it.
+            try:
+                approved_agents = set(json.loads(mirror.approval_path(model_dir).read_text(encoding="utf-8")).get("agents", []))
+            except (OSError, ValueError):
+                approved_agents = set()
+            missing = [n for n in names if n not in approved_agents]
+            if missing:
+                approved, detail = False, "agentes em LIVE_AGENTS sem aprovacao: %s" % missing
         if not approved and bool(getattr(self.config_ai, 'REQUIRE_OOS_POLICY_APPROVAL', True)):
             logger.critical("[MIRROR] Especialistas sem aprovacao valida (%s). Nenhuma ordem sera enviada.", detail)
             self.teacher_ready = False
