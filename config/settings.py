@@ -366,6 +366,10 @@ class AIConfig(Config):
     # mesmos trades com quase tres vezes o risco por operacao.
     # Alterar aqui exige retreinar os agentes.
     TRAINING_LEVERAGE_CAP = float(os.environ.get('TRAINING_LEVERAGE_CAP', 3.0))
+    # Bound on every scaled market feature of the specialists' observation. A
+    # feature nearly constant on the scaler's fit window otherwise explodes out
+    # of sample and saturates the actor. Changing it requires retraining.
+    OBS_CLIP = float(os.environ.get('OBS_CLIP', 5.0))
 
     # Timeframe whose ATR prices the environment's stops and sizing. A model is
     # only valid with the value it was trained under; it is recorded in the

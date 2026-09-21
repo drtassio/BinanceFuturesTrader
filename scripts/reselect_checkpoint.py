@@ -72,8 +72,11 @@ def main() -> int:
     if agent.model is None:
         raise SystemExit("modelo da execucao nao carregou")
 
-    candidates = sorted(models.glob("dagger_*_validation.zip")) + sorted(
-        models.glob("finetune_*_validation.zip"), key=lambda p: int(p.stem.split("_")[1]))
+    # best_validation.zip holds the best policy train_guided had seen, which is
+    # the cloned one when no DAgger round or fine-tuning step beat it.
+    candidates = ([models / "best_validation.zip"] if (models / "best_validation.zip").exists() else []) \
+        + sorted(models.glob("dagger_*_validation.zip")) + sorted(
+            models.glob("finetune_*_validation.zip"), key=lambda p: int(p.stem.split("_")[1]))
     print("stops em ATR de %s | %d checkpoints | criterio: >= %d trades, retorno > 0, PF >= %.1f, DD <= %.0f%%"
           % (AIConfig.ENV_STOP_ATR_TIMEFRAME, len(candidates), args.min_trades, args.min_pf, 100 * args.max_dd))
     best = (-np.inf, None, None)
@@ -105,8 +108,25 @@ def main() -> int:
         if path.exists() and not keep.exists():
             shutil.copy2(path, keep)
     shutil.copy2(chosen, final)
+    contract_path = run / "feature_contract.json"
+    if not contract_path.exists():
+        # A run stopped before its end never wrote the contract the promotion
+        # and the live mirror read; it is the same one train_guided writes.
+        full = load_dataset(args.data)
+        contract_path.write_text(json.dumps({
+            "feature_columns": list(agent.feature_columns),
+            "stop_atr_timeframe": AIConfig.ENV_STOP_ATR_TIMEFRAME,
+            "leverage_bounds": [float(TradingConfig.MIN_LEVERAGE_PER_TRADE),
+                                float(min(TradingConfig.MAX_LEVERAGE_PER_TRADE, AIConfig.TRAINING_LEVERAGE_CAP))],
+            "training_frame_columns": list(full.columns),
+            "dataset": str(args.data),
+        }, indent=2), encoding="utf-8")
+        print("contrato gravado: %s" % contract_path)
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
     report.update({
+        "periods": {"train": [str(train_df.index.min()), str(train_df.index.max())],
+                    "validation": [str(val_df.index.min()), str(val_df.index.max())],
+                    "holdout": [str(holdout_df.index.min()), str(holdout_df.index.max())]},
         "agent": args.agent, "selected": chosen.stem, "selected_validation": val_metrics,
         "train_metrics": train_metrics, "holdout_metrics": holdout_metrics, "verdict": verdict,
         "reselection": {"script": "scripts/reselect_checkpoint.py", "min_trades": args.min_trades,

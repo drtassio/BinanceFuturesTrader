@@ -961,14 +961,20 @@ class TrendFollowingEnv(gym.Env):
         O scaler deve ser passado já treinado (fit) no dataset de treino para evitar data leakage.
         """
         if hasattr(self, '_feature_scaler') and self._feature_scaler is not None:
+            # A feature almost constant on the scaler's fit window is divided by a
+            # tiny spread: hidden_feature_31 reached 2.2e7 on validation and
+            # holdout (3.6 on train) and pinned the actor's vote at -1 for the
+            # whole holdout. Bounding every scaled value keeps one drifting
+            # input from saturating the network, in training and live alike.
+            clip = float(getattr(self.config, 'OBS_CLIP', 5.0))
             try:
                 # [SCIENTIFIC FIX] ColumnTransformer exige nomes de colunas se foi treinado com DataFrame
                 if isinstance(self._feature_scaler, ColumnTransformer) and hasattr(self, 'feature_columns') and self.feature_columns:
                     if len(features) == len(self.feature_columns):
                         features_df = pd.DataFrame(features.reshape(1, -1), columns=self.feature_columns)
-                        return self._feature_scaler.transform(features_df).flatten()
-                
-                return self._feature_scaler.transform(features.reshape(1, -1)).flatten()
+                        return np.clip(self._feature_scaler.transform(features_df).flatten(), -clip, clip)
+
+                return np.clip(self._feature_scaler.transform(features.reshape(1, -1)).flatten(), -clip, clip)
             except Exception as e:
                 if not hasattr(self, '_scaler_error_shown'):
                     logger.debug(f"[SCALER] Falha ao transformar features ({e}). Usando normalizacao robusta.")
@@ -6017,7 +6023,8 @@ class TrendSpecialist:
                     else:
                         scaled_values = self.feature_scaler.transform(obs_subset).flatten()
 
-                    observation[:market_dim] = scaled_values
+                    clip = float(getattr(self.config, 'OBS_CLIP', 5.0))
+                    observation[:market_dim] = np.clip(scaled_values, -clip, clip)
                 except Exception as e:
                     logger.warning(f"[SCALER INFERENCE] Falha ao aplicar scaler: {e}")
 
