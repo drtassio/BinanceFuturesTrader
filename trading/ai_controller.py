@@ -2763,7 +2763,11 @@ class AIController:
             return Signal(symbol=symbol, action=Action.HOLD, confidence=0.0,
                           explanation={"reason": "espelho indisponivel", "policy": mirror.POLICY_NAME})
         now = pd.Timestamp.now(tz="UTC")
-        frame = recent_market_df.copy()
+        # Same enrichment as the training frame and the history rebuild
+        # (build_forward_dataset): the specialists observe the autoencoder
+        # latents, which create_features does not add. Appending rows without
+        # them left the newest bar with the previous bar's latents after ffill.
+        frame = self.feature_pipeline.apply_hidden_features(recent_market_df.copy())
         if frame.index.tz is None:
             frame.index = frame.index.tz_localize("UTC")
         newest = self.mirror_history.append_newest(frame, now)
