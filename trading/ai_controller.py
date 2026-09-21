@@ -2676,6 +2676,13 @@ class AIController:
         live_side = int(np.sign(position.quantity)) if position is not None and position.quantity else 0
         decision = teacher.mirror(shadows, live_side)
         details = {"bar": str(bar), "shadows": {s.agent: s.side for s in shadows}}
+        # The account holds the environment's position: hand its current stop
+        # to the execution engine, which moves the exchange stop when it tightens.
+        self.mirror_stop_target = None
+        if (decision.action == "hold" and live_side != 0 and decision.shadow is not None
+                and decision.shadow.side == live_side and decision.shadow.stop_price):
+            self.mirror_stop_target = (symbol, live_side, abs(float(position.quantity)),
+                                       float(decision.shadow.stop_price))
         if decision.action == "hold":
             return hold(decision.reason, **details)
 

@@ -175,6 +175,10 @@ class ExecutionEngine:
         self.MAX_STOP_FAILURES = 3         # tentativas antes de ativar backoff
         self.STOP_BACKOFF_CYCLES = 6       # tenta a cada N ciclos quando em backoff (6 × 10s = 60s)
         
+        # Stop placed on the exchange for each mirrored position, at the price
+        # the replayed environment holds. It only ever tightens.
+        self._mirror_stops: Dict[str, float] = {}
+
         # [PRIORIDADE 1] Contador para Reconciliação Periódica
         self._reconciliation_tick: int = 0
         self.RECONCILIATION_INTERVAL_CYCLES = 6 # 1 min (6 * 10s)
@@ -707,6 +711,10 @@ class ExecutionEngine:
                     o.get('type') in ('TRAILING_STOP_MARKET', 'STOP_MARKET', 'STOP')
                     for o in (open_orders or [])
                 )
+                # The mirror's stop is an Algo Order, which the standard open
+                # orders listing may not show; the engine placed it itself.
+                if self._mirror_policy_active() and symbol in self._mirror_stops:
+                    has_stop = True
 
                 # [SOFTWARE STOP] Verifica se o stop por software está ativo e se foi disparado
                 software_stop_price = self._software_stops.get(symbol)
@@ -1219,12 +1227,19 @@ class ExecutionEngine:
                         # the closed position must go: a closePosition stop left
                         # behind would later close whatever position is open.
                         await self._cancel_protective_orders(new_trade.symbol)
+                        self._mirror_stops.pop(new_trade.symbol, None)
                     elif self._is_mirror_signal(order.signal):
-                        # Mirrored policies exit through their environment, bar
-                        # by bar. Only the wide catastrophe stop goes to the
-                        # exchange; a take profit or trailing stop would cut the
-                        # trends the policy was approved for.
-                        await self._place_initial_hard_stop(new_trade, sl_pct)
+                        # Mirrored policies: the exchange holds the stop the
+                        # environment holds, so a stop is filled inside the bar
+                        # at its price, as in the backtest, instead of at the
+                        # next bar close. No take profit or extra trailing: they
+                        # would cut the trends the policy was approved for.
+                        env_stop = (order.signal.explanation or {}).get("env_stop_price")
+                        if env_stop:
+                            await self._place_mirror_stop(new_trade.symbol, new_trade.side, abs(new_trade.quantity),
+                                                          float(env_stop), fallback_pct=sl_pct, trade=new_trade)
+                        else:
+                            await self._place_initial_hard_stop(new_trade, sl_pct)
                     else:
                         # 1. Stop Loss na Exchange (Condicional)
                         await self._place_initial_hard_stop(new_trade, sl_pct)
@@ -1718,6 +1733,44 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"[EXEC] Erro ao colocar Trailing Stop para {symbol}: {e}", exc_info=True)
             return None
+
+    async def _place_mirror_stop(self, symbol: str, side, quantity: float, stop_price: float,
+                                 fallback_pct: Optional[float] = None, trade: Optional[Trade] = None) -> bool:
+        """Put the environment's stop on the exchange (closePosition)."""
+        is_long = (side == OrderSide.BUY) if isinstance(side, OrderSide) else int(side) > 0
+        result = await self.connector.place_stop_loss_order(
+            symbol=symbol, side="SELL" if is_long else "BUY", quantity=quantity, stop_price=stop_price)
+        if result:
+            self._mirror_stops[symbol] = float(stop_price)
+            logger.info("🛑 [MIRROR] Stop do ambiente na corretora: %s %s @ %.2f", symbol,
+                        "long" if is_long else "short", stop_price)
+            return True
+        logger.critical("🚨 [MIRROR] Falha ao colocar o stop do ambiente em %s @ %.2f", symbol, stop_price)
+        if trade is not None and fallback_pct:
+            await self._place_initial_hard_stop(trade, fallback_pct)
+        return False
+
+    async def sync_mirror_stop(self, symbol: str, side: int, quantity: float, stop_price: float) -> None:
+        """Move the exchange stop to the environment's stop after each closed bar.
+
+        The environment's stop only ratchets in the trade's favour (trailing
+        after 1R), so the exchange stop is replaced only when it tightens.
+        """
+        if not self.system_state.get('live_trading_enabled', False) or not stop_price or quantity <= 0:
+            return
+        last = self._mirror_stops.get(symbol)
+        tick = max(abs(stop_price) * 1e-5, 1e-9)
+        if last is not None and ((side > 0 and stop_price <= last + tick) or (side < 0 and stop_price >= last - tick)):
+            return
+        await self._cancel_protective_orders(symbol)
+        if not await self._place_mirror_stop(symbol, side, quantity, stop_price):
+            emergency = float(getattr(self.config, "MIRROR_EMERGENCY_STOP_PCT", 0.10))
+            position = self.portfolio.positions.get(symbol)
+            entry = float(getattr(position, "entry_price", 0.0) or 0.0)
+            if entry > 0:
+                fallback = entry * (1.0 - emergency if side > 0 else 1.0 + emergency)
+                await self.connector.place_stop_loss_order(symbol=symbol, side="SELL" if side > 0 else "BUY",
+                                                           quantity=quantity, stop_price=fallback)
 
     async def _place_initial_hard_stop(self, trade: Trade, stop_loss_pct: float):
         """

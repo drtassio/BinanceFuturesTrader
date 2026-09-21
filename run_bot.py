@@ -1028,6 +1028,16 @@ async def main_trading_loop():
                 signal = await ai_controller.generate_trading_decision(featured_df)
                 log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
 
+                # Mirrored policies: keep the exchange stop on the environment's
+                # stop, so a stop fills inside the bar as in the backtest.
+                stop_target = getattr(ai_controller, "mirror_stop_target", None)
+                if stop_target and hasattr(execution_engine, "sync_mirror_stop"):
+                    try:
+                        await execution_engine.sync_mirror_stop(*stop_target)
+                    except Exception as stop_error:
+                        logger.error("[MIRROR] Falha ao sincronizar o stop: %s", stop_error, exc_info=True)
+                    ai_controller.mirror_stop_target = None
+
                 # [TELEGRAM] Registra decisão no buffer para o relatório horário
                 if telegram and signal:
                     _regime_map3 = {0: "BULL", 1: "BEAR", 2: "RANGER"}
