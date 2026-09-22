@@ -1,7 +1,7 @@
 {
   "agent": "bear",
-  "promoted_at": "2026-09-21T15:54:47.171065+00:00",
-  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\clip_bear\\bear_guided_20260921T120821_p25916",
+  "promoted_at": "2026-09-22T08:47:40.671005+00:00",
+  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\exp_bear_filter\\bear_guided_20260921T170815_p23496",
   "observation_size": 780,
   "feature_columns": [
     "log_return_15m",
@@ -183,7 +183,7 @@
     "hidden_feature_31",
     "sdae_recon_error"
   ],
-  "model_sha256": "d0081d166153e31977dc3a21656fb64d6396ded09a5789d95eaa53704a9d0960",
+  "model_sha256": "69c08305484719baebf50057d02d66e6dfe392449e20ab21c7a0f8e5d62bcb33",
   "scaler_sha256": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
   "stop_atr_timeframe": "1h",
   "leverage_bounds": [
@@ -637,5 +637,5 @@
     "regime_is_bear",
     "regime_is_ranger"
   ],
-  "dataset": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\data\\featured_data_causal_leg5m.parquet"
+  "dataset": "data\\featured_data_causal_leg5m.parquet"
 }
