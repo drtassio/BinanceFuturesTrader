@@ -1737,7 +1737,9 @@ class ExecutionEngine:
     async def _place_mirror_stop(self, symbol: str, side, quantity: float, stop_price: float,
                                  fallback_pct: Optional[float] = None, trade: Optional[Trade] = None) -> bool:
         """Put the environment's stop on the exchange (closePosition)."""
-        is_long = (side == OrderSide.BUY) if isinstance(side, OrderSide) else int(side) > 0
+        # The fill hands over Trade.side (an Action); sync hands over +1/-1.
+        value = getattr(side, "value", side)
+        is_long = str(value).upper() == "BUY" if isinstance(value, str) else float(value) > 0
         result = await self.connector.place_stop_loss_order(
             symbol=symbol, side="SELL" if is_long else "BUY", quantity=quantity, stop_price=stop_price)
         if result:
