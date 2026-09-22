@@ -435,7 +435,6 @@ def log_mirror_panel(ai_controller, signal) -> None:
         "   ⏭  PROXIMA ORDEM:           quando um agente mostrar ★ NOVA ENTRADA, ou quando o\n"
         "                               agente que esta na conta sair na simulacao.\n"
         "   ℹ️  Regime, tape, OBI, sentimento e SHAP sao so informativos: nao decidem a ordem.\n"
-        "   🖼  Grafico: um PNG por candle em logs/charts/espelho_AAAAMMDD_HHMM.png\n"
         "🪞 " + divider)
 
 
@@ -1162,15 +1161,9 @@ async def main_trading_loop():
                             _text = mirror_chart.render(_hist, _paths, _view)
                             _mode = os.environ.get("MIRROR_CHART_MODE", "imagem").strip().lower()
                             if _mode == "png":
-                                # Um PNG por candle de 15m (logs/charts/espelho_AAAAMMDD_HHMM.png).
-                                async def _save_chart(h=_hist.copy(), p=_paths, v=dict(_view)):
-                                    try:
-                                        png = await asyncio.to_thread(mirror_chart.render_png, h, p, v)
-                                        saved = await asyncio.to_thread(mirror_chart.keep_copy, png, v.get("bar"))
-                                        logger.info("🖼  [ESPELHO] Grafico salvo: %s", saved)
-                                    except Exception as _img_error:
-                                        logger.warning("[ESPELHO] Grafico nao salvo: %s", _img_error)
-                                asyncio.create_task(_save_chart())
+                                # So redesenha logs/charts/espelho.png (sem imprimir, sem copias).
+                                asyncio.create_task(asyncio.to_thread(
+                                    mirror_chart.render_png, _hist.copy(), _paths, dict(_view)))
                             elif _mode == "texto":
                                 print(_text, flush=True)
                                 asyncio.create_task(asyncio.to_thread(
@@ -1183,8 +1176,6 @@ async def main_trading_loop():
                                         png = await asyncio.to_thread(mirror_chart.render_png, h, p, v)
                                         image = await asyncio.to_thread(sixel.encode, png)
                                         print("\n" + image, flush=True)
-                                        saved = await asyncio.to_thread(mirror_chart.keep_copy, png, v.get("bar"))
-                                        logger.info("🖼  [ESPELHO] Grafico impresso acima e salvo em %s", saved)
                                     except Exception as _img_error:
                                         logger.warning("[ESPELHO] Imagem do grafico nao impressa: %s", _img_error)
                                 asyncio.create_task(_print_chart())
