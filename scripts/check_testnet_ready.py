@@ -107,21 +107,30 @@ async def main() -> int:
     record(True, "politica de operacao", policy)
     if policy == "agent_mirror":
         from trading import agent_mirror as mirror
-        agents = [a.strip() for a in str(trading_config.LIVE_AGENTS).split(",") if a.strip()]
-        for name in agents:
-            for filename in ("%s_specialist_sac.zip" % name, "%s_specialist_scaler.joblib" % name,
-                             "%s_feature_contract.json" % name):
-                record((model_dir / filename).exists(), "%s presente" % filename)
+        listed = [a.strip() for a in str(trading_config.LIVE_AGENTS).split(",") if a.strip()]
+        # Agentes de diagnostico (so testnet) ficam em models_ai/shadow, com paridade propria.
+        diagnostic = [a.strip() for a in str(getattr(trading_config, "TESTNET_DIAGNOSTIC_AGENTS", "")).split(",")
+                      if a.strip()]
+        approved = [a for a in listed if a not in diagnostic]
+        for folder, names, label in ((model_dir, approved, "aprovados"), (model_dir / "shadow", diagnostic, "diagnostico")):
+            if not names:
+                continue
+            for name in names:
+                for filename in ("%s_specialist_sac.zip" % name, "%s_specialist_scaler.joblib" % name,
+                                 "%s_feature_contract.json" % name):
+                    record((folder / filename).exists(), "%s presente (%s)" % (filename, label))
+            try:
+                parity = json.loads((folder / "agent_mirror_parity.json").read_text(encoding="utf-8"))
+                current = mirror.artifact_hashes(folder, names)
+                same = all(parity["artifact_hashes"].get(k) == v for k, v in current.items())
+                record(bool(parity.get("all_passed")) and same, "replay do espelho = backtest (%s)" % label,
+                       "" if same else "paridade medida em outros arquivos")
+            except (OSError, ValueError, KeyError):
+                record(False, "replay do espelho = backtest (%s)" % label, "rode scripts/verify_agent_mirror_parity.py")
+        if diagnostic:
+            record(bool(trading_config.BINANCE_TESTNET), "agentes de diagnostico so na testnet", ", ".join(diagnostic))
         ok, detail = mirror.approval_is_valid(model_dir)
         record(ok, "aprovacao do espelho valida para os arquivos", detail)
-        try:
-            parity = json.loads((model_dir / "agent_mirror_parity.json").read_text(encoding="utf-8"))
-            current = mirror.artifact_hashes(model_dir, agents)
-            same = all(parity["artifact_hashes"].get(k) == v for k, v in current.items())
-            record(bool(parity.get("all_passed")) and same, "replay do espelho = backtest",
-                   "" if same else "paridade medida em outros arquivos")
-        except (OSError, ValueError, KeyError):
-            record(False, "replay do espelho = backtest", "rode scripts/verify_agent_mirror_parity.py")
     for name in (() if policy == "agent_mirror" else ("bull", "bear", "ranger")):
         path = model_dir / ("%s_specialist_sac.zip" % name)
         record(path.exists(), "politica %s presente" % name,
