@@ -5933,61 +5933,6 @@ class TrendSpecialist:
             self.is_trained = False
             raise
 
-    def prepare_live_observation(self, frame: pd.DataFrame, agent_state: np.ndarray) -> np.ndarray:
-        """Build exactly the training observation and retain real candle frames.
-
-        Repeated polling of one candle replaces its frame, never advances the
-        stack. Startup and time gaps use the same zero history as VecFrameStack.
-        """
-        from collections import deque
-        from specialists.bull_specialist import BullTradingEnv
-        from specialists.bear_specialist import BearTradingEnv
-
-        if self.feature_scaler is None or not self.feature_columns:
-            raise ValueError('Missing live scaler or feature contract')
-        missing = [c for c in self.feature_columns if c not in frame.columns]
-        if missing:
-            raise ValueError(f'Missing live features: {missing[:8]}')
-        name = self.specialist_name.lower()
-        if 'bull' not in name and 'bear' not in name:
-            raise ValueError('observacao ao vivo so para bull ou bear: %s' % name)
-        env_class = BullTradingEnv if 'bull' in name else BearTradingEnv
-        # The live frame carries columns training never had; left in, they
-        # shrink the observation's extras and change stops (training_schema).
-        from feature_engineering.training_schema import align_to_training_frame
-        frame = align_to_training_frame(frame)
-        raw = self._make_trend_env(frame.tail(100).copy(), mode='training',
-                                   env_class=env_class, feature_columns=self.feature_columns)
-        try:
-            raw.start_idx = 0
-            raw.current_step = len(raw.df) - 1
-            raw.position = float(agent_state[0])
-            raw.pnl_since_entry = float(agent_state[1])
-            raw.steps_in_position = float(agent_state[2]) * 100.0
-            current = raw._get_observation().astype(np.float32)
-        finally:
-            raw.close()
-        expected = tuple(self.model.observation_space.shape)
-        if expected != (len(current) * 4,):
-            raise ValueError(f'Live observation contract mismatch: {len(current)} x4 != {expected}')
-        timestamp = frame.index[-1]
-        previous = getattr(self, '_live_frame_timestamp', None)
-        history = getattr(self, '_live_frame_history', None)
-        interval = frame.index.to_series().diff().dropna().median()
-        reset = (history is None or previous is None or timestamp < previous or
-                 (timestamp > previous and pd.notna(interval) and timestamp - previous > interval))
-        if reset:
-            history = deque([np.zeros_like(current) for _ in range(3)], maxlen=4)
-        elif timestamp == previous:
-            history.pop()
-        history.append(current.copy())
-        self._live_frame_history = history
-        self._live_frame_timestamp = timestamp
-        observation = np.concatenate(list(history))
-        if not np.isfinite(observation).all():
-            raise ValueError('Non-finite live observation')
-        return observation
-
     @staticmethod
     def _is_position_exit(observation: np.ndarray, action: Action) -> bool:
         # The newest frame ends in agent_state(3), time(4), prior(2), physics(2).

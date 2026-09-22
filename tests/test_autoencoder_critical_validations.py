@@ -60,21 +60,28 @@ class TestCriticalValidations:
     def trained_pipeline(self, synthetic_time_series, tmp_path):
         """Pipeline treinado com modelo simples"""
         config = AIConfig()
-        config.MODEL_DIR = str(tmp_path)
-        
+        config.MODEL_DIR = str(tmp_path)  # nunca toca no autoencoder real
+
         pipeline = TemporalAutoencoderPipeline(config)
-        
-        # Treina modelo pequeno (rápido para teste)
-        pipeline.train_autoencoder_temporal(
-            df=synthetic_time_series,
-            feature_columns=synthetic_time_series.columns.tolist(),
-            latent_dim=4,
-            seq_length=16,
-            epochs=5,  # Poucas épocas para teste
-            batch_size=32,
-            optimize=False  # Sem Optuna
-        )
-        
+        # Detector de regime falso: o real fica em models_ai e nao pode ser
+        # re-treinado nem sobrescrito por um teste.
+        pipeline.regime_detector = type("StubDetector", (), {
+            "is_trained": True,
+            "predict": staticmethod(lambda df: pd.DataFrame(
+                {"regime": np.zeros(len(df), dtype=int), "confidence": np.ones(len(df))}, index=df.index)),
+        })()
+
+        # Modelo pequeno com hiperparametros fixos (sem Optuna), rapido para teste.
+        columns = synthetic_time_series.columns.tolist()
+        used = pipeline._filter_features_for_autoencoder(synthetic_time_series, columns)
+        pipeline.hyperparams = {
+            'input_dim': len(used), 'cnn_out_channels': 8, 'kernel_size': 3, 'gru_hidden': 16,
+            'gru_layers': 1, 'latent_dim': 4, 'seq_length': 16, 'dropout': 0.1, 'batch_size': 32,
+            'learning_rate': 1e-3, 'weight_decay': 1e-5, 'num_regimes': 3, 'regime_emb_dim': 4,
+        }
+        assert pipeline.train_autoencoder_temporal(
+            df=synthetic_time_series, feature_columns=columns, optimize=False)
+
         return pipeline
     
     def test_ood_reconstruction_basic(self, trained_pipeline, synthetic_time_series):
@@ -203,10 +210,11 @@ class TestCriticalValidations:
         if not np.isnan(error):
             print(f"✅ Reconstruction error: {error:.4f}")
     
-    def test_critical_validations_require_trained_model(self):
+    def test_critical_validations_require_trained_model(self, tmp_path):
         """Verifica que validações exigem modelo treinado"""
-        
+
         config = AIConfig()
+        config.MODEL_DIR = str(tmp_path)  # sem modelo salvo: nao carrega o real
         pipeline = TemporalAutoencoderPipeline(config)
         
         df = pd.DataFrame({'close': [100, 101, 102]}, index=pd.date_range('2024-01-01', periods=3))

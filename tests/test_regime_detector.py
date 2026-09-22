@@ -84,7 +84,7 @@ class TestImport:
         """RegimeConfig deve ter os novos campos M2 e F1."""
         cfg = RegimeConfig()
         assert hasattr(cfg, 'drawdown_window'), "M2: drawdown_window deve existir"
-        assert cfg.drawdown_window == 50
+        assert cfg.drawdown_window == 20  # [M2] reduzido de 50 para 20 (5h de lookback)
         assert hasattr(cfg, 'funding_risk_threshold'), "F1: funding_risk_threshold deve existir"
         assert hasattr(cfg, 'funding_risk_attenuation'), "F1: funding_risk_attenuation deve existir"
 
@@ -229,8 +229,9 @@ class TestB3ForwardAlgorithm:
         """B3 FIX: predict_online deve atualizar self._alpha entre chamadas."""
         det = trained_detector()
         det._alpha = None  # Reseta para simular primeira chamada
-        
-        obs = np.random.default_rng(1).normal(0, 1, 6)
+        n_features = det.scaler.n_features_in_  # observacao com as features do detector
+
+        obs = np.random.default_rng(1).normal(0, 1, n_features)
         det.predict_online(obs)
         
         # Após primeira chamada, _alpha deve ter sido inicializado
@@ -244,7 +245,7 @@ class TestB3ForwardAlgorithm:
             f"B3 BUG: _alpha não normalizado: soma={total:.4f}"
         
         # Segunda chamada com observaçao diferente não deve resetar alpha
-        obs2 = np.ones(6) * 5.0  # Obs muito diferente
+        obs2 = np.ones(n_features) * 5.0  # Obs muito diferente
         alpha_before = det._alpha.copy()
         det.predict_online(obs2)
         assert det._alpha is not None, \

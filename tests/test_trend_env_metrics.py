@@ -33,6 +33,9 @@ def _build_minimal_dataframe(rows: int = 16) -> pd.DataFrame:
         "tp_regime_sideways": np.ones(rows),
         "tp_prior_conf": np.full(rows, 0.5),
         "ema_trend": np.zeros(rows),
+        # O ambiente preca os stops em ATR (ENV_STOP_ATR_TIMEFRAME, 15m ou 1h).
+        "atr_15m": np.full(rows, 0.5),
+        "atr_1h": np.full(rows, 1.0),
     }
     data = {**base, **optional}
     return pd.DataFrame(data, index=idx)
