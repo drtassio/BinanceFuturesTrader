@@ -1154,6 +1154,9 @@ async def main_trading_loop():
                         system_state["mirror_chart_bar"] = str(_view.get("bar"))
                         try:
                             from trading import mirror_chart
+                            _pos = portfolio.positions.get(TradingConfig.PRIMARY_PAIR) if portfolio else None
+                            mirror_chart.record_account(_view["bar"], _view.get("account_side", 0),
+                                                        getattr(_pos, "entry_price", 0.0) if _pos else 0.0)
                             _hist = ai_controller.mirror_history.frame
                             _paths = dict(getattr(ai_controller, "mirror_paths", {}) or {})
                             print(mirror_chart.render(_hist, _paths, _view), flush=True)
@@ -1200,6 +1203,15 @@ async def main_trading_loop():
                         # A mudança de lado da conta que esta ordem causa não é
                         # um stop na corretora: não alerta duas vezes.
                         system_state["mirror_order_pending"] = True
+                    if _mirror_policy() and order is not None and getattr(ai_controller, "mirror_view", None):
+                        # Trade real do bot: marca no grafico no candle desta ordem.
+                        try:
+                            from trading import mirror_chart
+                            _mv = ai_controller.mirror_view
+                            _new_side = 0 if _mv.get("action") == "close" else (1 if signal.action == Action.BUY else -1)
+                            mirror_chart.record_account(_mv["bar"], _new_side, _mv.get("close") or 0.0)
+                        except Exception as _rec_error:
+                            logger.warning("[ESPELHO] Trade real nao registrado no grafico: %s", _rec_error)
                         asyncio.create_task(telegram.alert_mirror_order(
                             dict(ai_controller.mirror_view), signal, order is not None))
                     # [XAI] Persiste evento de ordem enviada no AIMonitor

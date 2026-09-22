@@ -16,6 +16,8 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_PATH = ROOT / "logs" / "charts" / "espelho.txt"
+# Lado da conta na Binance a cada candle fechado: os trades REAIS do bot.
+ACCOUNT_LOG = ROOT / "logs" / "charts" / "conta_espelho.jsonl"
 AGENT_NAMES = {"bull": "agente LONG", "bear": "agente SHORT"}
 
 RESET = "\033[0m"
@@ -53,6 +55,49 @@ def trades_of(path: pd.DataFrame, close: pd.Series) -> List[dict]:
         if side != 0 and current is None:
             entry = float(path.at[bar, "entry_price"]) or float(close.get(bar, 0.0))
             current = {"side": side, "entry_bar": bar, "entry_price": entry}
+    if current is not None:
+        trades.append(current)
+    return trades
+
+
+def record_account(bar, side: int, entry_price: float) -> None:
+    """Guarda o lado da conta neste candle (um registro por candle)."""
+    import json
+    ACCOUNT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with ACCOUNT_LOG.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"bar": str(pd.Timestamp(bar)), "side": int(side), "entry_price": float(entry_price or 0.0)}) + "\n")
+
+
+def real_trades(close: pd.Series) -> List[dict]:
+    """Trades que o bot fez de fato na conta, a partir de conta_espelho.jsonl."""
+    import json
+    if not ACCOUNT_LOG.exists():
+        return []
+    rows = []
+    for line in ACCOUNT_LOG.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    if not rows:
+        return []
+    log = pd.DataFrame(rows)
+    log["bar"] = pd.to_datetime(log["bar"], utc=True)
+    if close.index.tz is None:
+        log["bar"] = log["bar"].dt.tz_convert(None)
+    log = log.drop_duplicates("bar", keep="last").set_index("bar").sort_index()
+    trades, current = [], None
+    for bar, r in log.iterrows():
+        side = int(r["side"])
+        if current is not None and side != current["side"]:
+            exit_price = float(close.get(bar, current["entry_price"]))
+            current.update(exit_bar=bar, exit_price=exit_price,
+                           result=current["side"] * (exit_price / current["entry_price"] - 1) * 100)
+            trades.append(current)
+            current = None
+        if side != 0 and current is None:
+            entry = float(r.get("entry_price") or 0.0) or float(close.get(bar, 0.0))
+            current = {"side": side, "entry_bar": bar, "entry_price": entry, "agent": "bot"}
     if current is not None:
         trades.append(current)
     return trades
@@ -109,7 +154,8 @@ def render(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Optional
         if ch == " ":
             cells[price_row][i] = ("┈", "price", bg)
 
-    for tr in trades:
+    real = real_trades(frame["close"])
+    for tr in real:
         if tr["entry_bar"] in col:
             i = col[tr["entry_bar"]]
             if tr["side"] > 0:
@@ -153,23 +199,23 @@ def render(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Optional
     axis_line = "   " + "".join(axis) + "  (UTC)"
 
     events = []
-    for tr in sorted(trades, key=lambda d: d["entry_bar"]):
+    for tr in sorted(real, key=lambda d: d["entry_bar"]):
         if tr.get("exit_bar", index[-1]) < index[0]:
             continue
-        name = AGENT_NAMES.get(tr["agent"], tr["agent"])
         side = "LONG" if tr["side"] > 0 else "SHORT"
-        text = "%s %s ENTRA %s (%s) @ %s" % ("▲" if tr["side"] > 0 else "▼",
+        text = "%s %s BOT ENTROU %s @ %s" % ("▲" if tr["side"] > 0 else "▼",
                                              (tr["entry_bar"] + pd.Timedelta(minutes=15)).strftime("%d/%m %H:%M"),
-                                             side, name, fmt(tr["entry_price"]))
+                                             side, fmt(tr["entry_price"]))
         if "exit_bar" in tr:
             text += "  →  ✖ %s SAI %+.2f%%" % ((tr["exit_bar"] + pd.Timedelta(minutes=15)).strftime("%d/%m %H:%M"), tr["result"])
         else:
-            text += "  →  aberto na simulação: %+.2f%%" % (tr["side"] * (price / tr["entry_price"] - 1) * 100)
+            text += "  →  posição aberta: %+.2f%%" % (tr["side"] * (price / tr["entry_price"] - 1) * 100)
         events.append(text)
-    legend = "   verde = long | vermelho = short | sem cor = fora | ▲ entra long ▼ entra short ✖ sai | ┈ preço atual"
+    legend = ("   fundo verde/vermelho = oportunidades dos agentes LONG/SHORT (simulação) | "
+              "▲ ▼ ✖ = entradas e saídas REAIS do bot | ┈ preço atual")
     last_close = (index[-1] + pd.Timedelta(minutes=15)).strftime("%d/%m %H:%M")
     title = "   📈 BTCUSDT perp 15m — últimas %dh até %s UTC" % (len(index) // 4, last_close)
-    ev = ["   " + e for e in events[-6:]] or ["   nenhuma entrada dos agentes neste período"]
+    ev = ["   " + e for e in events[-6:]] or ["   nenhum trade real do bot neste período"]
 
     colored = "\n".join([title] + lines_c + [FG["axis"] + axis_line + RESET, legend] + ev)
     plain = "\n".join([title] + lines_p + [axis_line, legend] + ev)
@@ -218,21 +264,24 @@ def render_png(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Opti
             end = tr.get("exit_bar", bars.index[-1])
             if end < bars.index[0]:
                 continue
-            n += 1
             a = x.get(max(tr["entry_bar"], bars.index[0]), 0)
             b = x.get(min(end, bars.index[-1]), len(bars) - 1)
             ax.axvspan(a - 0.5, b + 0.5, color="#2e7d32" if tr["side"] > 0 else "#c62828", alpha=0.12, linewidth=0)
+    for tr in real_trades(frame["close"]):
+            if tr.get("exit_bar", bars.index[-1]) < bars.index[0]:
+                continue
+            n += 1
             if tr["entry_bar"] in x:
                 i, y = x[tr["entry_bar"]], tr["entry_price"]
                 marker, color = ("^", "#1b5e20") if tr["side"] > 0 else ("v", "#b71c1c")
                 ax.scatter(i, y, marker=marker, s=120, color=color, zorder=5)
-                ax.annotate("ENTRA %s" % ("LONG" if tr["side"] > 0 else "SHORT"), (i, y),
+                ax.annotate("BOT ENTROU %s" % ("LONG" if tr["side"] > 0 else "SHORT"), (i, y),
                             xytext=(0, -18 if tr["side"] > 0 else 12), textcoords="offset points",
                             ha="center", fontsize=8, color=color, fontweight="bold")
             if "exit_bar" in tr and tr["exit_bar"] in x:
                 i = x[tr["exit_bar"]]
                 ax.scatter(i, tr["exit_price"], marker="X", s=100, color="black", zorder=5)
-                ax.annotate("SAI %+.1f%%" % tr["result"], (i, tr["exit_price"]), xytext=(6, 6),
+                ax.annotate("SAI %+.1f%%" % tr["result"], (i, tr["exit_price"]), xytext=(6, -14),
                             textcoords="offset points", fontsize=8, fontweight="bold")
     price = float((view or {}).get("close") or bars["close"].iloc[-1])
     ax.axhline(price, color="#1565c0", linestyle="--", linewidth=1.1)
@@ -250,7 +299,7 @@ def render_png(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Opti
         state.append("%s: %s%s" % (AGENT_NAMES.get(sh.agent, sh.agent), txt, " (NOVA ENTRADA)" if sh.entered_on_last_bar else ""))
     acc = (view or {}).get("account_side", 0)
     closed = (bars.index[-1] + pd.Timedelta(minutes=15)).strftime("%d/%m/%Y %H:%M")
-    ax.set_title("BTCUSDT perp 15m, últimas %dh até %s UTC: %d trades dos agentes (verde = long, vermelho = short, sem cor = fora)\n%s | conta: %s"
+    ax.set_title("BTCUSDT perp 15m, últimas %dh até %s UTC: %d trades reais do bot (marcas); fundo = oportunidades dos agentes (verde long, vermelho short)\n%s | conta: %s"
                  % (hours, closed, n, " | ".join(state) or "-", "sem posição" if not acc else ("comprada" if acc > 0 else "vendida")),
                  fontsize=10)
     fig.tight_layout()
