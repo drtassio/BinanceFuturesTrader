@@ -1159,9 +1159,22 @@ async def main_trading_loop():
                                                         getattr(_pos, "entry_price", 0.0) if _pos else 0.0)
                             _hist = ai_controller.mirror_history.frame
                             _paths = dict(getattr(ai_controller, "mirror_paths", {}) or {})
-                            print(mirror_chart.render(_hist, _paths, _view), flush=True)
-                            asyncio.create_task(asyncio.to_thread(
-                                mirror_chart.render_png, _hist.copy(), _paths, dict(_view)))
+                            _text = mirror_chart.render(_hist, _paths, _view)
+                            if os.environ.get("MIRROR_CHART_MODE", "imagem").strip().lower() == "texto":
+                                print(_text, flush=True)
+                                asyncio.create_task(asyncio.to_thread(
+                                    mirror_chart.render_png, _hist.copy(), _paths, dict(_view)))
+                            else:
+                                # A imagem PNG impressa no terminal (Sixel, Windows Terminal 1.22+).
+                                async def _print_chart(h=_hist.copy(), p=_paths, v=dict(_view)):
+                                    try:
+                                        from trading import sixel
+                                        png = await asyncio.to_thread(mirror_chart.render_png, h, p, v)
+                                        image = await asyncio.to_thread(sixel.encode, png)
+                                        print("\n" + image, flush=True)
+                                    except Exception as _img_error:
+                                        logger.warning("[ESPELHO] Imagem do grafico nao impressa: %s", _img_error)
+                                asyncio.create_task(_print_chart())
                         except Exception as _chart_error:
                             logger.warning("[ESPELHO] Grafico nao gerado: %s", _chart_error)
                     if _view is not None:
