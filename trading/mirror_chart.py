@@ -311,3 +311,17 @@ def render_png(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Opti
     PAGE_PATH.write_text(_PAGE % {"stamp": closed.replace("/", "").replace(" ", "").replace(":", ""), "closed": closed},
                          encoding="utf-8")
     return CHART_PATH
+
+
+def keep_copy(png: Path, bar, keep_days: int = 7) -> Path:
+    """Copia o grafico deste candle para espelho_AAAAMMDD_HHMM.png e apaga copias com mais de keep_days."""
+    import shutil
+    import time
+    closed = pd.Timestamp(bar) + pd.Timedelta(minutes=15) if bar is not None else pd.Timestamp.now(tz="UTC")
+    target = png.with_name("espelho_%s.png" % closed.strftime("%Y%m%d_%H%M"))
+    shutil.copyfile(png, target)
+    limit = time.time() - keep_days * 86400
+    for old in png.parent.glob("espelho_*.png"):
+        if old.stat().st_mtime < limit:
+            old.unlink(missing_ok=True)
+    return target
