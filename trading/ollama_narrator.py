@@ -87,11 +87,23 @@ CONTEXTO DE MERCADO (só informativo, não decide a ordem):
 Regime detectado: {regime} | Tape: {tape_pulse} (score {tape_score:+.2f}) | OBI: {obi:+.2f} | Fear & Greed: {sentiment}
 
 COMO ESCREVER:
-- Fale como um trader experiente conversando com o dono do bot enquanto olha o gráfico: tom natural, frases variadas, em 3 a 5 frases, sem listas nem números de ATR.
+- Fale como um trader experiente conversando com o dono do bot: tom natural, frases variadas, no máximo 5 frases curtas, sem listas nem números de ATR.
+- Chame os tempos gráficos de "gráfico de 15 minutos", "de 5 minutos", "de 4 horas" e "das últimas 12 horas".
+- {focus} Não abra com "Olha", "Olha só", "Veja", "Na tela", "O mercado está" nem fale da tela ou do gráfico em si.
 - Conte o que o mercado está fazendo agora (se tem escada ou só vai-e-vem, para onde o 4h aponta, se o fluxo está comprador ou vendedor, o clima do tape e do sentimento), fiel ao RESUMO DO GRÁFICO: nunca diga que há escada se o resumo diz que não há.
 - Diga de forma simples o que o bot está esperando: cite só o que mais falta (1 ou 2 coisas) para o LONG ou o SHORT entrar, sem recitar a lista toda. Se um agente está posicionado, diga como vai o trade e o que faria o bot sair.
 - Use só os fatos acima; não invente números. Não fale em "reversão", "confiança" nem "sinal de reversão".
 """
+
+
+FOCUS_OPENINGS = [
+    "Abra falando do fluxo agressor (quem está agredindo, compradores ou vendedores).",
+    "Abra pelo que o 4h está fazendo e depois desça para o 15m.",
+    "Abra pelo que falta para a próxima entrada acontecer.",
+    "Abra pelo preço em relação à máxima e à mínima das últimas 12h.",
+    "Abra pelos degraus do 15m: quantos já apareceram e em que direção.",
+    "Abra pela situação dos dois agentes e da conta.",
+]
 
 
 def mirror_facts(row, view: Dict) -> Dict[str, str]:
@@ -168,7 +180,9 @@ def mirror_facts(row, view: Dict) -> Dict[str, str]:
             ", ENTROU NESTE CANDLE" if sh.entered_on_last_bar else ""))
     acc = view.get("account_side", 0)
     agents.append("- Conta na Binance: %s." % ("sem posição" if not acc else "comprada" if acc > 0 else "vendida"))
-    return {"facts": "\n".join(facts), "agents": "\n".join(agents)}
+    state = (up, down, up5, down5, brk_up > 0, brk_down < 0, body > 0, cvd > 0, s_long >= 0, trend4 > 0,
+             tuple(sh.side for sh in view.get("shadows", [])), acc)
+    return {"facts": "\n".join(facts), "agents": "\n".join(agents), "state": state}
 
 
 class OllamaNarrator:
@@ -421,10 +435,15 @@ class OllamaNarrator:
             await self.check_availability()
         if not self._available or self._is_generating:
             return
-        key = ctx.get('_mirror_key')
-        if self._last_fp is not None and self._last_fp.get('mirror') == key:
+        # Fala quando o que o bot ve muda (degraus, rompimento, fluxo, agentes,
+        # acao); sem mudanca, no maximo uma vez por hora.
+        key = (ctx.get('_state_key'), ctx.get('action'))
+        if self._last_fp is not None and self._last_fp.get('mirror') == key and self._last_update \
+                and datetime.utcnow() - self._last_update < timedelta(hours=1):
             return
-        ctx = dict(ctx, _prompt=MIRROR_PROMPT.format(**{k: ctx[k] for k in (
+        import random
+        focus = random.choice(FOCUS_OPENINGS)
+        ctx = dict(ctx, _temperature=0.6, _prompt=MIRROR_PROMPT.format(focus=focus, **{k: ctx[k] for k in (
             'bar', 'price', 'facts', 'agents', 'action', 'reason', 'regime', 'tape_pulse', 'tape_score',
             'obi', 'sentiment')}))
         logger.info("🤖 [NARRATOR] Lendo o candle %s para o painel...", ctx.get('bar'))
@@ -446,7 +465,7 @@ class OllamaNarrator:
                         "stream":  True,
                         "think":   False,          # desativa thinking mode (Qwen3/3.5)
                         "options": {
-                            "temperature": 0.25,
+                            "temperature": ctx.get("_temperature", 0.25),
                             "num_predict": MAX_TOKENS,
                             "top_p":       0.9,
                         },

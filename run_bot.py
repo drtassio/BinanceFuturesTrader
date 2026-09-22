@@ -355,6 +355,17 @@ def _mirror_policy() -> bool:
     return str(getattr(TradingConfig, "LIVE_POLICY", "sac")).strip().lower() == "agent_mirror"
 
 
+def _fear_greed_text(score) -> str:
+    """Indice Fear & Greed com o nome da faixa (o sinal BEARISH do bot e leitura contraria)."""
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return "indisponível"
+    label = ("medo extremo" if value < 25 else "medo" if value < 45 else "neutro" if value <= 55
+             else "ganância" if value < 75 else "ganância extrema")
+    return "%d (%s)" % (round(value), label)
+
+
 def _mirror_reason_text(view) -> str:
     reason = str(view.get("reason") or "")
     if reason.startswith("agente ") and reason.endswith(" entrou"):
@@ -1205,7 +1216,8 @@ async def main_trading_loop():
                                 "tape_pulse": _tape.get('pulse', 'NEUTRAL'),
                                 "tape_score": float(_tape.get('score', 0.0)),
                                 "obi": float(_tape.get('obi', 0.0)),
-                                "sentiment": "%s (%s)" % (_sent.get('signal', 'n/d'), _sent.get('score', '—')),
+                                "sentiment": _fear_greed_text(_sent.get('score')),
+                                "_state_key": _facts["state"],
                                 "_mirror_key": (str(_view["bar"]), _action, _acc,
                                                 tuple(s.side for s in _view.get("shadows", []))),
                                 "_mirror_sub": "%s | conta: %s | bot: %s" % (
