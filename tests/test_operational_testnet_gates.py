@@ -9,7 +9,6 @@ import pytest
 from config.settings import TradingConfig
 from data_provider import DataProvider
 from models.trade_schema import Action, Signal
-from trading.ai_controller import AIController
 from trading.binance_connector import BinanceConnector
 from trading.risk_manager import RiskManager
 
@@ -163,95 +162,3 @@ class _EvaluatedSpecialist:
 
     def evaluate(self, _df):
         return dict(self.metrics)
-
-
-def _controller_for_oos_gate(tmp_path: Path, metrics):
-    config = SimpleNamespace(
-        MODEL_DIR=str(tmp_path),
-        OOS_MIN_SHARPE=0.50,
-        OOS_MIN_PROFIT_FACTOR=1.10,
-        OOS_MAX_DRAWDOWN=0.15,
-        OOS_MIN_NET_RETURN=0.0,
-        OOS_MIN_TRADES=20,
-        REQUIRE_OOS_POLICY_APPROVAL=True,
-    )
-    controller = object.__new__(AIController)
-    controller.config_ai = config
-    controller.policy_validation_path = str(tmp_path / 'policy_oos_validation.json')
-    controller.policy_oos_approved = False
-    controller.last_oos_validation = {}
-    controller.specialists = {
-        name: _EvaluatedSpecialist(metrics[name])
-        for name in ('bull', 'bear', 'ranger')
-    }
-    for name in ('bull', 'bear', 'ranger'):
-        (tmp_path / f'{name}_specialist_scaler.joblib').write_bytes(b'scaler')
-        (tmp_path / f'{name}_feature_contract.json').write_text('{}')
-        (tmp_path / f'{name}_specialist_sac.zip').write_bytes(
-            (name * 100).encode('ascii')
-        )
-    return controller
-
-
-def test_oos_gate_approves_and_binds_report_to_model_hashes(tmp_path):
-    passing = {
-        name: {
-            'sharpe_ratio': 0.80,
-            'max_drawdown': 0.10,
-            'profit_factor': 1.30,
-            'num_trades': 25,
-            'net_return': 0.05,
-            'deterministic': True,
-            'vote_std': .2,
-        }
-        for name in ('bull', 'bear', 'ranger')
-    }
-    controller = _controller_for_oos_gate(tmp_path, passing)
-    frame = pd.DataFrame({'close': [100.] * 100}, index=pd.date_range('2024-01-01', periods=100, freq='15min'))
-
-    report = controller._validate_specialists_oos(frame)
-
-    assert report['all_passed'] is True
-    assert controller._load_policy_oos_approval() is True
-
-    (tmp_path / 'bear_specialist_sac.zip').write_bytes(b'changed-policy')
-    assert controller._load_policy_oos_approval() is False
-
-
-def test_oos_gate_rejects_unprofitable_specialist(tmp_path):
-    passing_metrics = {
-        'sharpe_ratio': 0.80,
-        'max_drawdown': 0.10,
-        'profit_factor': 1.30,
-        'num_trades': 25,
-        'net_return': 0.05,
-        'deterministic': True,
-        'vote_std': .2,
-    }
-    metrics = {name: dict(passing_metrics) for name in ('bull', 'bear', 'ranger')}
-    metrics['ranger']['net_return'] = -0.01
-    controller = _controller_for_oos_gate(tmp_path, metrics)
-    frame = pd.DataFrame({'close': [100.] * 100}, index=pd.date_range('2024-01-01', periods=100, freq='15min'))
-
-    report = controller._validate_specialists_oos(frame)
-
-    assert report['all_passed'] is False
-    assert report['specialists']['ranger']['checks']['net_return'] is False
-
-
-@pytest.mark.parametrize('changes', [
-    {'net_return': 0.}, {'max_drawdown': -.01},
-    {'max_drawdown': float('nan')}, {'profit_factor': float('inf')},
-    {'deterministic': False}, {'vote_std': 0.}, {'num_trades': 8},
-])
-def test_local_approval_does_not_bypass_cloud_requirements(tmp_path, changes):
-    valid = dict(sharpe_ratio=.8, max_drawdown=.1, profit_factor=1.3,
-                 num_trades=25, net_return=.05, deterministic=True, vote_std=.2)
-    metrics = {name: dict(valid) for name in ('bull', 'bear', 'ranger')}
-    metrics['bull'].update(changes)
-    controller = _controller_for_oos_gate(tmp_path, metrics)
-    frame = pd.DataFrame({'close': [100.] * 100},
-                         index=pd.date_range('2024-01-01', periods=100, freq='15min'))
-    report = controller._validate_specialists_oos(frame)
-    assert report['all_passed'] is False
-    assert report['specialists']['bull']['passed'] is False

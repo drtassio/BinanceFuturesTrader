@@ -62,8 +62,7 @@ def _env_class(agent: str):
     if agent == "bear":
         from specialists.bear_specialist import BearTradingEnv
         return BearTradingEnv
-    from specialists.ranger_specialist import RangerTradingEnv
-    return RangerTradingEnv
+    raise ValueError("agente sem ambiente: %s (so bull e bear)" % agent)
 
 
 def make_env(frame: pd.DataFrame, agent: str, config=None):

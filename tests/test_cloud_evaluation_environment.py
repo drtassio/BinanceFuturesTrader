@@ -4,16 +4,14 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.parametrize("name", ["bull", "bear", "ranger"])
+@pytest.mark.parametrize("name", ["bull", "bear"])
 def test_evaluation_uses_specialist_environment(monkeypatch, name):
     from cloud.train_agent import _episode_environment
     from specialists.bull_specialist import BullTradingEnv
     from specialists.bear_specialist import BearTradingEnv
-    from specialists.ranger_specialist import RangerTradingEnv
     from stable_baselines3.common import vec_env
 
-    expected = {"bull": BullTradingEnv, "bear": BearTradingEnv,
-                "ranger": RangerTradingEnv}[name]
+    expected = {"bull": BullTradingEnv, "bear": BearTradingEnv}[name]
     captured = {}
     raw = SimpleNamespace(max_steps=0,
                           set_phase3_runtime_tweaks=lambda: captured.update(phase3=True))

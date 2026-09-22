@@ -263,6 +263,10 @@ class LegConfirmRule:
     # while the 4h trend is strong.
     exit_trend_1h: bool = False
     min_adx_4h: float = 0.0
+    # EXPERIMENT: learned filter (joblib {"model", "columns"}) that must accept
+    # the confirmed entry with probability >= filter_threshold.
+    filter_path: str = ""
+    filter_threshold: float = 0.0
     sl_mult: float = 3.0
     leverage: float = 3.0
     vote: float = 0.8
@@ -291,7 +295,19 @@ def leg_confirm_inputs(rule: "LegConfirmRule", agent: str) -> tuple:
         extras.append("ema_trend_1h")
     if getattr(rule, "min_adx_4h", 0.0) > 0.0:
         extras.append("adx_4h")
+    if getattr(rule, "filter_path", ""):
+        extras.extend(c for c in _entry_filter(rule.filter_path)["columns"] if c not in cols and c not in extras)
     return cols + tuple(extras)
+
+
+_FILTERS: Dict[str, object] = {}
+
+
+def _entry_filter(path: str):
+    if path not in _FILTERS:
+        import joblib
+        _FILTERS[path] = joblib.load(path)
+    return _FILTERS[path]
 
 
 def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule") -> np.ndarray:
@@ -324,6 +340,10 @@ def leg_confirm_action(row, position: float, agent: str, rule: "LegConfirmRule")
             confirmed = confirmed and side * values.get("macd_hist_4h", 0.0) > 0.0
         if getattr(rule, "min_adx_4h", 0.0) > 0.0:
             confirmed = confirmed and values.get("adx_4h", 0.0) >= rule.min_adx_4h
+        if confirmed and getattr(rule, "filter_path", ""):
+            spec = _entry_filter(rule.filter_path)
+            x = np.array([[float(row.get(c, 0.0)) for c in spec["columns"]]])
+            confirmed = float(spec["model"].predict_proba(x)[0, 1]) >= rule.filter_threshold
         vote = side * rule.vote if confirmed else -side * rule.vote
     return np.array([vote, rule.sl_mult, rule.leverage], dtype=np.float32)
 

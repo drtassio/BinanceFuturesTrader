@@ -10,7 +10,7 @@ ai_controller pads or truncates the vector to fit, so nothing raises.
 This script refuses that. It checks, before copying anything, that the scaler's
 feature count reproduces the policy's observation size, then copies both files
 together and records their hashes. Promoting a policy changes its hash, which
-invalidates any existing OOS approval until scripts/approve_policies_oos.py is
+invalidates any existing OOS approval until scripts/approve_agent_mirror.py is
 run again.
 
     python scripts/promote_model.py --agent bull
@@ -100,7 +100,7 @@ def observation_size(model_path: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", choices=("bull", "bear", "ranger"), required=True)
+    parser.add_argument("--agent", choices=("bull", "bear"), required=True)
     parser.add_argument("--run", type=Path, help="pasta da execucao (padrao: a mais recente)")
     parser.add_argument("--archive", type=Path, help="pacote .tar.gz baixado do Colab/Kaggle")
     parser.add_argument("--dest", type=Path, default=ROOT / "models_ai")
@@ -177,9 +177,8 @@ def main() -> int:
         from config.settings import AIConfig
         from specialists.bull_specialist import BullTradingEnv
         from specialists.bear_specialist import BearTradingEnv
-        from specialists.ranger_specialist import RangerTradingEnv
 
-        env_class = {"bull": BullTradingEnv, "bear": BearTradingEnv, "ranger": RangerTradingEnv}[agent]
+        env_class = {"bull": BullTradingEnv, "bear": BearTradingEnv}[agent]
         AIConfig.ENV_STOP_ATR_TIMEFRAME = run_contract.get("stop_atr_timeframe", "15m")
         from trading.agent_mirror import apply_leverage_bounds
         apply_leverage_bounds(run_contract)
@@ -225,7 +224,7 @@ def main() -> int:
     print("\npromovido para %s" % args.dest)
     if backup.exists():
         print("versao anterior guardada em %s" % backup)
-    print("a aprovacao OOS anterior deixou de valer; rode scripts/approve_policies_oos.py")
+    print("a aprovacao OOS anterior deixou de valer; rode scripts/approve_agent_mirror.py")
     if workdir is not None:
         shutil.rmtree(workdir, ignore_errors=True)
     return 0

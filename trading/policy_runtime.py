@@ -7,7 +7,7 @@ RUNTIME_FILES = (
     'config/settings.py', 'cloud/train_agent.py',
     'specialists/trend_specialist.py', 'specialists/base_regime_specialist.py',
     'specialists/bull_specialist.py', 'specialists/bear_specialist.py',
-    'specialists/ranger_specialist.py', 'trading/ai_controller.py',
+    'trading/ai_controller.py',
     'trading/execution_engine.py', 'trading/risk_manager.py',
     'trading/policy_exit.py', 'trading/policy_runtime.py',
 )

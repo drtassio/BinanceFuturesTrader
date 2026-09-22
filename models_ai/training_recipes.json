@@ -1,0 +1,19 @@
+{
+  "_doc": "Como o bot retreina um agente quando o modelo dele falta em models_ai (trading/auto_retrain.py). Mesmas receitas dos modelos em operacao.",
+  "dataset": "data/featured_data_causal_leg5m.parquet",
+  "env": {"ENV_STOP_ATR_TIMEFRAME": "1h", "TREND_SKIP_OPTUNA": "1", "PYTHONIOENCODING": "utf-8"},
+  "agents": {
+    "bull": {
+      "rule": "models_ai/bull_leg_confirm_registered_rule.json",
+      "source_run": "cloud/artifacts/clip/bull_guided_20260921T113340",
+      "args": ["--cpu-threads", "8", "--dagger-iters", "3", "--critic-warmup", "2000", "--finetune-steps", "20000",
+               "--eval-every", "10000", "--bc-weight-end", "0.5", "--min-trades", "10", "--isolate-teacher-inputs"]
+    },
+    "bear": {
+      "rule": "models_ai/bear_filter_rule.json",
+      "source_run": "cloud/artifacts/exp_bear_filter/bear_guided_20260921T170815_p23496",
+      "args": ["--cpu-threads", "8", "--dagger-iters", "3", "--critic-warmup", "10000", "--finetune-steps", "80000",
+               "--eval-every", "10000", "--bc-weight-end", "0.5", "--min-trades", "10", "--isolate-teacher-inputs"]
+    }
+  }
+}

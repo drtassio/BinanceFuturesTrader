@@ -14,10 +14,8 @@ import torch.nn as nn
 from config.settings import AIConfig
 from feature_engineering.crypto_regime_detector import CryptoRegimeDetector, RegimeConfig
 from feature_engineering.temporal_autoencoder import TemporalAutoencoderPipeline, TemporalSDAE
-from learning.curriculum_engine import CurriculumEngine
 from models.trade_schema import Action, Signal
 from specialists.base_regime_specialist import BaseRegimeSpecialist
-from specialists.ranger_specialist import RangerTradingEnv
 from specialists.scientific_corrections import compute_scientific_reward
 from specialists.trend_specialist import TrendFollowingEnv, TrendSpecialist
 
@@ -156,47 +154,6 @@ def test_funding_is_charged_only_at_settlement_boundary():
     assert np.isclose(short_credit, -1.0)
 
 
-def test_curriculum_preserves_full_chronology_with_eligibility_mask(tmp_path):
-    config = AIConfig()
-    config.CHECKPOINT_DIR = str(tmp_path)
-    config.CURRICULUM_STAGES = [{
-        'name': 'causal-stage',
-        'volatility_max': 0.02,
-        'min_training_runs': 3,
-        'max_training_runs': 3,
-        'success_criteria': {'sharpe_ratio': 100.0},
-    }]
-    engine = CurriculumEngine(config)
-    col = f'atr_percentage_{engine.primary_timeframe}'
-    index = pd.date_range('2024-01-01', periods=1_000, freq='15min', tz='UTC')
-    frame = pd.DataFrame({col: np.tile([0.01, 0.03], 500)}, index=index)
-
-    prepared = engine.prepare_training_data(frame)
-
-    assert prepared.index.equals(index)
-    assert len(prepared) == len(frame)
-    assert prepared['curriculum_eligible'].sum() == 500
-
-
-def test_curriculum_never_advances_without_oos_acceptance(tmp_path):
-    config = AIConfig()
-    config.CHECKPOINT_DIR = str(tmp_path)
-    config.CURRICULUM_STAGES = [
-        {
-            'name': 'unproven',
-            'min_training_runs': 3,
-            'max_training_runs': 3,
-            'success_criteria': {'sharpe_ratio': 100.0},
-        },
-        {'name': 'next', 'success_criteria': {}},
-    ]
-    engine = CurriculumEngine(config)
-    for sharpe in (0.0, 1.0, 2.0):
-        engine.update_progress({'sharpe_ratio': sharpe})
-
-    assert engine.current_stage_index == 0
-
-
 def test_production_specialist_blocks_wrong_way_signal(monkeypatch):
     sell = Signal(
         symbol='BTCUSDT', action=Action.SELL, confidence=0.9,
@@ -212,10 +169,3 @@ def test_production_specialist_blocks_wrong_way_signal(monkeypatch):
     assert filtered.action == Action.HOLD
     assert filtered.confidence == 0.0
     assert filtered.position_size_pct == 0.0
-
-
-def test_uncalibrated_ranger_exit_rules_are_disabled_by_default():
-    env = object.__new__(RangerTradingEnv)
-    env.config = SimpleNamespace(ENABLE_RANGER_RULE_BASED_EXITS=False)
-
-    assert env._should_exit_fast(0.50) is False

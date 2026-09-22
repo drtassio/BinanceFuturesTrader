@@ -37,12 +37,10 @@ sys.path.insert(0, str(ROOT))
 from config.settings import AIConfig, TradingConfig  # noqa: E402
 from specialists.bull_specialist import BullSpecialist  # noqa: E402
 from specialists.bear_specialist import BearSpecialist  # noqa: E402
-from specialists.ranger_specialist import RangerSpecialist  # noqa: E402
 
 AGENTS = {
     "bull": BullSpecialist,
     "bear": BearSpecialist,
-    "ranger": RangerSpecialist,
 }
 
 # Bars held out between blocks so no label or indicator window straddles a
@@ -83,12 +81,10 @@ def _episode_environment(agent, frame: pd.DataFrame, agent_name: str):
     from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
     from specialists.bull_specialist import BullTradingEnv
     from specialists.bear_specialist import BearTradingEnv
-    from specialists.ranger_specialist import RangerTradingEnv
 
     env_class = {
         "bull": BullTradingEnv,
         "bear": BearTradingEnv,
-        "ranger": RangerTradingEnv,
     }[agent_name]
     raw = agent._make_trend_env(
         frame, mode="training", env_class=env_class, feature_columns=agent.feature_columns

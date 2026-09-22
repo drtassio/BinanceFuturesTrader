@@ -41,7 +41,6 @@ from sklearn.compose import ColumnTransformer
 from utils.logger import get_logger, LOG_LEVEL_DEBUG, setup_phase_logger
 from config.settings import AIConfig, TradingConfig
 from models.trade_schema import Signal, Action, OrderSide
-from learning.profitability_predictor import ProfitabilityPredictor
 from feature_engineering.native_indicators import NativeIndicators
 from governance.learning_monitor import LearningMonitor
 from utils.physics_sensors import get_market_chaos_metrics # Dr. Tensor: Sensores de Física
@@ -345,7 +344,7 @@ class TrendFollowingEnv(gym.Env):
         self, 
         df: pd.DataFrame, 
         config: AIConfig, 
-        profitability_predictor: Optional[ProfitabilityPredictor] = None, 
+        profitability_predictor: Optional[Any] = None, 
         mode: str = 'training', 
         feature_columns: Optional[List[str]] = None, 
         feature_scaler=None,
@@ -3450,7 +3449,7 @@ class TrendSpecialist:
         "TREND_DURATION_PRESSURE_EXP": "duration_pressure_exponent",
     }
 
-    def __init__(self, config: AIConfig, input_dim: int, profitability_predictor: Optional[ProfitabilityPredictor] = None, specialist_name: str = "trend_specialist"):
+    def __init__(self, config: AIConfig, input_dim: int, profitability_predictor: Optional[Any] = None, specialist_name: str = "trend_specialist"):
         if not isinstance(config, AIConfig) or input_dim <= 0:
             raise TypeError("🚨 [ERRO TREND] Configuração ou input_dim inválido.")
         self.config = config
@@ -5943,7 +5942,6 @@ class TrendSpecialist:
         from collections import deque
         from specialists.bull_specialist import BullTradingEnv
         from specialists.bear_specialist import BearTradingEnv
-        from specialists.ranger_specialist import RangerTradingEnv
 
         if self.feature_scaler is None or not self.feature_columns:
             raise ValueError('Missing live scaler or feature contract')
@@ -5951,8 +5949,9 @@ class TrendSpecialist:
         if missing:
             raise ValueError(f'Missing live features: {missing[:8]}')
         name = self.specialist_name.lower()
-        env_class = (BullTradingEnv if 'bull' in name else
-                     BearTradingEnv if 'bear' in name else RangerTradingEnv)
+        if 'bull' not in name and 'bear' not in name:
+            raise ValueError('observacao ao vivo so para bull ou bear: %s' % name)
+        env_class = BullTradingEnv if 'bull' in name else BearTradingEnv
         # The live frame carries columns training never had; left in, they
         # shrink the observation's extras and change stops (training_schema).
         from feature_engineering.training_schema import align_to_training_frame

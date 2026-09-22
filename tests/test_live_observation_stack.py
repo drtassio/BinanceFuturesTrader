@@ -7,7 +7,6 @@ import pytest
 from config.settings import AIConfig
 from specialists.bull_specialist import BullSpecialist, BullTradingEnv
 from specialists.bear_specialist import BearSpecialist, BearTradingEnv
-from specialists.ranger_specialist import RangerSpecialist, RangerTradingEnv
 from tests.test_reward_and_sizing_invariants import DATASET
 
 
@@ -15,7 +14,6 @@ from tests.test_reward_and_sizing_invariants import DATASET
 @pytest.mark.parametrize('name,agent_class,env_class', [
     ('bull', BullSpecialist, BullTradingEnv),
     ('bear', BearSpecialist, BearTradingEnv),
-    ('ranger', RangerSpecialist, RangerTradingEnv),
 ])
 def test_live_stack_matches_training_frames_and_does_not_shift_on_poll(name, agent_class, env_class):
     frame = pd.read_parquet(DATASET).iloc[-4000:-3800].ffill().fillna(0.0)

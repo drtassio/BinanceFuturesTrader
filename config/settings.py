@@ -82,7 +82,7 @@ class TradingConfig(Config):
     """ConfiguraÃ§Ãµes especÃ­ficas para o sistema de trading e gerenciamento de risco."""
     # Operate learned specialists by default, never silently replace them
     # with the demonstration teacher used during guided training.
-    LIVE_POLICY = os.environ.get('LIVE_POLICY', 'sac').strip().lower()
+    LIVE_POLICY = os.environ.get('LIVE_POLICY', 'agent_mirror').strip().lower()
     # agent_mirror: the approved specialists listed here trade by replaying
     # their environment over recent closed bars (trading/agent_mirror.py).
     LIVE_AGENTS = os.environ.get('LIVE_AGENTS', 'bull')

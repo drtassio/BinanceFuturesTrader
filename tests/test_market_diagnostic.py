@@ -226,38 +226,6 @@ async def run_diagnostics():
     except Exception as e:
         check("Physics Sensors", False, str(e))
 
-    # ─── 6. DFA INTERNO ───────────────────────────────────────────────────────
-    section("6. DFA INTERNO (ai_controller._calculate_dfa)")
-
-    try:
-        from trading.ai_controller import AIController
-
-        if raw_df is not None and len(raw_df) >= 50:
-            prices = raw_df["close"].tail(128).values.astype(float)
-        else:
-            np.random.seed(42)
-            prices = np.random.randn(128).cumsum() + 50000
-
-        obj = object.__new__(AIController)
-        dfa_val  = obj._calculate_dfa(prices)
-        ent_val  = obj._calculate_shannon_entropy(prices)
-        lyap_val = obj._calculate_lyapunov_exponent(prices)
-
-        check("_calculate_dfa() sem crash", True, f"H = {dfa_val:.3f}")
-        check("DFA em range [0.1, 0.9]", 0.1 <= dfa_val <= 0.9, f"H = {dfa_val:.3f}")
-        check("DFA != 0.5 (nao fallback)", dfa_val != 0.5,
-              "OK" if dfa_val != 0.5 else "retornou 0.5 — verificar length")
-        check("Shannon entropy [0.0, 1.0]", 0.0 <= ent_val <= 1.0, f"E = {ent_val:.3f}")
-        check("Lyapunov em [-0.5, 0.5]", -0.5 <= lyap_val <= 0.5, f"L = {lyap_val:.4f}")
-
-        print(f"\n  DFA/Quantum: H={dfa_val:.3f}  E={ent_val:.3f}  L={lyap_val:.4f}")
-        if ent_val > 0.85 or lyap_val > 0.15:
-            print("  >> CHAOS VETO seria ativado!")
-        else:
-            print("  >> Mercado dentro dos parametros operacionais")
-    except Exception as e:
-        check("DFA interno", False, str(e))
-
     # ─── 7. REGIME → SPECIALIST MAPPING ──────────────────────────────────────
     section("7. REGIME → SPECIALIST MAPPING")
 

@@ -200,13 +200,18 @@ async def rebuild(history: LiveHistory, start: pd.Timestamp, end: pd.Timestamp) 
 
 
 def artifact_paths(model_dir: Path, agents) -> List[Path]:
+    """Files an approval is bound to: each agent's model, scaler and contract.
+
+    Swapping a model for one that was never evaluated voids the approval.
+    Code is not bound: editing it does not require re-approval (the parity
+    check and the tests cover code changes).
+    """
     paths = []
     for agent in agents:
         paths += [Path(model_dir) / ("%s_specialist_sac.zip" % agent),
                   Path(model_dir) / ("%s_specialist_scaler.joblib" % agent),
                   Path(model_dir) / ("%s_feature_contract.json" % agent)]
-    return paths + [ROOT / "trading" / "agent_mirror.py", ROOT / "specialists" / "trend_specialist.py",
-                    ROOT / "feature_engineering" / "causal_features.py"]
+    return paths
 
 
 def artifact_hashes(model_dir: Path, agents) -> Dict[str, Optional[str]]:

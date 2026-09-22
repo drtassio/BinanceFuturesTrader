@@ -42,7 +42,7 @@ Na primeira vez o bot reconstroi o historico de candles (cerca de 30 s).
 
 A cada candle de 15m fechado aparece o painel **ESPELHO DOS AGENTES**:
 
-- Cada agente (agente LONG = Bull, aprovado; agente SHORT = Bear, diagnostico) mostra a
+- Cada agente (agente LONG = Bull, agente SHORT = Bear, ambos aprovados) mostra a
   posicao que tem **na simulacao** do ambiente de treino: FORA, COMPRADO ou
   VENDIDO, desde quando, preco de entrada, stop e resultado.
 - **CONTA (Binance)**: a posicao real na testnet.

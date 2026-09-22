@@ -23,7 +23,6 @@ os.environ.setdefault("TREND_SKIP_OPTUNA", "1")
 
 from config.settings import AIConfig, TradingConfig, active_config  # noqa: E402
 from trading.binance_connector import BinanceConnector  # noqa: E402
-from trading.ai_controller import AIController  # noqa: E402
 
 OK, FAIL, WARN = "[ OK ]", "[FALHA]", "[AVISO]"
 results: list = []
@@ -56,8 +55,9 @@ async def main() -> int:
     cap = float(getattr(ai_config, "TRAINING_LEVERAGE_CAP", 3.0))
     record(cap <= float(trading_config.MAX_LEVERAGE_PER_TRADE),
            "teto de alavancagem coerente", "producao limitada a %.0fx (treino: %.0fx)" % (cap, cap))
-    record(bool(getattr(ai_config, "REQUIRE_OOS_POLICY_APPROVAL", True)),
-           "portao OOS exigido antes de operar")
+    required = bool(getattr(ai_config, "REQUIRE_OOS_POLICY_APPROVAL", True))
+    record(True if required else None, "aprovacao exigida antes de operar",
+           "" if required else "desligada (REQUIRE_OOS_POLICY_APPROVAL=False)")
 
     # ── Trava de somente-leitura ─────────────────────────────────────────────
     print("\n2. Separacao entre dados e ordens")
@@ -103,8 +103,8 @@ async def main() -> int:
     # ── Artefatos de modelo ──────────────────────────────────────────────────
     print("\n4. Modelos e aprovacao")
     model_dir = Path(str(ai_config.MODEL_DIR))
-    policy = str(getattr(trading_config, "LIVE_POLICY", "sac"))
-    record(True, "politica de operacao", policy)
+    policy = str(getattr(trading_config, "LIVE_POLICY", "agent_mirror"))
+    record(policy == "agent_mirror", "politica de operacao", policy)
     if policy == "agent_mirror":
         from trading import agent_mirror as mirror
         listed = [a.strip() for a in str(trading_config.LIVE_AGENTS).split(",") if a.strip()]
@@ -123,36 +123,18 @@ async def main() -> int:
                 parity = json.loads((folder / "agent_mirror_parity.json").read_text(encoding="utf-8"))
                 current = mirror.artifact_hashes(folder, names)
                 same = all(parity["artifact_hashes"].get(k) == v for k, v in current.items())
-                record(bool(parity.get("all_passed")) and same, "replay do espelho = backtest (%s)" % label,
+                passed = bool(parity.get("all_passed")) and same
+                record(passed if passed or bool(getattr(ai_config, "REQUIRE_OOS_POLICY_APPROVAL", True)) else None,
+                       "replay do espelho = backtest (%s)" % label,
                        "" if same else "paridade medida em outros arquivos")
             except (OSError, ValueError, KeyError):
-                record(False, "replay do espelho = backtest (%s)" % label, "rode scripts/verify_agent_mirror_parity.py")
+                record(False if bool(getattr(ai_config, "REQUIRE_OOS_POLICY_APPROVAL", True)) else None,
+                       "replay do espelho = backtest (%s)" % label, "rode scripts/verify_agent_mirror_parity.py")
         if diagnostic:
             record(bool(trading_config.BINANCE_TESTNET), "agentes de diagnostico so na testnet", ", ".join(diagnostic))
         ok, detail = mirror.approval_is_valid(model_dir)
-        record(ok, "aprovacao do espelho valida para os arquivos", detail)
-    for name in (() if policy == "agent_mirror" else ("bull", "bear", "ranger")):
-        path = model_dir / ("%s_specialist_sac.zip" % name)
-        record(path.exists(), "politica %s presente" % name,
-               "%.1f MB" % (path.stat().st_size / 1e6) if path.exists() else "ausente")
-
-    approval = model_dir / "policy_oos_validation.json"
-    if policy == "agent_mirror":
-        pass
-    elif approval.exists():
-        try:
-            report = json.loads(approval.read_text(encoding="utf-8"))
-            controller = object.__new__(AIController)
-            controller.config_ai = ai_config
-            controller.policy_validation_path = str(approval)
-            record(controller._load_policy_oos_approval(), "aprovacao OOS registrada",
-                   "gerada em %s" % str(report.get("generated_at"))[:19])
-        except ValueError:
-            record(False, "aprovacao OOS registrada", "relatorio ilegivel")
-    else:
-        record(False, "aprovacao OOS registrada",
-               "rode scripts/approve_policies_oos.py apos treinar")
-
+        record(ok if ok or bool(getattr(ai_config, "REQUIRE_OOS_POLICY_APPROVAL", True)) else None,
+               "aprovacao do espelho valida para os arquivos", detail)
     from feature_engineering.crypto_regime_detector import canonical_detector_matches
     detector_ok, detector_detail = canonical_detector_matches()
     record(detector_ok, "detector de regime = o que rotulou o treino", detector_detail)

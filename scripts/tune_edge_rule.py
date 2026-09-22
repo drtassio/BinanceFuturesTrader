@@ -29,8 +29,7 @@ MIN_TRAIN_TRADES = 40
 def _env_class(agent):
     from specialists.bull_specialist import BullTradingEnv
     from specialists.bear_specialist import BearTradingEnv
-    from specialists.ranger_specialist import RangerTradingEnv
-    return {"bull": BullTradingEnv, "bear": BearTradingEnv, "ranger": RangerTradingEnv}[agent]
+    return {"bull": BullTradingEnv, "bear": BearTradingEnv}[agent]
 
 
 def run_rule(frame, agent, rule):
@@ -90,7 +89,7 @@ def main() -> int:
     from learning.edge_policy import EdgeRule
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--agent", choices=("bull", "bear", "ranger"), required=True)
+    parser.add_argument("--agent", choices=("bull", "bear"), required=True)
     parser.add_argument("--workers", type=int, default=6)
     # A selecao no treino e o padrao. O Bear e a excecao documentada: o bloco
     # de treino (ago/2023 a jun/2025) e quase todo de alta e nenhuma regra

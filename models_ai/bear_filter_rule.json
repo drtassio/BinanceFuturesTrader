@@ -1,0 +1,17 @@
+{
+  "agent": "bear",
+  "rule": {
+    "kind": "leg_confirm",
+    "min_steps": 2,
+    "min_steps_5m": 2,
+    "require_trend_4h": false,
+    "exit_trend_1h": true,
+    "sl_mult": 3.0,
+    "leverage": 3.0,
+    "vote": 0.8,
+    "filter_path": "models_ai/bear_filter.joblib",
+    "filter_threshold": 0.462
+  },
+  "selected_on": "filtro (HistGradientBoosting em fluxo e contexto) ajustado no treino; limiar 0.462, saida pela tendencia de 1h e stop de 3 ATR escolhidos na validacao",
+  "trained_run": "cloud/artifacts/exp_bear_filter/bear_guided_20260921T170815_p23496 (models_ai/shadow)"
+}

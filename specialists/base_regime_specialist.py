@@ -349,12 +349,10 @@ class BaseRegimeSpecialist(TrendSpecialist):
             try:
                 from specialists.bull_specialist import BullTradingEnv
                 from specialists.bear_specialist import BearTradingEnv
-                from specialists.ranger_specialist import RangerTradingEnv
                 from specialists.trend_specialist import TrendFollowingEnv as _TFE
                 _ENV_MAP = {
                     'bull': BullTradingEnv,
                     'bear': BearTradingEnv,
-                    'ranger': RangerTradingEnv,
                 }
                 env_class = _ENV_MAP.get(self.regime_type, _TFE)
                 logger.info(f"[HPO ENV] Usando {env_class.__name__} para otimizacao (regime={self.regime_type})")
@@ -451,12 +449,10 @@ class BaseRegimeSpecialist(TrendSpecialist):
             # [SCIENTIFIC FIX] Mapeia regime -> classe de ambiente para ativar recompensas específicas
             from specialists.bull_specialist import BullTradingEnv
             from specialists.bear_specialist import BearTradingEnv
-            from specialists.ranger_specialist import RangerTradingEnv
             
             ENV_CLASS_MAP = {
                 'bull': BullTradingEnv,
                 'bear': BearTradingEnv,
-                'ranger': RangerTradingEnv,
             }
             env_class = ENV_CLASS_MAP.get(self.regime_type, TrendFollowingEnv)
             
