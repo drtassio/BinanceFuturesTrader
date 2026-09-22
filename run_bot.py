@@ -45,6 +45,7 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['FOR_DISABLE_CONSOLE_CTRL_HANDLER'] = '1'
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message=r".*precision lowered by casting to float32.*")  # gymnasium Box, inofensivo
 
 # ============================================================
 # 🚀 GPU INITIALIZATION: Configura GPU antes de qualquer modelo
