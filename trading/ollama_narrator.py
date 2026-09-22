@@ -69,6 +69,108 @@ REGRAS DE ESCRITA:
 """
 
 
+MIRROR_PROMPT = """Você narra, em português, o que um bot de trading de BTC está enxergando agora. Escreva para o dono do bot, em linguagem natural, como um trader experiente explicando a tela.
+
+COMO O BOT OPERA (não contradiga):
+- Não tenta adivinhar reversão. Só entra DEPOIS que a escada se confirma: degraus fortes no gráfico de 15m na mesma direção, velas fortes no 5m, rompimento da máxima (ou mínima) de 12h e o fluxo agressor a favor.
+- O agente LONG só compra; o agente SHORT só vende. Cada um surfa a escada e sai quando a estrutura de 4h quebra ou no stop.
+- O bot copia na conta a posição do agente, mas só no candle em que o agente entra (não entra atrasado).
+
+O QUE O BOT ESTÁ VENDO (candle de 15m fechado às {bar} UTC, preço ${price:,.1f}):
+{facts}
+
+AGENTES E CONTA:
+{agents}
+Ação do bot agora: {action} — {reason}
+
+CONTEXTO DE MERCADO (só informativo, não decide a ordem):
+Regime detectado: {regime} | Tape: {tape_pulse} (score {tape_score:+.2f}) | OBI: {obi:+.2f} | Fear & Greed: {sentiment}
+
+COMO ESCREVER:
+- Fale como um trader experiente conversando com o dono do bot enquanto olha o gráfico: tom natural, frases variadas, em 3 a 5 frases, sem listas nem números de ATR.
+- Conte o que o mercado está fazendo agora (se tem escada ou só vai-e-vem, para onde o 4h aponta, se o fluxo está comprador ou vendedor, o clima do tape e do sentimento), fiel ao RESUMO DO GRÁFICO: nunca diga que há escada se o resumo diz que não há.
+- Diga de forma simples o que o bot está esperando: cite só o que mais falta (1 ou 2 coisas) para o LONG ou o SHORT entrar, sem recitar a lista toda. Se um agente está posicionado, diga como vai o trade e o que faria o bot sair.
+- Use só os fatos acima; não invente números. Não fale em "reversão", "confiança" nem "sinal de reversão".
+"""
+
+
+def mirror_facts(row, view: Dict) -> Dict[str, str]:
+    """Fatos do candle fechado, nas variaveis que os agentes realmente leem."""
+    def f(name, default=0.0):
+        try:
+            return float(row.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    up, down = int(f("cz_leg_steps_up")), int(f("cz_leg_steps_down"))
+    up5, down5 = int(f("cz_steps5_up")), int(f("cz_steps5_down"))
+    brk_up, brk_down = f("cz_breakout_up_48"), f("cz_breakout_down_48")
+    cvd, body = f("cz_cvd_z_16"), f("cz_step_body_atr")
+    s_long, s_short = f("cz_struct_4h_long"), f("cz_struct_4h_short")
+    trend4 = f("cz_trend_4h")
+    rsi = f("rsi_15m", float("nan"))
+
+    if up >= 3:
+        summary = "escada de ALTA formada (%d degraus fortes de alta)" % up
+    elif down >= 2:
+        summary = "escada de BAIXA formada (%d degraus fortes de baixa)" % down
+    elif up or down:
+        summary = "sem escada formada: só %d degrau(s) de alta e %d de baixa, ainda não confirma" % (up, down)
+    else:
+        summary = "sem degraus fortes: mercado de vai-e-vem, nenhuma escada"
+
+    def missing(items):
+        left = [text for ok, text in items if not ok]
+        return "nada, todas as condições cumpridas" if not left else "; ".join(left)
+
+    long_missing = missing([
+        (up >= 3, "mais %d degrau(s) forte(s) de alta no 15m" % max(0, 3 - up)),
+        (up5 >= 2, "mais %d vela(s) forte(s) de alta no 5m" % max(0, 2 - up5)),
+        (brk_up > 0, "romper a máxima de 12h (está %.1f ATR abaixo)" % abs(brk_up)),
+        (body > 0, "fechar um candle de 15m de alta"),
+        (cvd > 0, "fluxo agressor virar comprador")])
+    short_missing = missing([
+        (down >= 2, "mais %d degrau(s) forte(s) de baixa no 15m" % max(0, 2 - down)),
+        (down5 >= 2, "mais %d vela(s) forte(s) de baixa no 5m" % max(0, 2 - down5)),
+        (brk_down < 0, "romper a mínima de 12h (está %.1f ATR acima)" % abs(brk_down)),
+        (body < 0, "fechar um candle de 15m de baixa"),
+        (cvd < 0, "fluxo agressor virar vendedor")])
+
+    facts = [
+        "- RESUMO DO GRÁFICO: %s." % summary,
+        "- FALTA PARA O AGENTE LONG ENTRAR: %s." % long_missing,
+        "- FALTA PARA O AGENTE SHORT ENTRAR: %s." % short_missing,
+        "- Degraus fortes (corpo >= 1 ATR) nas últimas 12 velas de 15m: %d de alta, %d de baixa." % (up, down),
+        "- Velas fortes de 5m dentro dos dois últimos candles de 15m: %d de alta, %d de baixa." % (up5, down5),
+        "- Máxima de 12h: preço %s (%.1f ATR). Mínima de 12h: preço %s (%.1f ATR)." % (
+            "ACIMA, rompeu" if brk_up > 0 else "abaixo", abs(brk_up),
+            "ABAIXO, rompeu" if brk_down < 0 else "acima", abs(brk_down)),
+        "- Último candle de 15m: %s (corpo %.1f ATR). Fluxo agressor (CVD 16 velas): %s." % (
+            "de alta" if body > 0 else "de baixa" if body < 0 else "neutro", abs(body),
+            "comprador" if cvd > 0 else "vendedor" if cvd < 0 else "neutro"),
+        "- Estrutura de 4h: %s; tendência de 4h %s%s." % (
+            "de alta intacta" if s_long >= 0 else "de alta quebrada",
+            "de alta" if trend4 > 0 else "de baixa" if trend4 < 0 else "lateral",
+            "" if rsi != rsi else "; RSI 15m %.0f" % rsi),
+    ]
+    names = {"bull": "agente LONG", "bear": "agente SHORT"}
+    price = float(view.get("close") or 0.0)
+    agents = []
+    for sh in view.get("shadows", []):
+        name = names.get(sh.agent, sh.agent)
+        if sh.side == 0:
+            agents.append("- %s: fora." % name)
+            continue
+        pnl = sh.side * (price / sh.entry_price - 1) * 100 if price and sh.entry_price else 0.0
+        agents.append("- %s: %s na simulação desde a entrada a $%s, resultado %+.2f%%, stop $%s%s." % (
+            name, "comprado" if sh.side > 0 else "vendido", "{:,.0f}".format(sh.entry_price), pnl,
+            "{:,.0f}".format(sh.stop_price) if sh.stop_price else "—",
+            ", ENTROU NESTE CANDLE" if sh.entered_on_last_bar else ""))
+    acc = view.get("account_side", 0)
+    agents.append("- Conta na Binance: %s." % ("sem posição" if not acc else "comprada" if acc > 0 else "vendida"))
+    return {"facts": "\n".join(facts), "agents": "\n".join(agents)}
+
+
 class OllamaNarrator:
     """
     Gera narrativas em linguagem natural no terminal via Ollama.
@@ -248,6 +350,9 @@ class OllamaNarrator:
         w = BOX_WIDTH
         header = f" 🤖 ANÁLISE IA LOCAL  •  {now}  •  {symbol} ${price:,.0f} "
         sub    = f" Regime: {regime}  |  {action_label}  |  Confiança: {conf:.1%}  |  Tape: {tape} "
+        if ctx.get('_mirror_sub'):
+            header = f" 🤖 O QUE O BOT ESTÁ VENDO (IA LOCAL)  •  {now}  •  {symbol} ${price:,.0f} "
+            sub    = " " + ctx['_mirror_sub'] + " "
 
         # Quebra texto em linhas respeitando a largura da caixa
         words  = text.replace('\n', ' ').split()
@@ -306,11 +411,30 @@ class OllamaNarrator:
         # Lança geração em background — não bloqueia o loop de trading
         asyncio.create_task(self._generate(ctx, position, fp, reason))
 
+    async def maybe_narrate_mirror(self, ctx: Dict):
+        """Espelho dos agentes: narra o que o bot ve, uma vez por candle ou quando algo muda.
+
+        ctx: price, symbol, _mirror_key (candle + lados + acao), _mirror_sub (linha do
+        cabecalho) e os campos de MIRROR_PROMPT.
+        """
+        if self._available is None:
+            await self.check_availability()
+        if not self._available or self._is_generating:
+            return
+        key = ctx.get('_mirror_key')
+        if self._last_fp is not None and self._last_fp.get('mirror') == key:
+            return
+        ctx = dict(ctx, _prompt=MIRROR_PROMPT.format(**{k: ctx[k] for k in (
+            'bar', 'price', 'facts', 'agents', 'action', 'reason', 'regime', 'tape_pulse', 'tape_score',
+            'obi', 'sentiment')}))
+        logger.info("🤖 [NARRATOR] Lendo o candle %s para o painel...", ctx.get('bar'))
+        asyncio.create_task(self._generate(ctx, None, {'mirror': key}, "novo candle"))
+
     async def _generate(self, ctx: Dict, position: Optional[Dict], fp: Dict, reason: str):
         """Chama o Ollama e exibe o resultado. Roda em background."""
         self._is_generating = True
         try:
-            prompt    = self._build_prompt(ctx, position)
+            prompt    = ctx.get('_prompt') or self._build_prompt(ctx, position)
             full_text = ""
 
             async with aiohttp.ClientSession() as session:

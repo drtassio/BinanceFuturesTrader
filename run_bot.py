@@ -1181,6 +1181,41 @@ async def main_trading_loop():
                                 asyncio.create_task(_print_chart())
                         except Exception as _chart_error:
                             logger.warning("[ESPELHO] Grafico nao gerado: %s", _chart_error)
+                    # IA local (Ollama): conta em linguagem natural o que o bot esta vendo,
+                    # a partir das mesmas variaveis que os agentes leem. So comenta.
+                    if narrator and _view is not None:
+                        try:
+                            from trading.ollama_narrator import mirror_facts
+                            _row = ai_controller.mirror_history.frame.iloc[-1]
+                            _tape = system_state.get('tape_pulse', {})
+                            _sent = system_state.get('onchain_pulse', {}) or {}
+                            _regimes = {0: "bull", 1: "bear", 2: "lateral"}
+                            _facts = mirror_facts(_row, _view)
+                            _names = {"bull": "agente LONG", "bear": "agente SHORT"}
+                            _sides = " | ".join("%s: %s" % (_names.get(s.agent, s.agent),
+                                                "fora" if s.side == 0 else "comprado" if s.side > 0 else "vendido")
+                                                for s in _view.get("shadows", []))
+                            _acc = _view.get("account_side", 0)
+                            _action = {"open": "ABRIR POSIÇÃO", "close": "FECHAR POSIÇÃO"}.get(_view.get("action"), "AGUARDAR")
+                            _bar_close = pd.Timestamp(_view["bar"]) + pd.Timedelta(minutes=15)
+                            await narrator.maybe_narrate_mirror({
+                                "symbol": TradingConfig.PRIMARY_PAIR,
+                                "price": float(_view.get("close") or current_price or 0.0),
+                                "bar": _bar_close.strftime("%d/%m %H:%M"),
+                                "facts": _facts["facts"], "agents": _facts["agents"],
+                                "action": _action, "reason": _mirror_reason_text(_view),
+                                "regime": _regimes.get(int(latest_features.get('regime', 2)), "desconhecido"),
+                                "tape_pulse": _tape.get('pulse', 'NEUTRAL'),
+                                "tape_score": float(_tape.get('score', 0.0)),
+                                "obi": float(_tape.get('obi', 0.0)),
+                                "sentiment": "%s (%s)" % (_sent.get('signal', 'n/d'), _sent.get('score', '—')),
+                                "_mirror_key": (str(_view["bar"]), _action, _acc,
+                                                tuple(s.side for s in _view.get("shadows", []))),
+                                "_mirror_sub": "%s | conta: %s | bot: %s" % (
+                                    _sides, "sem posição" if not _acc else "comprada" if _acc > 0 else "vendida", _action),
+                            })
+                        except Exception as _narr_error:
+                            logger.debug("[NARRATOR] Contexto do espelho indisponivel: %s", _narr_error)
                     if _view is not None:
                         system_state["mirror_reason_text"] = _mirror_reason_text(_view)
                         # Conta mudou sem ordem de fechamento do espelho (stop na corretora).

@@ -345,6 +345,17 @@ class TelegramNotifier:
         tape    = ctx.get('tape_pulse', 'N/A')
         icons   = {'BUY': '🟢 COMPRA', 'SELL': '🔴 VENDA', 'HOLD': '⚪ AGUARDANDO'}
 
+        if ctx.get('_mirror_sub'):
+            # Espelho dos agentes: o texto ja diz o que o bot ve; sem regime/confianca.
+            msg = (
+                f"🤖 <b>O QUE O BOT ESTÁ VENDO — {symbol} ${price:,.0f}</b>\n"
+                f"{ctx['_mirror_sub']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{text}"
+            )
+            if await self._send(msg):
+                self._last_narrator_forward = now
+            return
         msg = (
             f"🤖 <b>ANÁLISE IA LOCAL — {symbol}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
