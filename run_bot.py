@@ -1160,7 +1160,7 @@ async def main_trading_loop():
                             _hist = ai_controller.mirror_history.frame
                             _paths = dict(getattr(ai_controller, "mirror_paths", {}) or {})
                             _text = mirror_chart.render(_hist, _paths, _view)
-                            _mode = os.environ.get("MIRROR_CHART_MODE", "png").strip().lower()
+                            _mode = os.environ.get("MIRROR_CHART_MODE", "imagem").strip().lower()
                             if _mode == "png":
                                 # Um PNG por candle de 15m (logs/charts/espelho_AAAAMMDD_HHMM.png).
                                 async def _save_chart(h=_hist.copy(), p=_paths, v=dict(_view)):
@@ -1183,6 +1183,8 @@ async def main_trading_loop():
                                         png = await asyncio.to_thread(mirror_chart.render_png, h, p, v)
                                         image = await asyncio.to_thread(sixel.encode, png)
                                         print("\n" + image, flush=True)
+                                        saved = await asyncio.to_thread(mirror_chart.keep_copy, png, v.get("bar"))
+                                        logger.info("🖼  [ESPELHO] Grafico impresso acima e salvo em %s", saved)
                                     except Exception as _img_error:
                                         logger.warning("[ESPELHO] Imagem do grafico nao impressa: %s", _img_error)
                                 asyncio.create_task(_print_chart())

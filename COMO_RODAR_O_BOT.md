@@ -54,11 +54,11 @@ A cada candle de 15m fechado aparece o painel **ESPELHO DOS AGENTES**:
   cores: fundo verde onde o agente LONG estava comprado, vermelho onde o agente
   SHORT estava vendido, ▲ ▼ entradas, ✖ saidas e a linha do preco atual. A mesma
   janela de 72h em imagem fica em `logs/charts/espelho.png`.
-- A cada candle o bot salva um PNG novo em `logs/charts/espelho_AAAAMMDD_HHMM.png`
-  (e o mais recente em `logs/charts/espelho.png`); guarda os ultimos 7 dias.
-  No `.env`, `MIRROR_CHART_MODE=imagem` imprime a imagem no Windows Terminal e
-  `MIRROR_CHART_MODE=texto` imprime o grafico em texto. Para ver o grafico
-  agora, sem o bot: `py scripts/show_chart.py`.
+- A cada candle de 15m o bot imprime a imagem do grafico no proprio terminal,
+  junto com os logs (precisa do Windows Terminal 1.22 ou mais novo), e salva uma
+  copia em `logs/charts/espelho_AAAAMMDD_HHMM.png` (guarda 7 dias). No `.env`,
+  `MIRROR_CHART_MODE=png` so salva a imagem e `MIRROR_CHART_MODE=texto` imprime o
+  grafico em texto. Para ver o grafico agora, sem o bot: `py scripts/show_chart.py`.
 - Entre um candle e outro aparece uma linha curta `🪞 [ESPELHO] ...`.
 
 Regime, tape, OBI, sentimento (Fear & Greed) e SHAP aparecem no status, mas sao
