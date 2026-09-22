@@ -126,6 +126,11 @@ def agent_trajectory(agent, frame: pd.DataFrame, agent_name: str) -> pd.DataFram
 
 
 def replay(agent, contract: dict, history: pd.DataFrame, agent_name: str) -> ShadowState:
+    return replay_with_path(agent, contract, history, agent_name)[0]
+
+
+def replay_with_path(agent, contract: dict, history: pd.DataFrame, agent_name: str):
+    """The shadow state on the last closed bar and the replayed trajectory (for the chart)."""
     frame = prepare_frame(history.tail(REPLAY_BARS), contract)
     last_bar = frame.index[-1]
     padding = [frame.iloc[[-1]].set_axis([last_bar + BAR * k]) for k in range(1, PADDING + 1)]
@@ -141,7 +146,7 @@ def replay(agent, contract: dict, history: pd.DataFrame, agent_name: str) -> Sha
                        notional_fraction=float(row["notional_fraction"]),
                        entry_price=float(row["entry_price"]),
                        stop_price=None if pd.isna(row["stop_price"]) else float(row["stop_price"]),
-                       entry_bar=entry_bar)
+                       entry_bar=entry_bar), path.loc[:last_bar]
 
 
 class LiveHistory:

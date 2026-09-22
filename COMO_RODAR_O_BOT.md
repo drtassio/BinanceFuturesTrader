@@ -42,7 +42,7 @@ Na primeira vez o bot reconstroi o historico de candles (cerca de 30 s).
 
 A cada candle de 15m fechado aparece o painel **ESPELHO DOS AGENTES**:
 
-- Cada agente (Bull = long, aprovado; Bear = short, diagnostico) mostra a
+- Cada agente (agente LONG = Bull, aprovado; agente SHORT = Bear, diagnostico) mostra a
   posicao que tem **na simulacao** do ambiente de treino: FORA, COMPRADO ou
   VENDIDO, desde quando, preco de entrada, stop e resultado.
 - **CONTA (Binance)**: a posicao real na testnet.
@@ -50,6 +50,10 @@ A cada candle de 15m fechado aparece o painel **ESPELHO DOS AGENTES**:
 - A ordem sai quando um agente mostra **★ NOVA ENTRADA** (entrou no candle que
   acabou de fechar). Se o agente ja estava na posicao antes de o bot ligar, o
   bot nao entra atrasado e espera a proxima entrada.
+- Logo abaixo do painel sai o grafico dos candles de 15m das ultimas 24h, em
+  cores: fundo verde onde o agente LONG estava comprado, vermelho onde o agente
+  SHORT estava vendido, ▲ ▼ entradas, ✖ saidas e a linha do preco atual. A mesma
+  janela de 72h em imagem fica em `logs/charts/espelho.png`.
 - Entre um candle e outro aparece uma linha curta `🪞 [ESPELHO] ...`.
 
 Regime, tape, OBI, sentimento (Fear & Greed) e SHAP aparecem no status, mas sao

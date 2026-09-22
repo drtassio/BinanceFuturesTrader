@@ -2829,9 +2829,11 @@ class AIController:
                               explanation={"reason": "historico incompleto", "policy": mirror.POLICY_NAME})
         if self._teacher_cache is None or self._teacher_cache[0] != newest:
             history = self.mirror_history.frame.loc[:newest]
-            shadows = []
+            shadows, self.mirror_paths = [], {}
             for name, (agent, contract) in self.mirror_agents.items():
-                shadows.append(await asyncio.to_thread(mirror.replay, agent, contract, history, name))
+                state, path = await asyncio.to_thread(mirror.replay_with_path, agent, contract, history, name)
+                shadows.append(state)
+                self.mirror_paths[name] = path
             self._teacher_cache = (newest, shadows)
             logger.info("[MIRROR] barra %s | %s", newest,
                         " ".join("%s=%+d%s" % (s.agent, s.side, "*" if s.entered_on_last_bar else "") for s in shadows))

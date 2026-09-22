@@ -191,7 +191,7 @@ def log_system_status():
         agents = [a.strip() for a in str(getattr(TradingConfig, 'LIVE_AGENTS', '')).split(',') if a.strip()]
         diag = {a.strip() for a in str(getattr(TradingConfig, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',') if a.strip()}
         policy_line = "   🪞 POLITICA:    espelho dos agentes: %s\n" % ", ".join(
-            "%s (%s)" % (a, "diagnostico" if a in diag else "aprovado") for a in agents)
+            "%s (%s)" % (AGENT_NAMES.get(a, a), "diagnostico" if a in diag else "aprovado") for a in agents)
     log_message = (
         f"\n💡 {divider}\n"
         f"   📊 STATUS GERAL ({datetime.now().strftime('%H:%M:%S')})\n"
@@ -339,10 +339,10 @@ def log_trade_decision(signal, explainer, ai_monitor=None):
 # treino; regime, tape, sentimento e SHAP nao entram na ordem. O painel mostra
 # o que decide: a posicao de cada agente na simulacao, a conta e o que o bot faz.
 _MIRROR_REASONS = {
-    "trade da professora ja em curso: nao persegue":
+    "trade do agente ja em curso: nao persegue":
         "o agente entrou ANTES (bot desligado ou candle anterior). Entrar agora seria atrasado, "
         "com preco e stop diferentes do testado: aguardando a proxima entrada nova.",
-    "professora saiu da posicao": "o agente SAIU na simulacao: fechando a posicao da conta (reduceOnly).",
+    "agente saiu da posicao": "o agente SAIU na simulacao: fechando a posicao da conta (reduceOnly).",
     "sombras em conflito: zerar": "Bull e Bear em lados opostos: zerando a conta por seguranca.",
     "sombras em conflito: ficar de fora": "Bull e Bear em lados opostos: ficando de fora.",
     "ordem desta barra ja enviada; aguardando execucao": "ordem deste candle ja enviada: aguardando execucao.",
@@ -350,6 +350,8 @@ _MIRROR_REASONS = {
     "historico incompleto": "historico de candles incompleto: reconstruindo antes de decidir.",
 }
 _last_mirror_panel = {"key": None}
+# Nome mostrado ao usuario: o Bull opera so comprado e o Bear so vendido.
+AGENT_NAMES = {"bull": "agente LONG", "bear": "agente SHORT"}
 
 
 def _mirror_policy() -> bool:
@@ -358,14 +360,14 @@ def _mirror_policy() -> bool:
 
 def _mirror_reason_text(view) -> str:
     reason = str(view.get("reason") or "")
-    if reason.startswith("professora ") and reason.endswith(" entrou"):
-        agent = reason.split()[1].upper()
+    if reason.startswith("agente ") and reason.endswith(" entrou"):
+        agent = AGENT_NAMES.get(reason.split()[1], reason.split()[1]).upper()
         return "NOVA ENTRADA do %s no candle que acabou de fechar: abrindo a mesma posicao na conta." % agent
     if reason.startswith("vetado pelo risco"):
         return "entrada VETADA pelo gestor de risco (%s)." % reason.split(":", 1)[-1].strip()
-    if reason == "posicao igual a da professora" and view.get("account_side", 0) == 0:
+    if reason == "posicao igual a do agente" and view.get("account_side", 0) == 0:
         return "nenhum agente em posicao: aguardando uma escada confirmada (2+ degraus) para entrar."
-    if reason == "posicao igual a da professora":
+    if reason == "posicao igual a do agente":
         return "conta igual a simulacao: mantendo a posicao; o stop na corretora so aperta."
     return _MIRROR_REASONS.get(reason, reason or "sem motivo")
 
@@ -390,10 +392,10 @@ def log_mirror_panel(ai_controller, signal) -> None:
     agent_lines, compact = [], []
     for sh in view.get("shadows", []):
         tag = "diagnostico" if sh.agent in diagnostic else "aprovado"
-        name = "%s %s (%s)" % (icons.get(sh.agent, "•"), sh.agent.upper(), tag)
+        name = "%s %s (%s)" % (icons.get(sh.agent, "•"), AGENT_NAMES.get(sh.agent, sh.agent), tag)
         if sh.side == 0:
             state = "FORA"
-            compact.append("%s FORA" % sh.agent)
+            compact.append("%s FORA" % AGENT_NAMES.get(sh.agent, sh.agent))
         else:
             side_txt = "COMPRADO" if sh.side > 0 else "VENDIDO"
             pnl = sh.side * (price / sh.entry_price - 1) * 100 if price and sh.entry_price else 0.0
@@ -404,8 +406,8 @@ def log_mirror_panel(ai_controller, signal) -> None:
             stop = " | stop {:,.1f}".format(sh.stop_price) if sh.stop_price else ""
             new = "  ★ NOVA ENTRADA" if sh.entered_on_last_bar else ""
             state = "%s%s @ {:,.1f}%s | %+.2f%%%s".format(sh.entry_price) % (side_txt, since, stop, pnl, new)
-            compact.append("%s %s %+.2f%%%s" % (sh.agent, side_txt, pnl, " ★" if sh.entered_on_last_bar else ""))
-        agent_lines.append("   %-27s na simulacao: %s" % (name, state))
+            compact.append("%s %s %+.2f%%%s" % (AGENT_NAMES.get(sh.agent, sh.agent), side_txt, pnl, " ★" if sh.entered_on_last_bar else ""))
+        agent_lines.append("   %-30s na simulacao: %s" % (name, state))
     acc_side = view.get("account_side", 0)
     account = "SEM POSICAO" if acc_side == 0 else "%s %.4f BTC" % (
         "COMPRADA" if acc_side > 0 else "VENDIDA", view.get("account_qty", 0.0))
@@ -433,6 +435,7 @@ def log_mirror_panel(ai_controller, signal) -> None:
         "   ⏭  PROXIMA ORDEM:           quando um agente mostrar ★ NOVA ENTRADA, ou quando o\n"
         "                               agente que esta na conta sair na simulacao.\n"
         "   ℹ️  Regime, tape, OBI, sentimento e SHAP sao so informativos: nao decidem a ordem.\n"
+        "   🖼  Grafico em imagem: logs/charts/espelho.png (refeito a cada candle de 15m)\n"
         "🪞 " + divider)
 
 
@@ -1145,6 +1148,19 @@ async def main_trading_loop():
                     log_mirror_panel(ai_controller, signal)
                     _view = getattr(ai_controller, "mirror_view", None)
                     system_state["mirror_view"] = _view
+                    # Grafico dos candles a cada candle de 15m fechado: no terminal
+                    # (texto colorido) e em logs/charts/espelho.png.
+                    if _view is not None and system_state.get("mirror_chart_bar") != str(_view.get("bar")):
+                        system_state["mirror_chart_bar"] = str(_view.get("bar"))
+                        try:
+                            from trading import mirror_chart
+                            _hist = ai_controller.mirror_history.frame
+                            _paths = dict(getattr(ai_controller, "mirror_paths", {}) or {})
+                            print(mirror_chart.render(_hist, _paths, _view), flush=True)
+                            asyncio.create_task(asyncio.to_thread(
+                                mirror_chart.render_png, _hist.copy(), _paths, dict(_view)))
+                        except Exception as _chart_error:
+                            logger.warning("[ESPELHO] Grafico nao gerado: %s", _chart_error)
                     if _view is not None:
                         system_state["mirror_reason_text"] = _mirror_reason_text(_view)
                         # Conta mudou sem ordem de fechamento do espelho (stop na corretora).
@@ -1623,7 +1639,7 @@ async def main():
             _agents = [a.strip() for a in str(getattr(TradingConfig, 'LIVE_AGENTS', '')).split(',') if a.strip()]
             _diag = {a.strip() for a in str(getattr(TradingConfig, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',') if a.strip()}
             _policy = "Espelho dos agentes: " + ", ".join(
-                "%s (%s)" % (a, "diagnóstico" if a in _diag else "aprovado") for a in _agents)
+                "%s (%s)" % (AGENT_NAMES.get(a, a), "diagnóstico" if a in _diag else "aprovado") for a in _agents)
         await _telegram.alert_bot_started(mode_label, _bal, _policy)
     
     # Salvar estado inicial (checkpoint de partida)

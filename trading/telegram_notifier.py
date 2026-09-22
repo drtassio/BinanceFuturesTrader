@@ -35,6 +35,8 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 REPORT_INTERVAL   = timedelta(minutes=30)
 SEND_TIMEOUT      = 15   # segundos para cada envio
 MAX_ERRORS_BUFFER = 50   # máximo de erros guardados para o relatório
+# Nome mostrado ao usuario: o Bull opera so comprado e o Bear so vendido.
+AGENT_NAMES = {"bull": "agente LONG", "bear": "agente SHORT"}
 
 # ---------------------------------------------------------------------------
 # Prompt do relatório horário para o LLM
@@ -167,6 +169,28 @@ class TelegramNotifier:
                     logger.warning(f"⚠️ [TELEGRAM] Erro ao enviar: {result}")
         except Exception as e:
             logger.warning(f"⚠️ [TELEGRAM] Falha no envio: {e}")
+        return False
+
+    async def send_photo(self, path, caption: str = "") -> bool:
+        """Envia uma imagem (ex.: o gráfico do espelho) ao chat."""
+        if not self._available:
+            return False
+        try:
+            url = TELEGRAM_API.format(token=self.token, method="sendPhoto")
+            form = aiohttp.FormData()
+            form.add_field("chat_id", self.chat_id)
+            form.add_field("caption", caption[:1024])
+            form.add_field("parse_mode", "HTML")
+            with open(path, "rb") as fh:
+                form.add_field("photo", fh.read(), filename="espelho.png", content_type="image/png")
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    result = await r.json()
+                    if result.get("ok"):
+                        return True
+                    logger.warning(f"⚠️ [TELEGRAM] Erro ao enviar imagem: {result}")
+        except Exception as e:
+            logger.warning(f"⚠️ [TELEGRAM] Falha no envio da imagem: {e}")
         return False
 
     def _anti_spam(self, key: str, min_interval_s: int = 60) -> bool:
@@ -355,7 +379,7 @@ class TelegramNotifier:
         lines = []
         for sh in view.get("shadows", []):
             tag = "diagnóstico" if sh.agent in diagnostic else "aprovado"
-            head = f"{icons.get(sh.agent, '•')} <b>{sh.agent.upper()}</b> ({tag}): "
+            head = f"{icons.get(sh.agent, '•')} <b>{AGENT_NAMES.get(sh.agent, sh.agent)}</b> ({tag}): "
             if sh.side == 0:
                 lines.append(head + "fora")
                 continue
@@ -385,8 +409,8 @@ class TelegramNotifier:
         """Ordem enviada pelo espelho (abrir ou fechar)."""
         action = view.get("action")
         agent = ""
-        if view.get("reason", "").startswith("professora "):
-            agent = view["reason"].split()[1].upper()
+        if view.get("reason", "").startswith("agente ") and view["reason"].endswith(" entrou"):
+            agent = AGENT_NAMES.get(view["reason"].split()[1], view["reason"].split()[1]).upper()
         if action == "open":
             side = "🟢 LONG" if getattr(signal, "action", None) is not None and signal.action.value == "BUY" else "🔴 SHORT"
             title = f"📈 <b>ABRINDO {side} — {agent}</b>"

@@ -162,12 +162,12 @@ def mirror(shadows: Iterable[ShadowState], live_side: int) -> MirrorDecision:
     target = active[0] if active else None
     target_side = target.side if target else 0
     if live_side != 0 and live_side != target_side:
-        return MirrorDecision("close", -live_side, target, "professora saiu da posicao")
+        return MirrorDecision("close", -live_side, target, "agente saiu da posicao")
     if live_side == 0 and target is not None and target.entered_on_last_bar:
-        return MirrorDecision("open", target.side, target, "professora %s entrou" % target.agent)
+        return MirrorDecision("open", target.side, target, "agente %s entrou" % target.agent)
     if live_side == 0 and target is not None:
-        return MirrorDecision("hold", 0, target, "trade da professora ja em curso: nao persegue")
-    return MirrorDecision("hold", live_side, target, "posicao igual a da professora")
+        return MirrorDecision("hold", 0, target, "trade do agente ja em curso: nao persegue")
+    return MirrorDecision("hold", live_side, target, "posicao igual a do agente")
 
 
 def load_rules(model_dir: Path, agents: Iterable[str] = AGENTS) -> Dict[str, EdgeRule]:
