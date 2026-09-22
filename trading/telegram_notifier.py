@@ -179,12 +179,13 @@ class TelegramNotifier:
 
     # ── Alertas de eventos ───────────────────────────────────────────────────
 
-    async def alert_bot_started(self, mode: str, balance: float):
+    async def alert_bot_started(self, mode: str, balance: float, policy: str = ""):
         """Bot iniciado."""
         text = (
             f"🚀 <b>Bot Shield IA — INICIADO</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️ Modo: <b>{mode}</b>\n"
+            + (f"🪞 {policy}\n" if policy else "") +
             f"💰 Saldo: <b>${balance:,.2f}</b>\n"
             f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
         )
@@ -341,6 +342,109 @@ class TelegramNotifier:
             "regime":     regime,
         })
 
+    # ── Espelho dos agentes (LIVE_POLICY=agent_mirror) ───────────────────────
+    # Quem decide sao os agentes repassados no ambiente de treino; regime,
+    # tape, confianca e SHAP nao entram na ordem, entao as mensagens mostram
+    # a posicao de cada agente na simulacao, a conta e o que o bot fez.
+
+    @staticmethod
+    def _mirror_agent_lines(view: Dict) -> str:
+        price = view.get("close") or 0.0
+        diagnostic = set(view.get("diagnostic") or [])
+        icons = {"bull": "🐂", "bear": "🐻"}
+        lines = []
+        for sh in view.get("shadows", []):
+            tag = "diagnóstico" if sh.agent in diagnostic else "aprovado"
+            head = f"{icons.get(sh.agent, '•')} <b>{sh.agent.upper()}</b> ({tag}): "
+            if sh.side == 0:
+                lines.append(head + "fora")
+                continue
+            side = "COMPRADO" if sh.side > 0 else "VENDIDO"
+            pnl = sh.side * (price / sh.entry_price - 1) * 100 if price and sh.entry_price else 0.0
+            since = ""
+            if getattr(sh, "entry_bar", None) is not None:
+                since = " desde " + (sh.entry_bar + timedelta(minutes=15)).strftime("%d/%m %H:%M") + " UTC"
+            stop = f" | stop ${sh.stop_price:,.0f}" if sh.stop_price else ""
+            new = " ★ NOVA ENTRADA" if sh.entered_on_last_bar else ""
+            lines.append(head + f"{side}{since} @ ${sh.entry_price:,.0f}{stop} | {pnl:+.2f}%{new}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _account_text(view: Dict) -> str:
+        side = view.get("account_side", 0)
+        if not side:
+            return "sem posição"
+        return f"{'COMPRADA' if side > 0 else 'VENDIDA'} {view.get('account_qty', 0.0):.4f} BTC"
+
+    def log_mirror_event(self, text: str):
+        """Guarda um evento do espelho para o relatório periódico."""
+        self._decision_buffer.append({"time": datetime.now().strftime("%H:%M"), "text": text,
+                                      "at": datetime.utcnow()})
+
+    async def alert_mirror_order(self, view: Dict, signal: Any, submitted: bool, reason: str = ""):
+        """Ordem enviada pelo espelho (abrir ou fechar)."""
+        action = view.get("action")
+        agent = ""
+        if view.get("reason", "").startswith("professora "):
+            agent = view["reason"].split()[1].upper()
+        if action == "open":
+            side = "🟢 LONG" if getattr(signal, "action", None) is not None and signal.action.value == "BUY" else "🔴 SHORT"
+            title = f"📈 <b>ABRINDO {side} — {agent}</b>"
+            expl = signal.explanation or {}
+            detail = (f"Entrada ≈ ${float(expl.get('env_entry_price') or view.get('close') or 0):,.0f} | "
+                      f"stop ${float(expl.get('env_stop_price') or 0):,.0f}\n"
+                      f"Margem {signal.position_size_pct:.1%} × {signal.leverage:.0f}x")
+        else:
+            title = "📉 <b>FECHANDO POSIÇÃO</b>"
+            detail = "O agente saiu na simulação: fechando a conta (reduceOnly)."
+        status = "✅ ordem enviada à corretora" if submitted else "⚠️ ordem NÃO foi enviada (ver log)"
+        text = (
+            f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n{detail}\n{status}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{self._mirror_agent_lines(view)}\n"
+            f"🕐 {datetime.now().strftime('%d/%m %H:%M')}"
+        )
+        self.log_mirror_event(f"{'ABRIU' if action == 'open' else 'FECHOU'} {agent} ({'ok' if submitted else 'falhou'})")
+        await self._send(text)
+
+    async def alert_mirror_account_change(self, previous_side: int, view: Dict, equity: float):
+        """A conta mudou de lado sem uma ordem de fechamento do espelho (ex.: stop na corretora)."""
+        now_side = view.get("account_side", 0)
+        before = {1: "COMPRADA", -1: "VENDIDA", 0: "sem posição"}.get(previous_side, str(previous_side))
+        if now_side == 0:
+            title = "🛡️ <b>POSIÇÃO ENCERRADA NA CORRETORA</b>"
+            detail = f"A conta estava {before} e agora está sem posição (stop na corretora ou fechamento)."
+        else:
+            title = "🔄 <b>POSIÇÃO DA CONTA MUDOU</b>"
+            detail = f"Antes: {before} | agora: {self._account_text(view)}"
+        text = (
+            f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n{detail}\n💰 Saldo: <b>${equity:,.2f}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n{self._mirror_agent_lines(view)}\n"
+            f"🕐 {datetime.now().strftime('%d/%m %H:%M')}"
+        )
+        self.log_mirror_event(f"conta: {before} → {self._account_text(view)}")
+        await self._send(text)
+
+    def _mirror_report(self, system_state: Dict, view: Dict, equity: float, errors: list) -> str:
+        bar = view.get("bar")
+        bar_txt = (bar + timedelta(minutes=15)).strftime("%H:%M") + " UTC" if bar is not None else "—"
+        since = datetime.utcnow() - REPORT_INTERVAL
+        events = [e for e in self._decision_buffer if "text" in e and e.get("at") and e["at"] >= since]
+        events_text = "\n".join(f"[{e['time']}] {e['text']}" for e in events[-8:]) or "nenhuma ordem no período"
+        errors_text = f"⚠️ {len(errors)} erros: " + errors[-1] if errors else "✅ sem erros"
+        why = system_state.get("mirror_reason_text") or view.get("reason", "")
+        return (
+            f"📊 <b>ESPELHO DOS AGENTES — {datetime.now().strftime('%d/%m %H:%M')}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💲 BTCUSDT ${float(view.get('close') or 0):,.0f} (candle {bar_txt})\n"
+            f"{self._mirror_agent_lines(view)}\n"
+            f"🏦 Conta: <b>{self._account_text(view)}</b> | saldo ${equity:,.2f}\n"
+            f"▶ Bot: {why}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🧾 Ordens no período:\n{events_text}\n"
+            f"{errors_text} | sistema {system_state.get('system_health', '—')}\n"
+            f"ℹ️ A ordem sai quando um agente mostra ★ NOVA ENTRADA."
+        )
+
     # ── Relatório horário ────────────────────────────────────────────────────
 
     async def maybe_hourly_report(
@@ -364,6 +468,15 @@ class TelegramNotifier:
         """Gera texto do relatório via LLM e envia ao Telegram."""
         self._generating_report = True
         try:
+            mirror_view = system_state.get("mirror_view")
+            if mirror_view is not None:
+                one_hour_ago = (datetime.utcnow() - REPORT_INTERVAL).strftime("%H:%M:%S")
+                errors = [f"{e['message']}" for e in self._error_buffer if e["time"] >= one_hour_ago]
+                equity = portfolio.get_total_value() if portfolio is not None else 0.0
+                await self._send(self._mirror_report(system_state, mirror_view, equity, errors))
+                self._last_report = datetime.utcnow()
+                logger.info("✅ [TELEGRAM] Relatório do espelho enviado.")
+                return
             # Coleta contexto
             latest_feat = system_state.get("latest_features")
             regime_map  = {0: "BULL 🐂", 1: "BEAR 🐻", 2: "RANGER 🤠"}

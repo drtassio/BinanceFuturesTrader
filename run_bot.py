@@ -1143,6 +1143,18 @@ async def main_trading_loop():
                 signal = await ai_controller.generate_trading_decision(featured_df)
                 if _mirror_policy():
                     log_mirror_panel(ai_controller, signal)
+                    _view = getattr(ai_controller, "mirror_view", None)
+                    system_state["mirror_view"] = _view
+                    if _view is not None:
+                        system_state["mirror_reason_text"] = _mirror_reason_text(_view)
+                        # Conta mudou sem ordem de fechamento do espelho (stop na corretora).
+                        _prev = system_state.get("mirror_account_side")
+                        _now = _view.get("account_side", 0)
+                        if telegram and _prev is not None and _prev != _now and not system_state.get("mirror_order_pending"):
+                            asyncio.create_task(telegram.alert_mirror_account_change(
+                                _prev, _view, portfolio.get_total_value() if portfolio else 0.0))
+                        system_state["mirror_account_side"] = _now
+                        system_state["mirror_order_pending"] = False
                 else:
                     log_trade_decision(signal, explainer, ai_monitor)  # [XAI] explica + persiste
 
@@ -1157,7 +1169,8 @@ async def main_trading_loop():
                     ai_controller.mirror_stop_target = None
 
                 # [TELEGRAM] Registra decisão no buffer para o relatório horário
-                if telegram and signal:
+                # (no espelho o relatório usa o painel dos agentes, não regime/confiança)
+                if telegram and signal and not _mirror_policy():
                     _regime_map3 = {0: "BULL", 1: "BEAR", 2: "RANGER"}
                     telegram.log_decision(
                         action     = signal.action.value,
@@ -1167,6 +1180,12 @@ async def main_trading_loop():
 
                 if signal and signal.action != Action.HOLD:
                     order = await execution_engine.submit_order(signal)
+                    if _mirror_policy() and telegram and getattr(ai_controller, "mirror_view", None):
+                        # A mudança de lado da conta que esta ordem causa não é
+                        # um stop na corretora: não alerta duas vezes.
+                        system_state["mirror_order_pending"] = True
+                        asyncio.create_task(telegram.alert_mirror_order(
+                            dict(ai_controller.mirror_view), signal, order is not None))
                     # [XAI] Persiste evento de ordem enviada no AIMonitor
                     if ai_monitor and order is not None:
                         ai_monitor.log_event(
@@ -1599,7 +1618,13 @@ async def main():
     if _telegram:
         await _telegram.check_availability()
         _bal = system_components["portfolio"].get_total_value() if system_components.get("portfolio") else 0.0
-        await _telegram.alert_bot_started(mode_label, _bal)
+        _policy = ""
+        if _mirror_policy():
+            _agents = [a.strip() for a in str(getattr(TradingConfig, 'LIVE_AGENTS', '')).split(',') if a.strip()]
+            _diag = {a.strip() for a in str(getattr(TradingConfig, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',') if a.strip()}
+            _policy = "Espelho dos agentes: " + ", ".join(
+                "%s (%s)" % (a, "diagnóstico" if a in _diag else "aprovado") for a in _agents)
+        await _telegram.alert_bot_started(mode_label, _bal, _policy)
     
     # Salvar estado inicial (checkpoint de partida)
     try:
