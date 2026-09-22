@@ -187,11 +187,8 @@ def log_system_status():
     tape_score = tape.get('score', 0.0)
     info, policy_line = "", ""
     if _mirror_policy():
-        info = "  (so informativo)"
         agents = [a.strip() for a in str(getattr(TradingConfig, 'LIVE_AGENTS', '')).split(',') if a.strip()]
-        diag = {a.strip() for a in str(getattr(TradingConfig, 'TESTNET_DIAGNOSTIC_AGENTS', '')).split(',') if a.strip()}
-        policy_line = "   🪞 POLITICA:    espelho dos agentes: %s\n" % ", ".join(
-            "%s (%s)" % (AGENT_NAMES.get(a, a), "diagnostico" if a in diag else "aprovado") for a in agents)
+        policy_line = "   🪞 POLITICA:    espelho dos agentes: %s\n" % ", ".join(AGENT_NAMES.get(a, a) for a in agents)
     log_message = (
         f"\n💡 {divider}\n"
         f"   📊 STATUS GERAL ({datetime.now().strftime('%H:%M:%S')})\n"
