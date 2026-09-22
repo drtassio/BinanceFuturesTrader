@@ -121,6 +121,38 @@ class BinanceConnector:
         self.ws_reconnect_delay_base = 5
         self.symbol_info_cache: Dict[str, Any] = {} # Cache para exchange info
 
+    @staticmethod
+    def _tick_round(price: float, symbol_info: Optional[Dict[str, Any]]) -> float:
+        """[FIX A2] Arredonda price ao tick size do PRICE_FILTER da exchange.
+
+        pricePrecision (ex: 2 para BTCUSDT) define o número de casas decimais
+        para *exibição*, mas NÃO é o múltiplo mínimo. O tickSize do filtro
+        PRICE_FILTER (ex: 0.10 para BTCUSDT) é o que a Binance valida.
+        Formatar o stop com apenas pricePrecision pode gerar preços como
+        62501.47 que não são múltiplos de 0.10 → erro -1111.
+        """
+        if not symbol_info:
+            return round(price, 2)
+        # Extrai tickSize do filtro PRICE_FILTER
+        tick_size: Optional[float] = None
+        for f in (symbol_info.get('filters') or []):
+            if f.get('filterType') == 'PRICE_FILTER':
+                try:
+                    tick_size = float(f['tickSize'])
+                except (KeyError, ValueError, TypeError):
+                    pass
+                break
+        if not tick_size or tick_size <= 0:
+            # Fallback: usa pricePrecision como arredondamento seguro
+            return round(price, int(symbol_info.get('pricePrecision', 2)))
+        # Alinha ao grid do tick: round(price / tick) * tick
+        rounded = round(price / tick_size) * tick_size
+        # Determina casas decimais pelo tick_size para formatar sem flutação
+        decimal_places = max(0, -int(f"{tick_size:.10f}".rstrip('0').find('.')) + len(
+            f"{tick_size:.10f}".rstrip('0').split('.')[-1]) if '.' in f"{tick_size:.10f}".rstrip('0') else 0)
+        return round(rounded, int(symbol_info.get('pricePrecision', decimal_places)))
+
+
     async def _calculate_timestamp_offset(self) -> int:
         """
         Calcula o offset de tempo entre o servidor local e o servidor da Binance
@@ -436,8 +468,10 @@ class BinanceConnector:
                 summary['positions_count'] = count
                 summary['positions'] = positions_dict
                 # Adiciona PnL não realizado ao valor total para uma visão mais completa do patrimônio
-                summary['total_value'] += pnl 
+                summary['total_value'] += pnl
+                summary['positions_fetched'] = True  # [FIX A5] Flag explícita
             else:
+                summary['positions_fetched'] = False
                 logger.warning("⚠️ [CONECTOR] Não foi possível obter dados de posição da Binance.")
 
             logger.info(f"✅ [CONECTOR] Resumo da conta obtido: Total: ${summary['total_value']:.2f}, Caixa: ${summary['cash']:.2f}, PnL: ${summary['unrealized_pnl']:.2f}.")
@@ -618,7 +652,6 @@ class BinanceConnector:
         # Cascata de 3 tentativas para cobrir todos os modos de conta (One-Way, Hedge, Portfolio Margin).
         try:
             symbol_info = await self.get_symbol_info(symbol)
-            price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
             qty_precision   = int(symbol_info['quantityPrecision']) if symbol_info else 3
 
             ticker = await self._make_request(
@@ -627,16 +660,19 @@ class BinanceConnector:
             current_price = float(ticker['price']) if ticker and 'price' in ticker else 0.0
 
             if current_price <= 0:
-                logger.warning(f"[CONECTOR] Preço inválido para {symbol}. Stop cancelado.")
+                logger.warning(f"[CONECTOR] Preco invalido para {symbol}. Stop cancelado.")
                 return None
 
             offset = callback_rate / 100.0
-            stop_price = round(
-                current_price * (1.0 + offset) if side_upper == 'BUY' else current_price * (1.0 - offset),
-                price_precision
+            raw_stop = (
+                current_price * (1.0 + offset) if side_upper == 'BUY'
+                else current_price * (1.0 - offset)
             )
+            # [FIX A2] Arredonda ao tick size real, nao ao pricePrecision de exibicao
+            stop_price = self._tick_round(raw_stop, symbol_info)
+            price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
             qty_rounded = round(quantity, qty_precision)
-            logger.info(f"[CONECTOR] Stop target: {side_upper} @ {stop_price} (preço atual ${current_price:.2f})")
+            logger.info(f"[CONECTOR] Stop target: {side_upper} @ {stop_price} (preco atual ${current_price:.2f})")
 
             # --- Tentativa 1: STOP_MARKET closePosition (One-Way mode) ---
             try:
@@ -645,7 +681,7 @@ class BinanceConnector:
                     'stopPrice': f"{stop_price:.{price_precision}f}", 'closePosition': 'true',
                 }, signed=True)
                 if r and r.get('orderId'):
-                    logger.info(f"[CONECTOR] ✅ Stop (T1-closePosition) {r['orderId']} @ {stop_price}")
+                    logger.info(f"[CONECTOR] Stop (T1-closePosition) {r['orderId']} @ {stop_price}")
                     return r
             except Exception as e1:
                 logger.debug(f"[CONECTOR] T1 falhou: {e1}")
@@ -658,14 +694,13 @@ class BinanceConnector:
                     'quantity': qty_rounded, 'positionSide': 'BOTH', 'reduceOnly': 'true',
                 }, signed=True)
                 if r and r.get('orderId'):
-                    logger.info(f"[CONECTOR] ✅ Stop (T2-positionSide) {r['orderId']} @ {stop_price}")
+                    logger.info(f"[CONECTOR] Stop (T2-positionSide) {r['orderId']} @ {stop_price}")
                     return r
             except Exception as e2:
                 logger.debug(f"[CONECTOR] T2 falhou: {e2}")
 
-            # --- Tentativa 3: algoOrder TRAILING_STOP_MARKET (caminho canônico da Algo API) ---
+            # --- Tentativa 3: algoOrder TRAILING_STOP_MARKET (caminho canonico da Algo API) ---
             try:
-                # O endpoint correto para Algo Orders de Trailing Stop é /fapi/v1/algo/futures/newOrderTrailingStop
                 algo_params = {
                     'symbol': symbol,
                     'side': side_upper,
@@ -673,17 +708,16 @@ class BinanceConnector:
                     'callbackRate': callback_rate,
                     'reduceOnly': 'true'
                 }
-                # Opcional: ativação do stop no preço atual
                 algo_params['activationPrice'] = f"{stop_price:.{price_precision}f}"
                 
                 r = await self._make_request('POST', '/fapi/v1/algo/futures/newOrderTrailingStop', params=algo_params, signed=True)
                 if r and (r.get('algoId') or r.get('orderId')):
-                    logger.info(f"[CONECTOR] ✅ Stop (T3-AlgoAPI) id={r.get('algoId') or r.get('orderId')} callback={callback_rate}%")
+                    logger.info(f"[CONECTOR] Stop (T3-AlgoAPI) id={r.get('algoId') or r.get('orderId')} callback={callback_rate}%")
                     return r
             except Exception as e3:
                 logger.debug(f"[CONECTOR] T3 (AlgoAPI) falhou: {e3}")
 
-            # --- Tentativa 4: STOP_MARKET mínimo (sem positionSide nem closePosition) ---
+            # --- Tentativa 4: STOP_MARKET minimo (sem positionSide nem closePosition) ---
             try:
                 r = await self._make_request('POST', '/fapi/v1/order', params={
                     'symbol': symbol, 'side': side_upper, 'type': 'STOP_MARKET',
@@ -714,16 +748,17 @@ class BinanceConnector:
             stop_price: Preço de disparo do stop
         """
         if not symbol or not side or quantity <= 0 or stop_price <= 0:
-            logger.error(f"❌ [ERRO CONECTOR] Parâmetros inválidos para Stop Loss: {symbol} {side} {quantity} @ {stop_price}")
+            logger.error(f"[ERRO CONECTOR] Parametros invalidos para Stop Loss: {symbol} {side} {quantity} @ {stop_price}")
             return None
 
-        # Obter precisão de preço/quantidade para formatar corretamente
-        # Se falhar, usa padrão 2/3 casas
+        # Obter precisao de preco/quantidade para formatar corretamente
         symbol_info = await self.get_symbol_info(symbol)
+        # [FIX A2] Alinha stop_price ao tick size do PRICE_FILTER, nao ao pricePrecision de exibicao
+        stop_price = self._tick_round(stop_price, symbol_info)
         price_precision = int(symbol_info['pricePrecision']) if symbol_info else 2
         qty_precision = int(symbol_info['quantityPrecision']) if symbol_info else 3
         
-        # Tenta primeiro via Algo Order API (/fapi/v1/algoOrder) conforme especificação recente da Binance
+        # Tenta primeiro via Algo Order API (/fapi/v1/algoOrder)
         algo_params = {
             'algoType': 'CONDITIONAL',
             'symbol': symbol,
@@ -734,16 +769,16 @@ class BinanceConnector:
             'workingType': 'MARK_PRICE'
         }
         
-        logger.info(f"🛡️ [CONECTOR] Colocando Stop Loss (Server-Side Algo): {side} {symbol} @ {algo_params['triggerPrice']} (ClosePosition)...")
+        logger.info(f"[CONECTOR] Colocando Stop Loss: {side} {symbol} @ {algo_params['triggerPrice']} (ClosePosition)...")
         
         try:
             result = await self._make_request('POST', '/fapi/v1/algoOrder', params=algo_params, signed=True)
             if result and (result.get('algoId') or result.get('orderId')):
                 oid = result.get('algoId') or result.get('orderId')
-                logger.info(f"✅ [CONECTOR] Stop Loss {oid} (Server-Side Algo) colocado com sucesso na Binance.")
+                logger.info(f"[CONECTOR] Stop Loss {oid} (Server-Side Algo) colocado com sucesso na Binance.")
                 return result
         except Exception as ae:
-            logger.warning(f"⚠️ [CONECTOR] AlgoOrder SL falhou: {ae}. Tentando fallback legada /fapi/v1/order...")
+            logger.warning(f"[CONECTOR] AlgoOrder SL falhou: {ae}. Tentando fallback /fapi/v1/order...")
 
         # Fallback legado para /fapi/v1/order
         params = {
@@ -756,10 +791,10 @@ class BinanceConnector:
         try:
             result = await self._make_request('POST', '/fapi/v1/order', params=params, signed=True)
             if result:
-                logger.info(f"✅ [CONECTOR] Stop Loss {result.get('orderId')} (Server-Side) colocado com sucesso.")
+                logger.info(f"[CONECTOR] Stop Loss {result.get('orderId')} (Server-Side) colocado com sucesso.")
             return result
         except Exception as e:
-            logger.error(f"❌ [ERRO CONECTOR] Exceção ao colocar Stop Loss: {e}", exc_info=True)
+            logger.error(f"[ERRO CONECTOR] Excecao ao colocar Stop Loss: {e}", exc_info=True)
             return None
 
     async def place_take_profit_order(self, symbol: str, side: str, quantity: float, stop_price: float) -> Optional[Dict[str, Any]]:

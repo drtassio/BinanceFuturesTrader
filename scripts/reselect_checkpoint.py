@@ -61,6 +61,17 @@ def main() -> int:
     from specialists.trend_specialist import ClippedSAC
 
     run = args.run.resolve()
+    contract_path = run / "feature_contract.json"
+    
+    # [FIX C5] Previne re-seleção cruzada que vazaria holdouts entre datasets
+    if contract_path.exists():
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        trained_dataset = contract.get("dataset")
+        if trained_dataset and Path(trained_dataset).name != args.data.name:
+            print(f"⚠️ [C5 ALERTA] Agente treinado em {Path(trained_dataset).name}, mas reselect tentou usar {args.data.name}.")
+            print("Forçando uso do dataset original para preservar a integridade do holdout.")
+            args.data = Path(trained_dataset)
+
     models = run / "models"
     train_df, val_df, holdout_df = split_chronological(load_dataset(args.data))
     config = AIConfig()

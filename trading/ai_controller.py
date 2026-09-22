@@ -101,9 +101,11 @@ class AIController:
         if decision.action == "hold":
             return hold(decision.reason, **details)
 
-        key = (bar, decision.action, decision.side)
+        # [FIX A6] Dedup por bar (impede reentrada no mesmo candle) e TTL longo (900s)
+        # Se vetado pelo risco, também bloqueia até o próximo candle.
+        key = (bar,)
         if self._teacher_last_order and self._teacher_last_order[0] == key \
-                and _time.monotonic() - self._teacher_last_order[1] < 180:
+                and _time.monotonic() - self._teacher_last_order[1] < 900:
             return hold("ordem desta barra ja enviada; aguardando execucao", **details)
 
         cfg = self.config_trading
@@ -137,10 +139,12 @@ class AIController:
             signal = Signal(symbol=symbol, action=action, confidence=1.0, position_size_pct=size_pct,
                             leverage=leverage, stop_loss=catastrophe, take_profit=0.0, explanation=explanation)
 
+        # Atualiza dedup ANTES do check de risco: um sinal gerado não deve ser repetido
+        self._teacher_last_order = (key, _time.monotonic())
+        
         approved, reason = self.risk_manager.check_trade_approval(signal)
         if not approved:
             return hold("vetado pelo risco: %s" % reason, **details)
-        self._teacher_last_order = (key, _time.monotonic())
         logger.info("[%s] %s %s | margem %.1f%% x %.0fx | stop de catastrofe %.2f%% | %s", label,
                     decision.action, action.value, signal.position_size_pct * 100, signal.leverage,
                     (signal.stop_loss or 0.0) * 100, decision.reason)

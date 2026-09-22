@@ -592,11 +592,13 @@ class ExecutionEngine:
             self.system_state["command_feedback"] = f"Aviso: Ordem {order_id} REJEITADA (Quantidade zero)."
             return
 
-        self.active_orders[order_id] = exec_order # Adiciona ao dicionário de ordens ativas
-        await self.order_queue.put(exec_order) # Coloca a ordem na fila para processamento
+        self.active_orders[order_id] = exec_order  # Adiciona ao dicionário de ordens ativas
+        await self.order_queue.put(exec_order)      # Coloca a ordem na fila para processamento
         
-        logger.info(f"📦 [EXEC] Meta-ordem {order_id} ({signal.action.value} {exec_order.total_quantity:.4f} {signal.symbol}) enfileirada com estratégia: {strategy}, Alavancagem: {signal.leverage:.2f}x. Valor Nocional: ${notional_trade_value_usd:,.2f}, Margem: ${margin_to_allocate_usd:,.2f}.")
+        logger.info(f"[EXEC] Meta-ordem {order_id} ({signal.action.value} {exec_order.total_quantity:.4f} {signal.symbol}) enfileirada com estrategia: {strategy}, Alavancagem: {signal.leverage:.2f}x. Valor Nocional: ${notional_trade_value_usd:,.2f}, Margem: ${margin_to_allocate_usd:,.2f}.")
         self.system_state["command_feedback"] = f"Ordem {order_id} ({signal.action.value} {exec_order.total_quantity:.4f} {signal.symbol}) enfileirada. Nocional: ${notional_trade_value_usd:,.2f}."
+        # [FIX A8] Retorna exec_order para que callers possam disparar alertas/marcas
+        return exec_order
 
     async def _execution_loop(self):
         """
@@ -713,8 +715,17 @@ class ExecutionEngine:
                 )
                 # The mirror's stop is an Algo Order, which the standard open
                 # orders listing may not show; the engine placed it itself.
+                # [FIX A3] Verifica se a posição ainda existe antes de confiar no registro.
+                # Quando o stop dispara na exchange a posição fecha externamente — sem
+                # isso _mirror_stops ficaria para sempre em True e o monitor não
+                # recriaria a proteção em uma nova posição.
                 if self._mirror_policy_active() and symbol in self._mirror_stops:
-                    has_stop = True
+                    if abs(getattr(position, 'quantity', 0.0)) < 1e-9:
+                        # Posição já foi fechada — limpa o registro stale
+                        self._mirror_stops.pop(symbol, None)
+                        logger.info("[MONITOR-A3] Mirror stop stale removido: %s (posicao zerada)", symbol)
+                    else:
+                        has_stop = True
 
                 # [SOFTWARE STOP] Verifica se o stop por software está ativo e se foi disparado
                 software_stop_price = self._software_stops.get(symbol)
@@ -888,9 +899,11 @@ class ExecutionEngine:
         # Lógica para ajustar a alavancagem para o símbolo ANTES de enviar a ordem (crucial para Live Trading)
         if is_live and self.config.MAX_LEVERAGE > 1:
             try:
-                # Ajusta a alavancagem dinamicamente antes de enviar a ordem
-                await self.connector.set_leverage_for_symbol(order.signal.symbol, int(order.signal.leverage))
-                logger.debug(f"🌐 [LIVE] Alavancagem ajustada para {order.signal.symbol} para {int(order.signal.leverage)}x.")
+                # [FIX A10] round() em vez de int() para evitar truncar alavancagem fracionária
+                # int(3.7) = 3x; round(3.7) = 4x — mantém o nocional que o agente calculou
+                lev_int = max(1, round(order.signal.leverage))
+                await self.connector.set_leverage_for_symbol(order.signal.symbol, lev_int)
+                logger.debug(f"[LIVE] Alavancagem ajustada para {order.signal.symbol}: {lev_int}x (sinal: {order.signal.leverage:.2f}x).")
             except Exception as e:
                 logger.error(f"❌ [ERRO LIVE] Falha ao ajustar alavancagem para {order.signal.symbol} para {order.signal.leverage:.2f}x: {e}. Ordem pode falhar.", exc_info=True)
                 order.status = OrderStatus.REJECTED
@@ -1150,7 +1163,13 @@ class ExecutionEngine:
 
         
         logger.info(f"🌐 [LIVE] Enviando ordem a mercado real {client_order_id} para {order.signal.symbol} (Qtd: {params['quantity']}, Alavancagem: {order.signal.leverage:.2f}x)...")
-        result = await self.connector.place_order(params)
+        try:
+            # [FIX A7] Timeout de 30s. Sem isso, se a requisição travar, a ordem fica desprotegida e o loop pendura
+            import asyncio
+            result = await asyncio.wait_for(self.connector.place_order(params), timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.error(f"❌ [ERRO LIVE] Timeout (30s) ao enviar ordem a mercado para {order.signal.symbol}. O estado da posição é desconhecido.")
+            result = None
         
         if result:
             # Captura o trade retornado por update_with_fill para logar
@@ -1259,6 +1278,26 @@ class ExecutionEngine:
                     logger.warning(f"⚠️ [SAFETY] Nao foi possivel obter objeto Trade para colocar protecoes em {order.id}.")
             else:
                 logger.warning(f"⚠️ [LIVE] Ordem a mercado {result.get('orderId')} para {order.id} não foi FILLED após polling (Status: {order.status.value}).")
+                # [FIX A7] Mesmo se não for FILLED, se foi executada parcialmente (ou não conseguimos confirmar),
+                # garantir proteção para a exposição existente no portfólio.
+                if not order.reduce_only and abs(order.filled_quantity) > 0:
+                    logger.warning(f"🛡️ [SAFETY] Ordem parcialmente executada ({order.filled_quantity}). Aplicando stop preventivo.")
+                    # Fallback trade placeholder to attach stop
+                    from trading.models import Trade
+                    safe_price = order.average_price if order.average_price > 0 else self.portfolio.get_current_price(order.signal.symbol)
+                    dummy_trade = Trade(
+                        id=f"dummy_{order.id}", symbol=order.signal.symbol, action=order.signal.action,
+                        quantity=order.filled_quantity, executed_price=safe_price, timestamp=datetime.now()
+                    )
+                    sl_pct = order.signal.stop_loss if (order.signal.stop_loss is not None and order.signal.stop_loss > 0) else self.config.DEFAULT_STOP_LOSS_PCT
+                    if self._is_mirror_signal(order.signal):
+                        env_stop = (order.signal.explanation or {}).get("env_stop_price")
+                        if env_stop:
+                            await self._place_mirror_stop(dummy_trade.symbol, dummy_trade.side, abs(dummy_trade.quantity), float(env_stop), sl_pct, dummy_trade)
+                        else:
+                            await self._place_initial_hard_stop(dummy_trade, sl_pct)
+                    else:
+                        await self._place_initial_hard_stop(dummy_trade, sl_pct)
         else:
             logger.error(f"❌ [ERRO LIVE] Falha crítica ao enviar ordem a mercado para {order.id}. Resultado nulo do conector.")
             order.status = OrderStatus.REJECTED
@@ -1764,15 +1803,37 @@ class ExecutionEngine:
         tick = max(abs(stop_price) * 1e-5, 1e-9)
         if last is not None and ((side > 0 and stop_price <= last + tick) or (side < 0 and stop_price >= last - tick)):
             return
-        await self._cancel_protective_orders(symbol)
-        if not await self._place_mirror_stop(symbol, side, quantity, stop_price):
-            emergency = float(getattr(self.config, "MIRROR_EMERGENCY_STOP_PCT", 0.10))
-            position = self.portfolio.positions.get(symbol)
-            entry = float(getattr(position, "entry_price", 0.0) or 0.0)
-            if entry > 0:
-                fallback = entry * (1.0 - emergency if side > 0 else 1.0 + emergency)
-                await self.connector.place_stop_loss_order(symbol=symbol, side="SELL" if side > 0 else "BUY",
-                                                           quantity=quantity, stop_price=fallback)
+        # [FIX A4] Busca as ordens de stop atuais ANTES de colocar a nova
+        try:
+            old_orders = await self.connector.get_open_orders(symbol)
+        except Exception:
+            old_orders = []
+
+        success = await self._place_mirror_stop(symbol, side, quantity, stop_price)
+        if success:
+            # Se a nova entrou, cancela as antigas (não afeta a recém-criada, pois não está em old_orders)
+            for item in old_orders or []:
+                order_id = item.get("orderId")
+                if not order_id: continue
+                try:
+                    if item.get("is_algo"):
+                        await self.connector._make_request("DELETE", "/fapi/v1/algoOrder",
+                                                           params={"symbol": symbol, "algoId": order_id}, signed=True)
+                    else:
+                        await self.connector.cancel_order(symbol, order_id=order_id)
+                except Exception as exc:
+                    logger.error("[EXEC] Falha ao cancelar stop antigo %s: %s", order_id, exc)
+        else:
+            # Se o _place_mirror_stop falhou, NÃO cancela o antigo (mantém proteção).
+            # Fallback de emergência caso nem o novo nem o antigo (se não existisse) deem certo.
+            if not any(o.get('type') in ('STOP_MARKET', 'TRAILING_STOP_MARKET', 'STOP') for o in (old_orders or [])):
+                emergency = float(getattr(self.config, "MIRROR_EMERGENCY_STOP_PCT", 0.10))
+                position = self.portfolio.positions.get(symbol)
+                entry = float(getattr(position, "entry_price", 0.0) or 0.0)
+                if entry > 0:
+                    fallback = entry * (1.0 - emergency if side > 0 else 1.0 + emergency)
+                    await self.connector.place_stop_loss_order(symbol=symbol, side="SELL" if side > 0 else "BUY",
+                                                               quantity=quantity, stop_price=fallback)
 
     async def _place_initial_hard_stop(self, trade: Trade, stop_loss_pct: float):
         """
@@ -1877,7 +1938,12 @@ class ExecutionEngine:
                 return
 
             # 1. Reconcilia Posições no Portfolio
-            self.portfolio.reconcile_positions(summary.get('positions', {}))
+            # [FIX A5] Evita apagar todas as posições caso a chamada da API (positionRisk)
+            # tenha falhado temporariamente (retornando positions = {} silenciosamente).
+            if summary.get('positions_fetched', False):
+                self.portfolio.reconcile_positions(summary.get('positions', {}))
+            else:
+                logger.warning("⚠️ [RECONCILIATION] positions_fetched é False. Pulando reconciliação de posições para evitar wipe acidental.")
             
             # 2. Atualiza Caixa e Margem
             self.portfolio.cash = summary.get('cash', self.portfolio.cash)

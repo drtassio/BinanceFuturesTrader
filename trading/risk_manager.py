@@ -223,12 +223,23 @@ class RiskManager:
             logger.warning(reason)
             return False, reason
 
-        # 1. Checagem de Drawdown Máximo (Regra de Saída em Crise)
-        if self.current_drawdown > self.config.MAX_DRAWDOWN_PERCENT:
+        # [FIX A1] Checagem de Drawdown Máximo — NÃO veta saídas/fechamentos.
+        # Ordens de fechamento reduzem o risco; vetá-las quando o DD já é alto
+        # manteria a conta posicionada e pioraria a situação.
+        PARTIAL_EXIT_DRAWDOWN = 0.09  # acima de 9% → redução parcial obrigatória
+        if not is_closing_trade and self.current_drawdown > self.config.MAX_DRAWDOWN_PERCENT:
             reason = (f"❌ [REJEITADO] Drawdown atual ({self.current_drawdown:.2%}) "
                       f"excede o limite de {self.config.MAX_DRAWDOWN_PERCENT:.2%}. "
                       "Modo de segurança ativado: Nenhuma nova posição de risco será aberta.")
             logger.warning(f"🚨 {reason} Equity atual: ${self.portfolio_value:,.2f}, Pico: ${self.peak_portfolio_value:,.2f}.")
+            return False, reason
+        # Entre 9% e MAX_DRAWDOWN: permite saída total; bloqueia novas entradas.
+        # (O ai_controller já não abre novas posições em modo drawdown; esta
+        # guarda protege caso outra via chegue a check_trade_approval.)
+        if not is_closing_trade and self.current_drawdown > PARTIAL_EXIT_DRAWDOWN:
+            reason = (f"⚠️ [REJEITADO] Drawdown ({self.current_drawdown:.2%}) acima de "
+                      f"{PARTIAL_EXIT_DRAWDOWN:.0%}: novas entradas bloqueadas até recuperação.")
+            logger.warning(reason)
             return False, reason
 
         # 2. Checagem de Alavancagem Máxima da Conta (Gerenciamento da exposição nocional)

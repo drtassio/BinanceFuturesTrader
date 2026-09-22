@@ -132,7 +132,8 @@ async def build_featured(start: datetime, end: datetime) -> pd.DataFrame:
         # the live create_features applies them inline. Stop at the base here.
         import feature_engineering.causal_features as causal
         original = causal.build_causal_features
-        causal.build_causal_features = lambda df: (df, {"trend_features": [], "tape_features": []})
+        # [FIX B4] Lambda signature must accept **kwargs (e.g. df5) passed by create_features
+        causal.build_causal_features = lambda df, **kwargs: (df, {"trend_features": [], "tape_features": []})
         pipeline._add_meta_features = lambda df: df
         try:
             featured = await pipeline.create_features(raw, TradingConfig.PRIMARY_PAIR, "15m", fit_scaler=False)

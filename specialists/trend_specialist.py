@@ -833,6 +833,7 @@ class TrendFollowingEnv(gym.Env):
             logger.debug(f"[ENV RESET] Episódio completo: max_steps={self.max_steps}, start_idx={self.start_idx}")
         self.balance = self.initial_balance
         self.net_worth = self.initial_balance
+        self._trade_initial_net_worth = self.initial_balance
         self.position = 0.0
         self.entry_price = 0.0
         self.steps_in_position = 0
@@ -1097,6 +1098,10 @@ class TrendFollowingEnv(gym.Env):
         if self.net_worth < _margin_minimum:
             self.net_worth = _margin_minimum
         self.episode_peak_net_worth = max(self.episode_peak_net_worth, self.net_worth)
+        # [FIX C4] Atualiza max drawdown no fechamento do trade. Antes o slippage e as taxas
+        # abaixavam o net_worth mas o drawdown máximo nunca era atualizado.
+        dd = (self.episode_peak_net_worth - self.net_worth) / (self.episode_peak_net_worth + 1e-9)
+        self.episode_max_drawdown = max(getattr(self, 'episode_max_drawdown', 0.0), dd)
         self.pnl_since_entry = 0.0
 
     # [v3.1 REFERENCIA] Padrões de features — usado apenas para documentação.
@@ -1758,7 +1763,9 @@ class TrendFollowingEnv(gym.Env):
         is_optimization_phase = (self.mode == 'optimization')
         prev_unrealized_return = getattr(self, "_prev_unrealized_return", 0.0)
         if self.position != 0:
-            pnl_step_value = ((current_price - prev_price) / (prev_price + 1e-9)) * self.initial_notional_value * np.sign(self.position)
+            # [FIX C2] Usa self.entry_price no denominador (initial_notional_value baseia-se na entrada)
+            # para que pnl_step_value = (delta / entry) * (qty * entry) = qty * delta.
+            pnl_step_value = ((current_price - prev_price) / (self.entry_price + 1e-9)) * self.initial_notional_value * np.sign(self.position)
             self.net_worth += pnl_step_value
             
             # Floor de liquidação conservador
@@ -2514,7 +2521,8 @@ class TrendFollowingEnv(gym.Env):
                 catastrophe_sl_level = max(catastrophe_sl_static, self._catastrophe_sl_floor or catastrophe_sl_static)
                 if current_price <= catastrophe_sl_level:
                     trade_was_closed = True
-                    close_price = catastrophe_sl_level
+                    # [FIX C4] Catastrophe SL é uma ordem a mercado e sofre slippage
+                    close_price = self._simulate_slippage(catastrophe_sl_level, atr, OrderSide.SELL)
                     pnl_realized = self.initial_notional_value * ((close_price - self.entry_price) / (self.entry_price + 1e-9))
                     self._apply_realized_pnl(pnl_realized)
                     self._prev_unrealized_return = 0.0
@@ -2549,7 +2557,8 @@ class TrendFollowingEnv(gym.Env):
                 catastrophe_sl_level = min(catastrophe_sl_static, self._catastrophe_sl_floor or catastrophe_sl_static)
                 if current_price >= catastrophe_sl_level:
                     trade_was_closed = True
-                    close_price = catastrophe_sl_level
+                    # [FIX C4] Catastrophe SL é uma ordem a mercado e sofre slippage
+                    close_price = self._simulate_slippage(catastrophe_sl_level, atr, OrderSide.BUY)
                     pnl_realized = self.initial_notional_value * ((self.entry_price - close_price) / (self.entry_price + 1e-9))
                     self._apply_realized_pnl(pnl_realized)
                     self._prev_unrealized_return = 0.0
@@ -2752,9 +2761,14 @@ class TrendFollowingEnv(gym.Env):
                     * float(getattr(self.trading_config, 'MAX_PORTFOLIO_RISK_PERCENT', 0.02))
                     * size_factor
                 )
-                # Piso na distancia do stop para nao explodir o nocional quando a
-                # volatilidade colapsa.
-                stop_distance_pct = max(float(sl_mult) * atr / (current_price + 1e-9), 0.0015)
+                # [FIX C3] Calcula o SL multiplier real ANTES de dimensionar a posição
+                unc_val = float(current_row.get('tp_uncertainty', 0.0))
+                sl_unc_mult = 1.0 + min(0.8, unc_val) if unc_val > 0.0 else 1.0
+                sl_base_multiplier = sl_mult * 1.5
+                actual_sl_mult = sl_base_multiplier * sl_unc_mult
+                
+                # Piso na distancia do stop para nao explodir o nocional quando a volatilidade colapsa.
+                stop_distance_pct = max(float(actual_sl_mult) * atr / (current_price + 1e-9), 0.0015)
                 notional = risk_budget / stop_distance_pct
                 # A acao de alavancagem limita a exposicao; o risco a define.
                 max_notional = self.net_worth * float(max(self.current_leverage, 1.0))
@@ -2764,6 +2778,8 @@ class TrendFollowingEnv(gym.Env):
                 position_size_pct = self.initial_notional_value / (self.net_worth + 1e-9)
                 
                 # Fee de entrada
+                # [FIX C1] Salva net worth ANTES da fee para termos o PnL liquido real no final
+                self._trade_initial_net_worth = float(self.net_worth)
                 entry_fee = (self.initial_notional_value or 0) * self.trading_config.TAKER_FEE
                 self.net_worth -= entry_fee
                 # Alinhamento com o TrendPredictor — registrado na ENTRADA mas contado no FECHAMENTO
@@ -2799,24 +2815,13 @@ class TrendFollowingEnv(gym.Env):
                 self._peak_price_since_entry = current_price
                 self._catastrophe_sl_floor = None
                 # SL Inicial: Com "Breathing Room" mas sem ser catastrófico
-                # 🔬 Dr. Tensor: Reduzido de 2.5x para 1.5x (era 2.5x na auditoria)
-                # para evitar que perdas isoladas destruam o PnL do episódio.
-                sl_base_multiplier = sl_mult * 1.5 
                 self._stop_was_trailed = False
                 
                 if self.position > 0:
-                    self.sl_level = self.entry_price - atr * sl_base_multiplier
+                    self.sl_level = self.entry_price - atr * actual_sl_mult
                 else:
-                    self.sl_level = self.entry_price + atr * sl_base_multiplier
-                # Ajuste do SL por incerteza (mais conservador se uncertainty alta)
-                unc_val = float(self.df.iloc[self.start_idx + self.current_step].get('tp_uncertainty', 0.0))
-                if unc_val > 0.0:
-                    # Mesmo com incerteza, usar multiplicador maior para surfing
-                    sl_unc_mult = 1.0 + min(0.8, unc_val)  # Aumentou de 0.5 para 0.8
-                    if self.position > 0:
-                        self.sl_level = self.entry_price - atr * sl_base_multiplier * sl_unc_mult
-                    else:
-                        self.sl_level = self.entry_price + atr * sl_base_multiplier * sl_unc_mult
+                    self.sl_level = self.entry_price + atr * actual_sl_mult
+                
                 # Distancia de risco inicial (1R). Os mecanismos de aperto do
                 # stop so passam a agir depois que o trade paga esse valor, o que
                 # da a uma tendencia espaco para se desenvolver antes de o stop
@@ -2945,8 +2950,10 @@ class TrendFollowingEnv(gym.Env):
                 # scalp_min e scalp_penalty_base ficam disponíveis mas não são aplicados aqui.
                 trade_side = closed_trade_side or ('long' if prev_position_sign > 0 else 'short' if prev_position_sign < 0 else 'flat')
                 _exit_price = float(close_price) if 'close_price' in locals() else float(current_price)
+                # [FIX C1] Usa net_pnl real para métricas de Profit Factor e relatórios
+                net_pnl = self.net_worth - getattr(self, '_trade_initial_net_worth', self.initial_balance)
                 info['trade'] = {
-                    'pnl': float(pnl_realized),
+                    'pnl': float(net_pnl),
                     'duration_steps': duration_steps,
                     'side': trade_side,
                     'entry_price': float(self.entry_price),
@@ -2959,7 +2966,7 @@ class TrendFollowingEnv(gym.Env):
                     'entry': float(self.entry_price),
                     'exit': _exit_price,
                     'duration': duration_steps,
-                    'pnl_usd': float(pnl_realized),
+                    'pnl_usd': float(net_pnl),
                     'pnl_pct': float(trade_return_pct) * 100.0,
                     'exit_reason': exit_reason or 'Agent Decision',
                     'stop_protection_kind': info.get('stop_protection_kind'),

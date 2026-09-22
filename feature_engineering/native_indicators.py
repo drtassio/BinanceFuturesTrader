@@ -106,6 +106,11 @@ class NativeIndicators:
         weights = np.array(weights[::-1], dtype=np.float64)
         weight_len = len(weights)
         
+        # [FIX B4] Prevents ValueError broadcast when series is smaller than the calculated weights window
+        if n < weight_len:
+            logger.warning(f"⚠️ [FRACDIFF] Série ({n}) é menor que a janela de pesos ({weight_len}). Retornando NaNs.")
+            return pd.Series(np.nan, index=series.index, dtype=np.float32)
+
         # --- ACELERAÇÃO GPU (TORCH) OU VECTORIZED NUMPY ---
         if torch is not None and torch.cuda.is_available():
             try:

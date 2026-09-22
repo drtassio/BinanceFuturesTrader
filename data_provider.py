@@ -308,19 +308,28 @@ class DataProvider:
                 latest_klines_df = await self._fetch_and_format_data(symbol, interval, limit=candles_to_fetch, start_ts=last_timestamp_in_cache)
 
                 if latest_klines_df is not None and not latest_klines_df.empty:
-                    combined_df = pd.concat([self.data_cache[cache_key], latest_klines_df])
-                    self.data_cache[cache_key] = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
+                    # [FIX A9] Filtra a vela em formação ANTES de colocar no cache.
+                    # Se fizermos isso apenas na extração de features, a vela parcial
+                    # pode sobrescrever a versão antiga fechada via keep='last', e 
+                    # na próxima chamada seu timestamp pode parecer fechado.
+                    closed_mask_new = (latest_klines_df.index.asi8 // 10**6 + interval_ms) <= current_time
+                    latest_klines_df = latest_klines_df.loc[closed_mask_new]
+                    
+                    if not latest_klines_df.empty:
+                        combined_df = pd.concat([self.data_cache[cache_key], latest_klines_df])
+                        self.data_cache[cache_key] = combined_df[~combined_df.index.duplicated(keep='last')].sort_index()
 
-                # Only closed candles become features. The regime detector decodes
-                # its whole window, so a still-forming candle at the end changed the
-                # regime and meta-model values of the last CLOSED bar on about 10%
-                # of bars (measured against a strictly causal rebuild), and the
-                # specialists were trained on closed candles only.
                 cached = self.data_cache[cache_key]
+                # Apenas garantia redundante (o cache já deve estar limpo)
                 closed_mask = (cached.index.asi8 // 10**6 + interval_ms) <= current_time
                 data_for_features = cached.loc[closed_mask].tail(required_data_points)
                 if len(data_for_features) > 0:
                     raw_dfs_multi_tf[interval] = data_for_features
+                    
+                    # [STALENESS CHECK] Se o candle mais recente tiver mais de 2 períodos de idade, loga aviso
+                    last_time = data_for_features.index[-1].timestamp() * 1000
+                    if current_time - last_time > (interval_ms * 2):
+                        logger.warning(f"⚠️ [DATA PROVIDER] Dados stale detectados em {symbol}-{interval}. Última vela: {data_for_features.index[-1]}")
 
             if not raw_dfs_multi_tf:
                 logger.error("❌ [DATA PROVIDER] Nenhuma kline válida encontrada para criar features.")
@@ -376,8 +385,19 @@ class DataProvider:
             try:
                 # Usamos pickle para DataFrames com índices complexos (datetime)
                 data = pd.read_pickle(filepath)
-                logger.info(f"✅ [DATA PROVIDER] Dados históricos carregados de '{filepath}'. Total de linhas: {len(data)}.")
-                return data
+                # [FIX B1] Verifica se o cache é obsoleto (última vela muito antiga).
+                # Um buraco de meses no cache não será preenchido adequadamente pelo _fetch_historical_batch
+                # de forma transparente (pode gerar ffill() na frente).
+                if not data.empty:
+                    last_time = data.index[-1].timestamp()
+                    current_time = time.time()
+                    if current_time - last_time > (30 * 24 * 60 * 60):  # 30 dias
+                        logger.warning(f"⚠️ [DATA PROVIDER] Cache {filepath} obsoleto (último dado em {data.index[-1]}). Descartando.")
+                        data = pd.DataFrame()
+                        
+                if not data.empty:
+                    logger.info(f"✅ [DATA PROVIDER] Dados históricos carregados de '{filepath}'. Total de linhas: {len(data)}.")
+                    return data
             except Exception as e:
                 logger.warning(f"⚠️ [DATA PROVIDER] Cache corrompido ou incompatível em '{filepath}': {e}. Removendo cache corrompido...")
                 try:
