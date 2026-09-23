@@ -5,22 +5,36 @@ from trading.execution_engine import ExecutionEngine
 
 
 class FakeConnector:
-    def __init__(self):
-        self.placed = []
-        self.cancelled = 0
+    """Keeps the open stops like Binance does, including its rule of a single
+    closePosition stop per direction (-4130)."""
 
-    async def place_stop_loss_order(self, symbol, side, quantity, stop_price):
+    def __init__(self, open_stops=None):
+        self.placed = []
+        self.open = list(open_stops or [])
+        self.cancelled = []
+
+    async def place_stop_loss_order(self, symbol, side, quantity, stop_price, close_position=True):
+        if close_position and any(o["side"] == side and o["closePosition"] for o in self.open):
+            return None   # -4130: an open closePosition stop in this direction exists
         self.placed.append((side, round(stop_price, 2)))
-        return {"orderId": len(self.placed)}
+        oid = 100 + len(self.placed)
+        self.open.append({"orderId": oid, "side": side, "type": "STOP_MARKET", "stopPrice": stop_price,
+                          "closePosition": close_position, "is_algo": True})
+        return {"algoId": oid}
 
     async def get_open_orders(self, symbol):
-        self.cancelled += 1
-        return []
+        return [dict(o) for o in self.open]
+
+    async def _make_request(self, method, path, params=None, signed=False):
+        if method == "DELETE":
+            self.cancelled.append(params["algoId"])
+            self.open = [o for o in self.open if o["orderId"] != params["algoId"]]
+        return {}
 
 
-def _engine():
+def _engine(open_stops=None):
     engine = object.__new__(ExecutionEngine)
-    engine.connector = FakeConnector()
+    engine.connector = FakeConnector(open_stops)
     engine.system_state = {"live_trading_enabled": True}
     engine._mirror_stops = {}
     engine.portfolio = type("P", (), {"positions": {}})()
@@ -37,6 +51,8 @@ def test_long_stop_moves_up_but_never_down():
     run(engine.sync_mirror_stop("BTCUSDT", 1, 0.01, 101.5))   # tighter: moved
     assert engine.connector.placed == [("SELL", 100.0), ("SELL", 101.5)]
     assert engine._mirror_stops["BTCUSDT"] == 101.5
+    # exactly one stop left on the exchange: the new one
+    assert [o["stopPrice"] for o in engine.connector.open] == [101.5]
 
 
 def test_short_stop_moves_down_but_never_up():
@@ -46,6 +62,29 @@ def test_short_stop_moves_down_but_never_up():
     run(engine.sync_mirror_stop("BTCUSDT", -1, 0.01, 111.0))  # looser: ignored
     run(engine.sync_mirror_stop("BTCUSDT", -1, 0.01, 108.0))  # tighter: moved
     assert engine.connector.placed == [("BUY", 110.0), ("BUY", 108.0)]
+    assert [o["stopPrice"] for o in engine.connector.open] == [108.0]
+
+
+def test_tightening_an_existing_close_position_stop_does_not_hit_4130():
+    # The stop placed at the fill is closePosition; the trailing one must coexist
+    # with it until it is cancelled, so it goes reduceOnly with the quantity.
+    engine = _engine([{"orderId": 7, "side": "BUY", "type": "STOP_MARKET", "stopPrice": 86843.6,
+                       "closePosition": True, "is_algo": True}])
+    engine._mirror_stops["BTCUSDT"] = 86843.6
+    asyncio.run(engine.sync_mirror_stop("BTCUSDT", -1, 0.0285, 86000.0))
+    assert engine.connector.placed == [("BUY", 86000.0)]
+    assert engine.connector.cancelled == [7]
+    assert [(o["stopPrice"], o["closePosition"]) for o in engine.connector.open] == [(86000.0, False)]
+
+
+def test_restart_adopts_the_stop_already_on_the_exchange():
+    # After a restart _mirror_stops is empty but the exchange still holds the stop.
+    engine = _engine([{"orderId": 7, "side": "BUY", "type": "STOP_MARKET", "stopPrice": 86843.6,
+                       "closePosition": True, "is_algo": True}])
+    asyncio.run(engine.sync_mirror_stop("BTCUSDT", -1, 0.0285, 86843.61))
+    assert engine.connector.placed == []
+    assert engine.connector.cancelled == []
+    assert engine._mirror_stops["BTCUSDT"] == 86843.6
 
 
 def test_nothing_is_sent_when_not_live():

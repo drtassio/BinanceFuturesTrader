@@ -1,0 +1,32 @@
+{
+  "agent": "bull",
+  "rule": {
+    "kind": "leg_confirm",
+    "min_steps": 3,
+    "min_steps_5m": 2,
+    "require_trend_4h": false,
+    "exit_trend_1h": true,
+    "min_adx_4h": 0.0,
+    "sl_mult": 3.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "train": {
+    "trades": 85,
+    "net_return": 0.1348618974330061,
+    "profit_factor": 1.3479217719207066,
+    "max_drawdown": 0.08243639646485589,
+    "win_rate": 47.05882352941176,
+    "avg_duration": 66.12941176470588
+  },
+  "validation": {
+    "trades": 12,
+    "net_return": 0.044522250440523124,
+    "profit_factor": 2.93153210062949,
+    "max_drawdown": 0.03894242366774377,
+    "win_rate": 75.0,
+    "avg_duration": 41.916666666666664
+  },
+  "selected_on": "scripts/research_leg_rule.py: top 10 on train (return per drawdown, >= 40 trades), best on validation (>= 10 trades); bear filter off/threshold on validation (sem filtro); holdout not read; per-trade results net of costs",
+  "stop_atr_timeframe": "1h"
+}

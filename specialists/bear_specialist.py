@@ -97,6 +97,10 @@ class BearTradingEnv(TrendFollowingEnv):
         self.relaxed_gates = False
         # [FIX SHORT-ONLY] BearSpecialist nunca abre Long, nem durante warmup
         self._specialist_short_only = True
+        # [TRAVA 4H] So abre short com a estrutura de 4h de baixa. Liga pelo
+        # contrato do modelo (short_requires_trend_4h), entao um Bear treinado
+        # sem a trava continua operando exatamente como antes.
+        self._short_requires_trend_4h = bool(getattr(self.config, 'BEAR_REQUIRE_TREND_4H', False))
     
     def _compute_trade_reward(
         self,

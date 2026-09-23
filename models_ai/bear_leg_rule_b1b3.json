@@ -1,0 +1,32 @@
+{
+  "agent": "bear",
+  "rule": {
+    "kind": "leg_confirm",
+    "min_steps": 2,
+    "min_steps_5m": 2,
+    "require_trend_4h": false,
+    "exit_trend_1h": false,
+    "min_adx_4h": 0.0,
+    "sl_mult": 2.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "train": {
+    "trades": 165,
+    "net_return": 0.2701837144531708,
+    "profit_factor": 1.227525173581153,
+    "max_drawdown": 0.16574654607267542,
+    "win_rate": 58.18181818181818,
+    "avg_duration": 61.38787878787879
+  },
+  "validation": {
+    "trades": 35,
+    "net_return": 0.1567946191695649,
+    "profit_factor": 1.8764917382987227,
+    "max_drawdown": 0.055586586867718245,
+    "win_rate": 68.57142857142857,
+    "avg_duration": 77.28571428571429
+  },
+  "selected_on": "scripts/research_leg_rule.py: top 10 on train (return per drawdown, >= 40 trades), best on validation (>= 10 trades); bear filter off/threshold on validation (sem filtro); holdout not read; per-trade results net of costs",
+  "stop_atr_timeframe": "1h"
+}

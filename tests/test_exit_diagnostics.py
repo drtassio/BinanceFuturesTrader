@@ -36,7 +36,7 @@ def test_episode_summary_captures_exits_before_logger_clears_trades():
     env = object.__new__(TrendFollowingEnv)
     env._episode_trades_log = [dict(exit_reason='Agent Decision', pnl_usd=5, duration=8)]
     env._log_episode_matrix = lambda: env._episode_trades_log.clear()
-    env._build_financial_snapshot = lambda *args: {'num_trades': 1}
+    env._build_financial_snapshot = lambda *args, **kwargs: {'num_trades': 1}
     env._current_episode_returns = [.01]
     env._current_episode_durations = [8]
     env._episode_reward_accumulator = .01

@@ -1774,13 +1774,16 @@ class ExecutionEngine:
             return None
 
     async def _place_mirror_stop(self, symbol: str, side, quantity: float, stop_price: float,
-                                 fallback_pct: Optional[float] = None, trade: Optional[Trade] = None) -> bool:
-        """Put the environment's stop on the exchange (closePosition)."""
+                                 fallback_pct: Optional[float] = None, trade: Optional[Trade] = None,
+                                 close_position: bool = True) -> bool:
+        """Put the environment's stop on the exchange (closePosition, or reduceOnly
+        with the quantity when it must coexist with the stop it replaces)."""
         # The fill hands over Trade.side (an Action); sync hands over +1/-1.
         value = getattr(side, "value", side)
         is_long = str(value).upper() == "BUY" if isinstance(value, str) else float(value) > 0
         result = await self.connector.place_stop_loss_order(
-            symbol=symbol, side="SELL" if is_long else "BUY", quantity=quantity, stop_price=stop_price)
+            symbol=symbol, side="SELL" if is_long else "BUY", quantity=quantity, stop_price=stop_price,
+            close_position=close_position)
         if result:
             self._mirror_stops[symbol] = float(stop_price)
             logger.info("🛑 [MIRROR] Stop do ambiente na corretora: %s %s @ %.2f", symbol,
@@ -1808,11 +1811,29 @@ class ExecutionEngine:
             old_orders = await self.connector.get_open_orders(symbol)
         except Exception:
             old_orders = []
+        closing_side = "SELL" if side > 0 else "BUY"
+        old_stops = [o for o in (old_orders or [])
+                     if str(o.get("type", "")).upper() in ("STOP_MARKET", "STOP")
+                     and str(o.get("side", closing_side)).upper() == closing_side]
 
-        success = await self._place_mirror_stop(symbol, side, quantity, stop_price)
+        # Depois de religar o bot, _mirror_stops esta vazio mas o stop continua na
+        # corretora. Se ja existe um stop igual ou mais apertado, ele e adotado:
+        # tentar outro closePosition daria -4130 a cada candle.
+        for item in old_stops:
+            price = float(item.get("stopPrice") or 0.0)
+            if price > 0 and ((side > 0 and price >= stop_price - tick) or (side < 0 and price <= stop_price + tick)):
+                self._mirror_stops[symbol] = price
+                logger.info("🛑 [MIRROR] Stop ja na corretora adotado: %s %s @ %.2f (id %s)", symbol,
+                            "long" if side > 0 else "short", price, item.get("orderId"))
+                return
+
+        # A Binance aceita um so stop closePosition por sentido: com um antigo ainda
+        # ativo, o novo vai reduceOnly com a quantidade, e o antigo sai depois.
+        success = await self._place_mirror_stop(symbol, side, quantity, stop_price,
+                                                close_position=not old_stops)
         if success:
-            # Se a nova entrou, cancela as antigas (não afeta a recém-criada, pois não está em old_orders)
-            for item in old_orders or []:
+            # Se a nova entrou, cancela os stops antigos (a recém-criada não está em old_stops)
+            for item in old_stops:
                 order_id = item.get("orderId")
                 if not order_id: continue
                 try:
@@ -1948,6 +1969,9 @@ class ExecutionEngine:
             # 2. Atualiza Caixa e Margem
             self.portfolio.cash = summary.get('cash', self.portfolio.cash)
             self.portfolio.margin_used = summary.get('margin_used', self.portfolio.margin_used)
+            # Saldo da carteira (sem PnL aberto): base do patrimonio em modo real.
+            if summary.get('total_value'):
+                self.portfolio.exchange_wallet_balance = float(summary['total_value'])
             
             logger.info(
                 f"✅ [RECONCILIATION] Sync concluído. Equity: ${summary['total_value']:,.2f}, "

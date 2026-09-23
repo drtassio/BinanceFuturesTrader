@@ -654,6 +654,13 @@ class TemporalAutoencoderPipeline:
                         should_exclude = True
                         break
             
+            # [FIX B1] Indicadores de 1m ficam fora: o bot nao opera pelo 1m, e no
+            # dataset historico eles repetem o ultimo valor por anos (o cache de
+            # 1m acaba em 2023). Os de 5m ficam, recalculados dos candles reais
+            # de 5m (scripts/repair_base_dataset.py).
+            if not should_exclude and (col_lower.endswith('_1m') or '_1m_' in col_lower):
+                should_exclude = True
+
             if should_exclude:
                 excluded.append(col)
             else:

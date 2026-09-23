@@ -457,10 +457,11 @@ def main() -> int:
             best.update(label="DAgger %d" % iteration, score=current, metrics=metrics)
             model.save(best_path)
             print("    -> novo melhor na validacao")
-    if best["label"] != "clonada":
-        # O ajuste fino por RL parte da melhor politica imitada.
-        from specialists.trend_specialist import ClippedSAC as _Loader
-        model.actor.load_state_dict(_Loader.load(str(best_path), device=model.device).actor.state_dict())
+    # O ajuste fino por RL parte da melhor politica imitada. Tambem quando a
+    # melhor e a clonada: o modelo em memoria e o do ultimo DAgger, e sem
+    # recarregar o ajuste fino partia dele mesmo quando piorou na validacao.
+    from specialists.trend_specialist import ClippedSAC as _Loader
+    model.actor.load_state_dict(_Loader.load(str(best_path), device=model.device).actor.state_dict())
     cloned = best["metrics"]
 
     # 4) Critic warm-up with the actor frozen.
@@ -510,6 +511,8 @@ def main() -> int:
     (run_dir / "feature_contract.json").write_text(
         json.dumps({"feature_columns": list(agent.feature_columns),
                     "stop_atr_timeframe": AIConfig.ENV_STOP_ATR_TIMEFRAME,
+                    # Trava de 4h do Bear: o espelho liga a mesma trava ao vivo.
+                    "short_requires_trend_4h": bool(args.agent == "bear" and AIConfig.BEAR_REQUIRE_TREND_4H),
                     # The leverage range the agent learned in; replay and live
                     # sizing must use the same one.
                     "leverage_bounds": [float(TradingConfig.MIN_LEVERAGE_PER_TRADE),

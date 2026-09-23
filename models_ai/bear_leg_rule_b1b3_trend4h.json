@@ -1,0 +1,18 @@
+{
+  "agent": "bear",
+  "rule": {
+    "kind": "leg_confirm",
+    "min_steps": 2,
+    "min_steps_5m": 2,
+    "require_trend_4h": true,
+    "exit_trend_1h": false,
+    "min_adx_4h": 0.0,
+    "sl_mult": 2.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "stop_atr_timeframe": "1h",
+  "registered_at": "2026-09-23T13:12:34.637878Z",
+  "selected_on": "models_ai/bear_leg_rule_b1b3.json (top 10 on train, best on validation) with ONE change: require_trend_4h=True, the Bear only shorts while the 4h structure is down. Rule set by the user as a principle (a short-only specialist must not sell against the higher-timeframe trend).",
+  "disclosure": "added AFTER the holdout of the unconstrained Bear was read (-14.4%, 22 of 38 shorts against a 4h uptrend lost $13.52). The holdout is therefore not a clean test for this agent; the forward testnet in shadow is."
+}

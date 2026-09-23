@@ -65,6 +65,9 @@ def load_specialist(agent_name: str, model_dir: Path):
     if not contract.get("training_frame_columns"):
         raise ValueError("contrato de %s sem training_frame_columns: modelo anterior ao espelho" % agent_name)
     AIConfig.ENV_STOP_ATR_TIMEFRAME = contract.get("stop_atr_timeframe", "15m")
+    if agent_name == "bear":
+        # Contratos anteriores nao tem a chave: o Bear deles segue sem a trava.
+        AIConfig.BEAR_REQUIRE_TREND_4H = bool(contract.get("short_requires_trend_4h", False))
     apply_leverage_bounds(contract)
     config = AIConfig()
     config.ECONOMIC_REWARD_ONLY = True

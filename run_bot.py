@@ -766,8 +766,9 @@ async def main_trading_loop():
                                 "order_id":      str(getattr(order, 'id', 'N/A')),
                                 "symbol":        signal.symbol,
                                 "action":        signal.action.value,
-                                "quantity":      signal.quantity,
-                                "price":         signal.entry_price,
+                                # Signal nao tem quantidade nem preco: vem da ordem.
+                                "quantity":      getattr(order, 'quantity', None),
+                                "price":         getattr(order, 'price', None),
                                 "stop_loss":     signal.stop_loss,
                                 "take_profit":   signal.take_profit,
                                 "confidence":    signal.confidence,

@@ -531,41 +531,56 @@ class CryptoRegimeDetector:
         """
         Remove regime changes that don't persist for min_regime_duration.
         [F3 FIX] Usa confiança para preservar segmentos curtos mas confiantes.
-        
-        Um segmento de 4 bars com confiança 0.90 indica transição rápida real 
-        em crypto — não deve ser absorvido como ruído.
+
+        [FIX B3] Causal. A versao anterior media o segmento inteiro (duracao e
+        confianca media) e so entao decidia se o absorvia, ou seja, o rotulo da
+        barra t dependia de quantas barras o segmento ainda duraria. Ao vivo o
+        ultimo segmento nunca era absorvido (seg_end == n), entao treino e bot
+        viam rotulos diferentes. Agora e uma histerese: um regime novo so
+        substitui o atual depois de durar min_regime_duration barras seguidas,
+        ou na hora se a confianca da barra for alta (transicao rapida real).
         """
         if len(regimes) < self.config.min_regime_duration:
             return regimes
-        
-        smoothed = regimes.copy()
-        
-        # Passe linear O(n): identifica segmentos e mescla os curtos e pouco confiantes
-        n = len(smoothed)
-        i = 0
-        while i < n:
-            seg_start = i
-            seg_regime = smoothed[i]
-            while i < n and smoothed[i] == seg_regime:
-                i += 1
-            seg_end = i  # exclusive
 
-            duration = seg_end - seg_start
-            
-            # [F3 FIX] Calcula confiança média do segmento
-            seg_conf = float(np.mean(confidence[seg_start:seg_end]))
-            
-            # Duração mínima adaptativa: curtos + baixa confiança = ruído
-            # curtos + alta confiança = transição rápida genuina (preservar)
-            high_confidence_threshold = 0.75
-            is_high_confidence = seg_conf >= high_confidence_threshold
-            
-            if duration < self.config.min_regime_duration and seg_start > 0 and not is_high_confidence and seg_end < n:
-                # Segmento curto e baixa confiança: absorve no regime anterior
-                prev_regime = smoothed[seg_start - 1]
-                smoothed[seg_start:seg_end] = prev_regime
+        high_confidence_threshold = 0.75
+        smoothed = regimes.copy()
+        current = regimes[0]
+        candidate, run = current, 0
+        for t in range(1, len(regimes)):
+            raw = regimes[t]
+            if raw == current:
+                candidate, run = current, 0
+            else:
+                run = run + 1 if raw == candidate else 1
+                candidate = raw
+                if run >= self.config.min_regime_duration or confidence[t] >= high_confidence_threshold:
+                    current, run = raw, 0
+            smoothed[t] = current
 
         return smoothed
+
+    def _hmm_filtered_states(self, features_scaled: np.ndarray) -> np.ndarray:
+        """[FIX B3] Estado HMM mais provavel dado so o passado (forward filtering).
+
+        hmm_model.predict() usa Viterbi, que escolhe a sequencia inteira de
+        estados olhando a janela toda: o estado da barra t mudava conforme as
+        barras seguintes. Aqui alpha_t = P(S_t | O_0..t), a mesma recursao de
+        predict_online(), vetorizada em espaco log.
+        """
+        from scipy.special import logsumexp
+
+        log_b = self.hmm_model._compute_log_likelihood(features_scaled)
+        log_a = np.log(self.hmm_model.transmat_ + 1e-300)
+        log_alpha = np.log(self.hmm_model.startprob_ + 1e-300) + log_b[0]
+        log_alpha -= logsumexp(log_alpha)
+        states = np.empty(len(features_scaled), dtype=int)
+        states[0] = int(np.argmax(log_alpha))
+        for t in range(1, len(features_scaled)):
+            log_alpha = logsumexp(log_alpha[:, None] + log_a, axis=0) + log_b[t]
+            log_alpha -= logsumexp(log_alpha)
+            states[t] = int(np.argmax(log_alpha))
+        return states
     
     def fit_predict(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -937,7 +952,8 @@ class CryptoRegimeDetector:
         # 2. HMM Prediction
         if self.hmm_model:
             try:
-                hidden_states = self.hmm_model.predict(features_scaled)
+                # [FIX B3] Forward filtering, nao Viterbi (que olha barras futuras)
+                hidden_states = self._hmm_filtered_states(features_scaled)
                 # [FIX] Usa mapeamento salvo durante fit() em vez de recalcular pelo índice
                 # da coluna 0, que muda se funding_rate for adicionado/removido entre sessões
                 mapping = getattr(self, '_hmm_state_mapping', None)

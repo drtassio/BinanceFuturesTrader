@@ -44,4 +44,6 @@ def test_forced_exit_pays_both_fees_and_uses_margin_returns(monkeypatch):
                        - 2 * captured["notional"] * env.trading_config.TAKER_FEE)
     assert summary["final_net_worth"] == pytest.approx(expected_equity)
     margin = captured["notional"] / abs(captured["leverage"])
-    assert summary["avg_return_pct"] == pytest.approx(captured["pnl"] / margin)
+    # [C1] The per-trade return behind PF and win rate is NET: both fees come off.
+    net = captured["pnl"] - 2 * captured["notional"] * env.trading_config.TAKER_FEE
+    assert summary["avg_return_pct"] == pytest.approx(net / margin)

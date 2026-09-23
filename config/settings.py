@@ -378,6 +378,9 @@ class AIConfig(Config):
     # only valid with the value it was trained under; it is recorded in the
     # run's feature_contract.json.
     ENV_STOP_ATR_TIMEFRAME = os.environ.get('ENV_STOP_ATR_TIMEFRAME', '15m')
+    # Bear so abre short com a estrutura de 4h de baixa (cz_trend_4h < 0). No
+    # treino liga por esta variavel; ao vivo o espelho liga pelo contrato do modelo.
+    BEAR_REQUIRE_TREND_4H = os.environ.get('BEAR_REQUIRE_TREND_4H', 'False').lower() in ('true', '1', 't')
 
     # Legacy profit/EMA exits exist only in the Ranger simulator. Disable
     # them by default: learned exits must come from policy votes, while

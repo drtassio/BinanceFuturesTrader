@@ -834,6 +834,7 @@ class TrendFollowingEnv(gym.Env):
         self.balance = self.initial_balance
         self.net_worth = self.initial_balance
         self._trade_initial_net_worth = self.initial_balance
+        self._last_closed_net_pnl = None
         self.position = 0.0
         self.entry_price = 0.0
         self.steps_in_position = 0
@@ -1097,6 +1098,12 @@ class TrendFollowingEnv(gym.Env):
         _margin_minimum = self.initial_balance * 0.001
         if self.net_worth < _margin_minimum:
             self.net_worth = _margin_minimum
+        # [FIX C1] Resultado LIQUIDO do trade que acabou de fechar: taxa de entrada,
+        # funding cobrado durante a posicao e taxa de saida ja sairam do net_worth.
+        # Guardado aqui, antes de qualquer reentrada no mesmo passo mudar
+        # _trade_initial_net_worth.
+        self._last_closed_net_pnl = float(
+            self.net_worth - getattr(self, '_trade_initial_net_worth', self.initial_balance))
         self.episode_peak_net_worth = max(self.episode_peak_net_worth, self.net_worth)
         # [FIX C4] Atualiza max drawdown no fechamento do trade. Antes o slippage e as taxas
         # abaixavam o net_worth mas o drawdown máximo nunca era atualizado.
@@ -1348,16 +1355,23 @@ class TrendFollowingEnv(gym.Env):
         return float(np.clip(reward, -100.0, 100.0))
 
 
-    def _build_financial_snapshot(self, returns: List[float], durations: List[int]) -> Dict[str, float]:
+    def _build_financial_snapshot(self, returns: List[float], durations: List[int],
+                                  pnl_usd: Optional[List[float]] = None) -> Dict[str, float]:
         """Calcula mÃƒÂ©tricas financeiras robustas a partir da lista de retornos por trade.
         - PF robusto: evita explosÃƒÂ£o quando perdas ~0 usando denominador suavizado proporcional ao lucro.
         - Sinaliza confiabilidade do PF.
+        - [FIX C1] Com pnl_usd (resultado liquido de cada trade em dolares), o PF e
+          lucro bruto / prejuizo bruto em dolares, a mesma base do retorno total.
+          Somar retornos percentuais pesava igual trades de tamanhos diferentes:
+          com o tamanho variando (orcamento de risco, juros compostos) o PF
+          passava de 1 com o saldo negativo.
         """
         wins = [r for r in returns if r > 0]
         losses = [r for r in returns if r < 0]
         total_trades = len(returns)
-        gross_profit = float(np.sum(wins)) if wins else 0.0
-        gross_loss_abs = float(np.sum([-r for r in losses])) if losses else 0.0
+        pf_basis = [float(p) for p in pnl_usd] if pnl_usd and len(pnl_usd) == total_trades else returns
+        gross_profit = float(np.sum([p for p in pf_basis if p > 0])) if pf_basis else 0.0
+        gross_loss_abs = float(np.sum([-p for p in pf_basis if p < 0])) if pf_basis else 0.0
         smooth_den = max(1e-6, gross_loss_abs)
         dynamic_floor = PF_DYNAMIC_FLOOR_FRACTION * max(0.0, gross_profit)
         denom = max(smooth_den, dynamic_floor, 1e-6)
@@ -1452,7 +1466,9 @@ class TrendFollowingEnv(gym.Env):
     def get_financial_stats(self) -> Dict[str, float]:
         """Retorna mÃƒÂ©tricas financeiras resumidas do episÃƒÂ³dio atual ou do ÃƒÂºltimo episÃƒÂ³dio concluÃƒÂ­do."""
         if self._current_episode_returns:
-            return self._build_financial_snapshot(self._current_episode_returns, self._current_episode_durations)
+            return self._build_financial_snapshot(
+                self._current_episode_returns, self._current_episode_durations,
+                pnl_usd=[float(t.get('pnl_usd', 0.0)) for t in getattr(self, '_episode_trades_log', [])])
         if self._last_episode_summary is not None:
             return dict(self._last_episode_summary)
         return {
@@ -1572,9 +1588,11 @@ class TrendFollowingEnv(gym.Env):
         # The matrix logger clears its trade buffer; capture before logging.
         from learning.exit_diagnostics import summarize_exits
         exit_diagnostics = summarize_exits(self._episode_trades_log)
+        pnl_usd = [float(t.get('pnl_usd', 0.0)) for t in self._episode_trades_log]
         # Imprime matriz de trades antes de resetar os dados
         self._log_episode_matrix()
-        summary = self._build_financial_snapshot(list(self._current_episode_returns), self._current_episode_durations)
+        summary = self._build_financial_snapshot(list(self._current_episode_returns), self._current_episode_durations,
+                                                 pnl_usd=pnl_usd)
         summary['episode_reward'] = float(self._episode_reward_accumulator)
         summary['exit_reason_counts'] = self.get_exit_reason_counts()
         summary['exit_diagnostics'] = exit_diagnostics
@@ -2436,6 +2454,14 @@ class TrendFollowingEnv(gym.Env):
             should_open_short = False
         if getattr(self, '_specialist_short_only', False):
             should_open_long = False
+        # [TRAVA 4H] Um Bear treinado com a trava so abre short com a estrutura de
+        # 4h de baixa. Imposto aqui, e nao so ensinado pela professora: o clone a
+        # desobedecia (39 shorts no holdout, 22 contra o 4h de alta). O espelho
+        # usa este mesmo ambiente, entao treino, backtest e conta obedecem igual.
+        if should_open_short and getattr(self, '_short_requires_trend_4h', False):
+            if float(current_row.get('cz_trend_4h', 0.0)) >= 0.0:
+                should_open_short = False
+                info['_blocked_by_trend_4h'] = True
 
         is_opening_or_reversing = should_open_long or should_open_short
         if should_open_long:
@@ -2876,6 +2902,14 @@ class TrendFollowingEnv(gym.Env):
             margin_basis = float(max(margin_basis, 1e-6))
             trade_return_raw = pnl_realized / margin_basis if np.isfinite(pnl_realized) else 0.0
             trade_return_pct = trade_return_raw
+            # [FIX C1] PF, taxa de acerto e Sharpe (e portanto a selecao e a
+            # aprovacao) usam o retorno LIQUIDO. pnl_realized e so o movimento do
+            # preco; taxas e funding saem do net_worth por fora, e antes um PF > 1
+            # convivia com retorno total negativo.
+            net_trade_pnl = getattr(self, '_last_closed_net_pnl', None)
+            net_trade_pnl = float(pnl_realized if net_trade_pnl is None else net_trade_pnl)
+            self._last_closed_net_pnl = None
+            net_trade_return = net_trade_pnl / margin_basis if np.isfinite(net_trade_pnl) else 0.0
             duration_steps_raw = closed_trade_duration if closed_trade_duration is not None else self.steps_in_position
             duration_steps = int(max(1, duration_steps_raw))
             pnl_realized_val = float(pnl_realized) if 'pnl_realized' in locals() else 0.0
@@ -2897,8 +2931,8 @@ class TrendFollowingEnv(gym.Env):
             within_quota = True if max_trades is None else (self._trades_in_episode < max_trades)
             
             if within_quota:
-                self.trade_return_history.append(trade_return_pct)
-                self._current_episode_returns.append(trade_return_pct)
+                self.trade_return_history.append(net_trade_return)
+                self._current_episode_returns.append(net_trade_return)
                 self._current_episode_durations.append(duration_steps)
                 self._trades_in_episode += 1
                 
@@ -2951,9 +2985,8 @@ class TrendFollowingEnv(gym.Env):
                 trade_side = closed_trade_side or ('long' if prev_position_sign > 0 else 'short' if prev_position_sign < 0 else 'flat')
                 _exit_price = float(close_price) if 'close_price' in locals() else float(current_price)
                 # [FIX C1] Usa net_pnl real para métricas de Profit Factor e relatórios
-                net_pnl = self.net_worth - getattr(self, '_trade_initial_net_worth', self.initial_balance)
                 info['trade'] = {
-                    'pnl': float(net_pnl),
+                    'pnl': float(net_trade_pnl),
                     'duration_steps': duration_steps,
                     'side': trade_side,
                     'entry_price': float(self.entry_price),
@@ -2966,8 +2999,8 @@ class TrendFollowingEnv(gym.Env):
                     'entry': float(self.entry_price),
                     'exit': _exit_price,
                     'duration': duration_steps,
-                    'pnl_usd': float(net_pnl),
-                    'pnl_pct': float(trade_return_pct) * 100.0,
+                    'pnl_usd': float(net_trade_pnl),
+                    'pnl_pct': float(net_trade_return) * 100.0,
                     'exit_reason': exit_reason or 'Agent Decision',
                     'stop_protection_kind': info.get('stop_protection_kind'),
                     'net_worth': float(self.net_worth),
@@ -3098,9 +3131,14 @@ class TrendFollowingEnv(gym.Env):
             
             self._apply_realized_pnl(pnl_realized)
             info['exit_reason'] = 'Episode End'
-            
-            self.trade_return_history.append(trade_return_pct)
-            self._current_episode_returns.append(trade_return_pct)
+
+            # [FIX C1] Metricas com o retorno liquido (taxas e funding incluidos)
+            net_trade_pnl = getattr(self, '_last_closed_net_pnl', None)
+            net_trade_pnl = float(pnl_realized if net_trade_pnl is None else net_trade_pnl)
+            net_trade_return = net_trade_pnl / margin_basis
+            self._last_closed_net_pnl = None
+            self.trade_return_history.append(net_trade_return)
+            self._current_episode_returns.append(net_trade_return)
             self._current_episode_durations.append(self.steps_in_position)
             self._trades_in_episode += 1
             _ep_side = 'LONG' if self.position > 0 else 'SHORT'
@@ -3110,8 +3148,8 @@ class TrendFollowingEnv(gym.Env):
                 'entry': float(self.entry_price),
                 'exit': float(close_price),
                 'duration': self.steps_in_position,
-                'pnl_usd': float(pnl_realized),
-                'pnl_pct': float(trade_return_pct) * 100.0,
+                'pnl_usd': net_trade_pnl,
+                'pnl_pct': net_trade_return * 100.0,
                 'exit_reason': 'Episode End',
                 'net_worth': float(self.net_worth),
             })

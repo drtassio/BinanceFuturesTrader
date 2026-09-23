@@ -737,15 +737,20 @@ class BinanceConnector:
             logger.error(f"[CONECTOR] ❌ Erro inesperado no stop para {symbol}: {e}", exc_info=True)
             return None
 
-    async def place_stop_loss_order(self, symbol: str, side: str, quantity: float, stop_price: float) -> Optional[Dict[str, Any]]:
+    async def place_stop_loss_order(self, symbol: str, side: str, quantity: float, stop_price: float,
+                                    close_position: bool = True) -> Optional[Dict[str, Any]]:
         """
         Coloca uma ordem de Stop Loss Market (Reduce Only).
-        
+
         Args:
             symbol: Par de trading
             side: 'SELL' (para Long) ou 'BUY' (para Short)
             quantity: Quantidade a fechar
             stop_price: Preço de disparo do stop
+            close_position: True = closePosition (fecha a posicao inteira). A Binance
+                aceita so UM stop closePosition por sentido (-4130), entao para
+                substituir um stop existente sem ficar desprotegido o novo vai com
+                close_position=False: reduceOnly com a quantidade.
         """
         if not symbol or not side or quantity <= 0 or stop_price <= 0:
             logger.error(f"[ERRO CONECTOR] Parametros invalidos para Stop Loss: {symbol} {side} {quantity} @ {stop_price}")
@@ -765,11 +770,16 @@ class BinanceConnector:
             'side': side,
             'type': 'STOP_MARKET',
             'triggerPrice': f"{stop_price:.{price_precision}f}",
-            'closePosition': 'true',
             'workingType': 'MARK_PRICE'
         }
-        
-        logger.info(f"[CONECTOR] Colocando Stop Loss: {side} {symbol} @ {algo_params['triggerPrice']} (ClosePosition)...")
+        if close_position:
+            algo_params['closePosition'] = 'true'
+        else:
+            algo_params['quantity'] = f"{quantity:.{qty_precision}f}"
+            algo_params['reduceOnly'] = 'true'
+
+        logger.info(f"[CONECTOR] Colocando Stop Loss: {side} {symbol} @ {algo_params['triggerPrice']} "
+                    f"({'ClosePosition' if close_position else 'ReduceOnly %s' % algo_params.get('quantity')})...")
         
         try:
             result = await self._make_request('POST', '/fapi/v1/algoOrder', params=algo_params, signed=True)
@@ -786,8 +796,12 @@ class BinanceConnector:
             'side': side,
             'type': 'STOP_MARKET',
             'stopPrice': f"{stop_price:.{price_precision}f}",
-            'closePosition': 'true'
         }
+        if close_position:
+            params['closePosition'] = 'true'
+        else:
+            params['quantity'] = f"{quantity:.{qty_precision}f}"
+            params['reduceOnly'] = 'true'
         try:
             result = await self._make_request('POST', '/fapi/v1/order', params=params, signed=True)
             if result:

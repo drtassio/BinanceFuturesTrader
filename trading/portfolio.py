@@ -26,6 +26,9 @@ class PortfolioOptimizer:
         # Novos atributos para gerenciar a alavancagem e exposição
         self.margin_used = 0.0 # Total de margem alocada em posições abertas
         self.total_notional_value = 0.0 # Valor nocional total de todas as posições abertas
+        # Saldo da carteira na corretora (walletBalance, sem PnL aberto), gravado a
+        # cada sincronizacao. None fora do modo real.
+        self.exchange_wallet_balance: Optional[float] = None
 
         # Inicializa o histórico com o capital inicial
         self.portfolio_value_history[datetime.now(timezone.utc)] = self.initial_capital
@@ -194,6 +197,14 @@ class PortfolioOptimizer:
         # O valor total do portfólio é o cash + PnL não realizado
         # Assumindo que 'cash' já reflete as margens e PnLs realizados
         total_value = self.cash + total_unrealized_pnl
+        # Em modo real 'cash' vem da corretora como saldo DISPONIVEL, que ja
+        # descontou a margem das posicoes. cash + PnL deixava a margem de fora:
+        # com uma posicao aberta o patrimonio caia ~12% e o gestor de risco via um
+        # drawdown que nao existia. Com a carteira sincronizada, patrimonio =
+        # saldo da carteira + PnL aberto.
+        wallet = getattr(self, 'exchange_wallet_balance', None)
+        if wallet:
+            total_value = float(wallet) + total_unrealized_pnl
         
         # Sincronização de Timezone para evitar erro de Comparação
         ts = timestamp if timestamp else datetime.now(timezone.utc)

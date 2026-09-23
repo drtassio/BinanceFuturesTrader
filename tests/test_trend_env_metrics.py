@@ -73,6 +73,36 @@ class TrendEnvMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(snapshot["profit_factor"], 2.6, places=6)
         self.assertAlmostEqual(snapshot["profit_factor_raw"], 2.6, places=6)
 
+    def test_closed_trade_result_is_net_of_fees_and_funding(self) -> None:
+        """C1: the per-trade result behind PF and win rate pays every cost.
+
+        A trade that gains 0.05% on the price but pays two taker fees and
+        funding loses money; it must count as a loss, not as a win.
+        """
+        env = self.env
+        fee = env.trading_config.TAKER_FEE
+        notional = 3000.0
+        env.net_worth = 1000.0
+        env._trade_initial_net_worth = 1000.0            # before the entry fee
+        env.net_worth -= notional * fee                    # entry fee
+        env.net_worth -= 0.4                               # funding while in position
+        env.initial_notional_value = notional
+        env.pnl_since_entry = 0.0
+        gross = notional * 0.0005
+        env._apply_realized_pnl(gross)                     # exit fee charged inside
+        expected = gross - 2 * notional * fee - 0.4
+        self.assertAlmostEqual(env._last_closed_net_pnl, expected, places=9)
+        self.assertLess(env._last_closed_net_pnl, 0.0)
+        self.assertAlmostEqual(env.net_worth - 1000.0, expected, places=9)
+
+    def test_profit_factor_uses_dollars_when_given(self) -> None:
+        """C1: two +10% trades on a small stake and one -10% trade on a large one
+        lose money; the PF must say so (dollars), not 2.0 (percent sums)."""
+        snapshot = self.env._build_financial_snapshot([0.10, 0.10, -0.10], [5, 5, 5],
+                                                      pnl_usd=[10.0, 10.0, -50.0])
+        self.assertAlmostEqual(snapshot["profit_factor"], 0.4, places=6)
+        self.assertAlmostEqual(snapshot["win_rate_pct"], 100 * 2 / 3, places=6)
+
     def test_sharpe_reward_consistent_with_episode_returns(self) -> None:
         """Sharpe reward deve refletir o sinal da média de retornos do episódio atual."""
         # Força retornos do episódio com média positiva

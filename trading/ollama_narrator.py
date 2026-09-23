@@ -23,6 +23,7 @@ import aiohttp
 import json
 import sys
 from datetime import datetime, timedelta
+import pandas as pd
 from typing import Dict, Any, Optional, Tuple
 
 from utils.logger import get_logger
@@ -91,6 +92,7 @@ COMO ESCREVER:
 - Chame os tempos gráficos de "gráfico de 15 minutos", "de 5 minutos", "de 4 horas" e "das últimas 12 horas".
 - {focus} Não abra com "Olha", "Olha só", "Veja", "Na tela", "O mercado está" nem fale da tela ou do gráfico em si.
 - Conte o que o mercado está fazendo agora (se tem escada ou só vai-e-vem, para onde o 4h aponta, se o fluxo está comprador ou vendedor, o clima do tape e do sentimento), fiel ao RESUMO DO GRÁFICO: nunca diga que há escada se o resumo diz que não há.
+- Se um agente ENTROU NESTE CANDLE ou a ação do bot é ABRIR POSIÇÃO, a PRIMEIRA frase anuncia a entrada: o lado (comprado ou vendido), o preço de entrada e o motivo (a escada confirmada). Se a conta está posicionada, diga desde quando, o preço de entrada, como vai o resultado e onde está o stop.
 - Diga de forma simples o que o bot está esperando: cite só o que mais falta (1 ou 2 coisas) para o LONG ou o SHORT entrar, sem recitar a lista toda. Se um agente está posicionado, diga como vai o trade e o que faria o bot sair.
 - Use só os fatos acima; não invente números. Não fale em "reversão", "confiança" nem "sinal de reversão".
 """
@@ -174,8 +176,13 @@ def mirror_facts(row, view: Dict) -> Dict[str, str]:
             agents.append("- %s: fora." % name)
             continue
         pnl = sh.side * (price / sh.entry_price - 1) * 100 if price and sh.entry_price else 0.0
-        agents.append("- %s: %s na simulação desde a entrada a $%s, resultado %+.2f%%, stop $%s%s." % (
-            name, "comprado" if sh.side > 0 else "vendido", "{:,.0f}".format(sh.entry_price), pnl,
+        since = ""
+        if getattr(sh, "entry_bar", None) is not None:
+            # entry_bar e a abertura do candle de 15m; o bot decide no fechamento
+            since = " (entrou no candle que fechou %s UTC)" % (
+                (pd.Timestamp(sh.entry_bar) + pd.Timedelta(minutes=15)).strftime("%d/%m %H:%M"))
+        agents.append("- %s: %s na simulação desde a entrada a $%s%s, resultado %+.2f%%, stop $%s%s." % (
+            name, "comprado" if sh.side > 0 else "vendido", "{:,.0f}".format(sh.entry_price), since, pnl,
             "{:,.0f}".format(sh.stop_price) if sh.stop_price else "—",
             ", ENTROU NESTE CANDLE" if sh.entered_on_last_bar else ""))
     acc = view.get("account_side", 0)
