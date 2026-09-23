@@ -1,0 +1,22 @@
+{
+  "all_passed": true,
+  "block": "holdout",
+  "window": 700,
+  "checks": 40,
+  "seed": 7,
+  "live_end": null,
+  "artifact_hashes": {
+    "meta_labeler.joblib": "297851a9bb8e29f147a2f96ded41d222443e73a05be40a8698bfc2fbf5643863",
+    "bull_edge_rule.json": "a476b165a9d5503bcab91c84a3877d4d451a8d1761835530dade00b0b5d88c21",
+    "bear_edge_rule.json": "b72d928370a468155518f1240510540e3bb102175cae4edaaa5952f3a580cbd5",
+    "edge_policy.py": "9c53db02bc6d6d019ddf8638cfa9b48892ea39a11ca5fd62a2ca106a5f4ba97f",
+    "teacher_policy.py": "1c25ab084f34b42d76eb27b8878c248095f229dee024ac5e8ca8c02c4e59093b",
+    "settings.py": "e0a46e35b92c1d9b5178994cf7293569484b34e707d7c05e17e1d9c43f6189d1",
+    "trend_specialist.py": "ad682a2c111af6fe6eefa66105175bfc012f50115a98085a140d4d9e489ae5cd",
+    "bull_specialist.py": "023d3d3170e06a8ca8f75054e0e96b731c6074348a7f2cef167e3e0934836081",
+    "bear_specialist.py": "66771352b1979273a104fbb6c3f1beaee3c34ca0cae80292ce08aa05d5065ab6",
+    "ai_controller.py": "077a0a67d91db6924957050bb294a18d139b9ab00860f786f93017176a4c9182",
+    "approve_teacher_oos.py": "20eadd83d6439719af1a1ee3fc26fc859701fd13c72c8658e1ca4e9213318433",
+    "verify_teacher_parity.py": "9d086a0d399f01406b1274745a9219c4b7bfc4a6ce19ce3365dda7da65715d93"
+  }
+}

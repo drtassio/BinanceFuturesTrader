@@ -1,0 +1,91 @@
+{
+  "policy": "edge_teacher",
+  "generated_at": "2026-09-17T01:28:45.693877+00:00",
+  "holdout": [
+    "2025-11-15 03:45:00",
+    "2026-03-21 02:45:00"
+  ],
+  "buy_and_hold": -0.2664715902311998,
+  "agents": [
+    "bull",
+    "bear"
+  ],
+  "rules": {
+    "bull": {
+      "enter_probability": 0.5,
+      "enter_edge": 0.1,
+      "exit_edge": 0.0,
+      "require_regime": true,
+      "sl_mult": 5.0,
+      "leverage": 3.0,
+      "vote": 0.8,
+      "enter_probability_short": null
+    },
+    "bear": {
+      "enter_probability": 0.3,
+      "enter_edge": 0.1,
+      "exit_edge": -0.05,
+      "require_regime": true,
+      "sl_mult": 5.0,
+      "leverage": 3.0,
+      "vote": 0.8,
+      "enter_probability_short": null
+    }
+  },
+  "thresholds": {
+    "min_sharpe": 0.5,
+    "min_profit_factor": 1.1,
+    "max_drawdown": 0.15,
+    "min_net_return": 0.0,
+    "min_trades": 20
+  },
+  "per_agent": {
+    "bull": {
+      "net_return": 0.025575016131691886,
+      "max_drawdown": 0.056219787072778755,
+      "sharpe_ratio": 0.6864215944406605,
+      "profit_factor": 1.565714545699459,
+      "num_trades": 10,
+      "win_rate": 0.5
+    },
+    "bear": {
+      "net_return": 0.5111923275081387,
+      "max_drawdown": 0.13470744030491946,
+      "sharpe_ratio": 3.2541507538728958,
+      "profit_factor": 2.95650063810902,
+      "num_trades": 53,
+      "win_rate": 0.5849056603773585
+    }
+  },
+  "combined": {
+    "net_return": 0.5498410956622466,
+    "max_drawdown": 0.15945591315540117,
+    "sharpe_ratio": 3.3203239242801175,
+    "profit_factor": 2.7083911602628916,
+    "num_trades": 63,
+    "win_rate": 0.5714285714285714
+  },
+  "checks": {
+    "no_overlapping_positions": true,
+    "sharpe": true,
+    "profit_factor": true,
+    "drawdown": false,
+    "net_return": true,
+    "trades": true
+  },
+  "all_passed": false,
+  "artifact_hashes": {
+    "meta_labeler.joblib": "297851a9bb8e29f147a2f96ded41d222443e73a05be40a8698bfc2fbf5643863",
+    "bull_edge_rule.json": "a476b165a9d5503bcab91c84a3877d4d451a8d1761835530dade00b0b5d88c21",
+    "bear_edge_rule.json": "b72d928370a468155518f1240510540e3bb102175cae4edaaa5952f3a580cbd5",
+    "edge_policy.py": "9c53db02bc6d6d019ddf8638cfa9b48892ea39a11ca5fd62a2ca106a5f4ba97f",
+    "teacher_policy.py": "1c25ab084f34b42d76eb27b8878c248095f229dee024ac5e8ca8c02c4e59093b",
+    "settings.py": "e0a46e35b92c1d9b5178994cf7293569484b34e707d7c05e17e1d9c43f6189d1",
+    "trend_specialist.py": "ad682a2c111af6fe6eefa66105175bfc012f50115a98085a140d4d9e489ae5cd",
+    "bull_specialist.py": "023d3d3170e06a8ca8f75054e0e96b731c6074348a7f2cef167e3e0934836081",
+    "bear_specialist.py": "66771352b1979273a104fbb6c3f1beaee3c34ca0cae80292ce08aa05d5065ab6",
+    "ai_controller.py": "077a0a67d91db6924957050bb294a18d139b9ab00860f786f93017176a4c9182",
+    "approve_teacher_oos.py": "20eadd83d6439719af1a1ee3fc26fc859701fd13c72c8658e1ca4e9213318433",
+    "verify_teacher_parity.py": "9d086a0d399f01406b1274745a9219c4b7bfc4a6ce19ce3365dda7da65715d93"
+  }
+}

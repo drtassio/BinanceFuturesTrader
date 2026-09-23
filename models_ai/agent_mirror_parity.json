@@ -1,0 +1,20 @@
+{
+  "all_passed": true,
+  "replay_bars": 3000,
+  "data": "C:\\Users\\melim\\OneDrive\\\u00c1rea de Trabalho\\BinanceFuturesTrader\\data\\history_causal.parquet",
+  "results": {
+    "bull": {
+      "checks": 20,
+      "mismatches": [],
+      "in_trade": 6
+    }
+  },
+  "artifact_hashes": {
+    "bull_specialist_sac.zip": "6917b376d675e27f33b615c719f4cf845f6b6d0967606c2a019090f62ad39e20",
+    "bull_specialist_scaler.joblib": "b991af82326c07716142aca8181426565002ecdc5d98bfeb19b719b29641120c",
+    "bull_feature_contract.json": "c87c97422276d2a6d56a3a8beddc7915d92bd8abf8f1afcdc69c2506b8b2c7ce",
+    "agent_mirror.py": "4bf3df46916d58d613e9d4d4fb42a2539f89a262d5b400242245d50cc8cd9bf3",
+    "trend_specialist.py": "0c7a58798439a7e5b7008c550044a2d8385f7597c4da36a676b502902698e23c",
+    "causal_features.py": "9ee0af9d9ba2a28cb16f9f7f61c8dd117d7a59120e97b78a47ff8d1261a41df8"
+  }
+}
