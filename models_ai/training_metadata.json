@@ -1,5 +1,5 @@
 {
-    "last_full_training_date": "2026-09-15T11:37:28.757572+00:00",
+    "last_full_training_date": "2026-09-21T12:08:45.942439+00:00",
     "models": {
         "autoencoder_model": {
             "trained": true,
@@ -9,17 +9,17 @@
         "bull_specialist_sac": {
             "trained": true,
             "path": "bull_specialist_sac.zip",
-            "trained_on": "2026-09-15T11:05:50.776179+00:00"
+            "trained_on": "2026-09-21T12:08:45.942439+00:00"
         },
         "bear_specialist_sac": {
             "trained": true,
             "path": "bear_specialist_sac.zip",
-            "trained_on": "2026-09-15T11:22:52.795165+00:00"
+            "trained_on": "2026-09-18T12:22:22.664062+00:00"
         },
         "ranger_specialist_sac": {
             "trained": true,
             "path": "ranger_specialist_sac.zip",
-            "trained_on": "2026-09-15T11:37:28.757572+00:00"
+            "trained_on": "2026-09-18T12:22:22.749455+00:00"
         }
     },
     "final_feature_count": 263,

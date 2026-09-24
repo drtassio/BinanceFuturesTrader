@@ -1,7 +1,7 @@
 {
   "agent": "bull",
-  "promoted_at": "2026-09-21T12:09:26.752361+00:00",
-  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\clip\\bull_guided_20260921T113340",
+  "promoted_at": "2026-09-24T09:30:27.593523+00:00",
+  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\b1b3_c1\\bull_guided_20260923T121135_p33340",
   "observation_size": 780,
   "feature_columns": [
     "log_return_15m",
@@ -183,8 +183,8 @@
     "hidden_feature_31",
     "sdae_recon_error"
   ],
-  "model_sha256": "2430601b013dae664445cd6cf060aaf29357a3ff9bc09ff3ff8e835aab08332f",
-  "scaler_sha256": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
+  "model_sha256": "da2b7adc56b56adcb963fe77836742745f741fe1cde841e954f92075c1bd4632",
+  "scaler_sha256": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
   "stop_atr_timeframe": "1h",
   "leverage_bounds": [
     1.0,

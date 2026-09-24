@@ -1,15 +1,16 @@
 {
-  "approved": true,
+  "approved": false,
   "agents": [
+    "bear",
     "bull"
   ],
-  "generated_at": "2026-09-22T09:22:01.808785+00:00",
+  "generated_at": "2026-09-24T09:44:12.496164+00:00",
   "criteria_doc": "Approval for specialists that operate through trading/agent_mirror.py.\n\nA specialist may trade only when all of this holds, for the exact files in\nmodels_ai/ (hash-bound; replacing any of them voids the approval):\n\n1. The promoted model is the model of the training run whose report is judged\n   (same SHA-256).\n2. The mirror replay reproduces that model's backtest (agent_mirror_parity.json).\n3. Performance, deterministic policy, blocks the model selection never used for\n   training (validation) or never saw at all (holdout):\n\n   * train:      net return > 0\n   * validation: net return > 0, profit factor >= 1.2, drawdown <= 15%, >= 20 trades\n   * holdout:    profit factor >= 1.1, drawdown <= 15%, >= 20 trades, beats buy and hold,\n                 and net return > 0 \u2014 except that a directional specialist whose\n                 holdout moved against its side by more than 20% must instead keep\n                 its loss within 5%. A long-only specialist is not expected to earn\n                 in a crash; it is expected to stay out of it.\n\nThese criteria were written down on 2026-09-17, before the trend Bull's\nresults existed. They are printed with every verdict.\n\n    python scripts/approve_agent_mirror.py --agent bull --run cloud/artifacts/trend/bull_guided_<stamp>\n",
   "per_agent": {
     "bull": {
       "approved": true,
-      "run": "cloud\\artifacts\\clip\\bull_guided_20260921T113340",
-      "generated_at": "2026-09-22T09:22:01.808785+00:00",
+      "run": "cloud\\artifacts\\b1b3_c1\\bull_guided_20260923T121135_p33340",
+      "generated_at": "2026-09-24T09:44:10.612612+00:00",
       "benchmark_rule": "specialist: own profit, PF and drawdown; buy and hold not required (user decision 2026-09-21, after the Bull holdout was seen)",
       "min_trades": 10,
       "checks": {
@@ -27,24 +28,24 @@
         "holdout: retorno > 0": true
       },
       "train": {
-        "net": 0.47076384109663777,
-        "pf": 2.663498644414435,
-        "dd": 0.10046186253517102,
-        "trades": 86,
+        "net": 0.13319442050945715,
+        "pf": 1.3557428622035075,
+        "dd": 0.07779753484144572,
+        "trades": 99,
         "deterministic": true
       },
       "validation": {
-        "net": 0.015823265717161878,
-        "pf": 2.012213253128234,
-        "dd": 0.055556444164068394,
-        "trades": 19,
+        "net": 0.04441001523898065,
+        "pf": 3.0771964158664242,
+        "dd": 0.018097858630105667,
+        "trades": 21,
         "deterministic": true
       },
       "holdout": {
-        "net": 0.16150191213895188,
-        "pf": 5.339273804451904,
-        "dd": 0.059849205348222106,
-        "trades": 16,
+        "net": 0.050341353625238915,
+        "pf": 1.8371918979106312,
+        "dd": 0.03131551875126067,
+        "trades": 15,
         "deterministic": true
       },
       "holdout_buy_and_hold": 0.18778176400643964,
@@ -63,21 +64,80 @@
         ]
       },
       "artifact_hashes": {
-        "bull_specialist_sac.zip": "2430601b013dae664445cd6cf060aaf29357a3ff9bc09ff3ff8e835aab08332f",
-        "bull_specialist_scaler.joblib": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
-        "bull_feature_contract.json": "a3aa7e5349df61275d1613bf3e6d46d9667dfb5cc29493cf1aff6e54a635ee4f",
-        "agent_mirror.py": "771879f7bafc29f8e24d3351f12b607eecad65b6a0ff1bb9935580a50c17ce68",
-        "trend_specialist.py": "b9a32e8d2af661a1915cdc096eb36ad5e49657214cfd2ffb88d78c85376c684f",
-        "causal_features.py": "76d2d8cbb7a0607a5edadfaf3b3ed57c4203431a9ba92cdc4dedf5f28845fc41"
+        "bull_specialist_sac.zip": "da2b7adc56b56adcb963fe77836742745f741fe1cde841e954f92075c1bd4632",
+        "bull_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+        "bull_feature_contract.json": "d7d73e0687e49bbfeb734f8e089acbf9b27bf3d87b89406f8e6f6182e134d1f9"
+      }
+    },
+    "bear": {
+      "approved": false,
+      "run": "cloud\\artifacts\\seeds_gate\\bear_s7\\bear_guided_20260923T171836_p30948",
+      "generated_at": "2026-09-24T09:44:12.496164+00:00",
+      "benchmark_rule": "specialist: own profit, PF and drawdown; buy and hold not required (user decision 2026-09-21, after the Bull holdout was seen)",
+      "min_trades": 10,
+      "checks": {
+        "modelo promovido = modelo do relatorio": true,
+        "paridade do espelho com o backtest": true,
+        "treino: retorno > 0": true,
+        "validacao: retorno > 0": true,
+        "validacao: PF >= 1.2": true,
+        "validacao: DD <= 15%": true,
+        "validacao: >= 10 trades": true,
+        "holdout: politica deterministica": true,
+        "holdout: PF >= 1.1": false,
+        "holdout: DD <= 15%": true,
+        "holdout: >= 10 trades": true,
+        "holdout: retorno > 0": false
+      },
+      "train": {
+        "net": 0.05573527952079117,
+        "pf": 1.1000482010019061,
+        "dd": 0.10847582921651117,
+        "trades": 104,
+        "deterministic": true
+      },
+      "validation": {
+        "net": 0.10874035868874132,
+        "pf": 1.7055765802355665,
+        "dd": 0.05581630742068993,
+        "trades": 31,
+        "deterministic": true
+      },
+      "holdout": {
+        "net": -0.012841479824783926,
+        "pf": 0.8075920964120631,
+        "dd": 0.060749464046293826,
+        "trades": 17,
+        "deterministic": true
+      },
+      "holdout_buy_and_hold": 0.18778176400643964,
+      "periods": {
+        "train": [
+          "2024-09-18 11:30:00",
+          "2026-02-11 11:45:00"
+        ],
+        "validation": [
+          "2026-02-19 12:00:00",
+          "2026-06-08 23:45:00"
+        ],
+        "holdout": [
+          "2026-06-17 00:00:00",
+          "2026-09-18 12:00:00"
+        ]
+      },
+      "artifact_hashes": {
+        "bear_specialist_sac.zip": "4292bcbef29d2b1d66878e6775ee573274c1fbce8e11792374cfe80f4f00e2a0",
+        "bear_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+        "bear_feature_contract.json": "93c2376723dc1798ee7e695d6191c33499e5fdf180d0e0878e345ac7dd4b2016"
       }
     }
   },
   "artifact_hashes": {
-    "bull_specialist_sac.zip": "2430601b013dae664445cd6cf060aaf29357a3ff9bc09ff3ff8e835aab08332f",
-    "bull_specialist_scaler.joblib": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
-    "bull_feature_contract.json": "a3aa7e5349df61275d1613bf3e6d46d9667dfb5cc29493cf1aff6e54a635ee4f",
-    "agent_mirror.py": "771879f7bafc29f8e24d3351f12b607eecad65b6a0ff1bb9935580a50c17ce68",
-    "trend_specialist.py": "b9a32e8d2af661a1915cdc096eb36ad5e49657214cfd2ffb88d78c85376c684f",
-    "causal_features.py": "76d2d8cbb7a0607a5edadfaf3b3ed57c4203431a9ba92cdc4dedf5f28845fc41"
+    "bear_specialist_sac.zip": "4292bcbef29d2b1d66878e6775ee573274c1fbce8e11792374cfe80f4f00e2a0",
+    "bear_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+    "bear_feature_contract.json": "93c2376723dc1798ee7e695d6191c33499e5fdf180d0e0878e345ac7dd4b2016",
+    "bull_specialist_sac.zip": "da2b7adc56b56adcb963fe77836742745f741fe1cde841e954f92075c1bd4632",
+    "bull_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+    "bull_feature_contract.json": "d7d73e0687e49bbfeb734f8e089acbf9b27bf3d87b89406f8e6f6182e134d1f9"
   }
 }

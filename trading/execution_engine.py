@@ -1174,17 +1174,18 @@ class ExecutionEngine:
         if result:
             # Captura o trade retornado por update_with_fill para logar
             new_trade = order.update_with_fill(result)
-            
-            # Se um novo trade (preenchimento total ou parcial) ocorreu, ele é logado
-            if new_trade and self.trade_log_callback:
+
+            def _log_fill(trade) -> None:
+                if not (trade and self.trade_log_callback):
+                    return
                 trade_log_data = {
-                    "timestamp": new_trade.timestamp.isoformat(),
-                    "symbol": new_trade.symbol,
-                    "action": new_trade.side.value,
-                    "quantity": new_trade.quantity,
-                    "price": new_trade.executed_price,
+                    "timestamp": trade.timestamp.isoformat(),
+                    "symbol": trade.symbol,
+                    "action": trade.side.value,
+                    "quantity": trade.quantity,
+                    "price": trade.executed_price,
                     "status": order.status.value,
-                    "notional_value": new_trade.quantity * new_trade.executed_price,
+                    "notional_value": trade.quantity * trade.executed_price,
                     "leverage": order.signal.leverage,
                     "profit_probability": order.signal.profit_probability,
                     "order_id": result.get('orderId', order.id),
@@ -1192,7 +1193,11 @@ class ExecutionEngine:
                 }
                 self.system_state["recent_trades"].append(trade_log_data)
                 self.trade_log_callback(trade_log_data)
-            
+
+            # Se um novo trade (preenchimento total ou parcial) ocorreu, ele é logado
+            _log_fill(new_trade)
+            logged_trade = new_trade
+
             # Se não preencheu imediatamente, tenta consultar o status algumas vezes (polling)
             if order.status != OrderStatus.FILLED:
                 original_status = order.status.value
@@ -1231,6 +1236,11 @@ class ExecutionEngine:
                 # precisamos recuperar o último trade ou criar uma referência.
                 if not new_trade and order.trades:
                      new_trade = order.trades[-1]
+
+                # Uma ordem que so preenche no polling (NEW -> FILLED) nunca passava
+                # pelo registro acima: o trade ficava fora do trades_log.csv.
+                if new_trade is not None and new_trade is not logged_trade:
+                    _log_fill(new_trade)
 
                 if new_trade:
                     # [BUG FIX] Atualiza o Portfolio com o trade real — sem isso o RiskManager opera com dados velhos

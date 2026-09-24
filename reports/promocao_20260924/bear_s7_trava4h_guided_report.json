@@ -1,0 +1,400 @@
+{
+  "agent": "bear",
+  "method": "behaviour_cloning+td3bc_finetune",
+  "teacher_rule": {
+    "kind": "leg_confirm",
+    "min_steps": 2,
+    "min_steps_5m": 2,
+    "require_trend_4h": true,
+    "require_trend_1h": false,
+    "require_ema_trend_4h": false,
+    "require_macd_4h": false,
+    "exit_trend_1h": false,
+    "min_adx_4h": 0.0,
+    "filter_path": "",
+    "filter_threshold": 0.0,
+    "sl_mult": 2.0,
+    "leverage": 3.0,
+    "vote": 0.8
+  },
+  "teacher_validation": {
+    "trades": 18,
+    "net_return": 0.16569114031681387,
+    "profit_factor": 3.137281412470415,
+    "max_drawdown": 0.03745817592304197,
+    "win_rate": 72.22222222222221,
+    "avg_duration": 60.94444444444444
+  },
+  "cloned_validation": {
+    "profit_factor": 1.4013963879575697,
+    "profit_factor_raw": 1.4013963879575697,
+    "trade_sharpe": 0.16685971942996222,
+    "avg_return_pct": 0.01007647620202393,
+    "cumulative_trade_return_pct": 0.5139002863032204,
+    "max_drawdown_pct": 0.1014745489125301,
+    "num_trades": 51.0,
+    "win_rate_pct": 50.98039215686274,
+    "avg_trade_duration": 64.01960784313725,
+    "min_trade_duration": 8.0,
+    "max_trade_duration": 329.0,
+    "final_net_worth": 110.49187613627055,
+    "total_return_pct": 0.10491876136165629,
+    "episode_length": 10511.0,
+    "pf_reliable": 1.0,
+    "max_trades_cap": 0.0,
+    "max_episode_steps": 10511.0,
+    "regime_trade_up_pct": 52.94117647058824,
+    "regime_trade_down_pct": 7.8431372549019605,
+    "regime_trade_side_pct": 39.21568627450981,
+    "trend_regime_avg_up": 0.34724732997834584,
+    "trend_regime_avg_down": 0.37331587857608506,
+    "trend_regime_avg_side": 0.15566428123787507,
+    "trend_regime_samples": 10511.0,
+    "ema_trend_avg": 0.058129578536771004,
+    "trend_dominant": "down",
+    "long_trade_pct": 0.0,
+    "long_trades_count": 0.0,
+    "short_trades_count": 51.0,
+    "episode_reward": 9.977181313827902,
+    "exit_reason_counts": {
+      "agent": 11,
+      "stop_loss": 33,
+      "catastrophe": 7,
+      "time_stop": 0,
+      "ruin": 0,
+      "other": 0
+    },
+    "exit_diagnostics": {
+      "closed_trades": 51,
+      "learned_exit_count": 11,
+      "learned_exit_fraction": 0.21568627450980393,
+      "by_reason": {
+        "Stop Loss": {
+          "count": 13,
+          "recorded_pnl_usd": -17.976647070931733,
+          "win_rate": 0.0,
+          "avg_duration_steps": 33.84615384615385
+        },
+        "Agent Decision": {
+          "count": 5,
+          "recorded_pnl_usd": -3.267813879807079,
+          "win_rate": 0.2,
+          "avg_duration_steps": 35.2
+        },
+        "Trailing Stop": {
+          "count": 20,
+          "recorded_pnl_usd": 35.804665817283976,
+          "win_rate": 1.0,
+          "avg_duration_steps": 75.25
+        },
+        "Catastrophe Stop Loss": {
+          "count": 7,
+          "recorded_pnl_usd": -0.4571025750963287,
+          "win_rate": 0.7142857142857143,
+          "avg_duration_steps": 125.28571428571429
+        },
+        "Agent Decision - prior pressure": {
+          "count": 6,
+          "recorded_pnl_usd": -3.6112261551782865,
+          "win_rate": 0.0,
+          "avg_duration_steps": 44.5
+        }
+      },
+      "pnl_basis": "Recorded realized trade PnL; use account equity for all-cost return"
+    },
+    "policy_exit_requests": {
+      "requested_steps": 101,
+      "blocked_by_grace_steps": 85,
+      "eligible_steps": 16
+    },
+    "deterministic": true,
+    "vote_mean": 0.36341649316015234,
+    "vote_std": 0.7413636876493392,
+    "vote_abs_mean": 0.8023686477158302,
+    "sharpe_ratio": 1.7989626695024252
+  },
+  "selected": "ajuste fino 10000",
+  "selected_validation": {
+    "profit_factor": 1.7055765802355665,
+    "profit_factor_raw": 1.7055765802355665,
+    "trade_sharpe": 0.16556861589299332,
+    "avg_return_pct": 0.009352136495457776,
+    "cumulative_trade_return_pct": 0.28991623135919103,
+    "max_drawdown_pct": 0.05581630742068993,
+    "num_trades": 31.0,
+    "win_rate_pct": 54.83870967741935,
+    "avg_trade_duration": 56.96774193548387,
+    "min_trade_duration": 3.0,
+    "max_trade_duration": 109.0,
+    "final_net_worth": 110.87403586898287,
+    "total_return_pct": 0.10874035868874132,
+    "episode_length": 10511.0,
+    "pf_reliable": 1.0,
+    "max_trades_cap": 0.0,
+    "max_episode_steps": 10511.0,
+    "regime_trade_up_pct": 32.25806451612903,
+    "regime_trade_down_pct": 12.903225806451612,
+    "regime_trade_side_pct": 54.83870967741935,
+    "trend_regime_avg_up": 0.34724732997834584,
+    "trend_regime_avg_down": 0.37331587857608506,
+    "trend_regime_avg_side": 0.15566428123787507,
+    "trend_regime_samples": 10511.0,
+    "ema_trend_avg": 0.058129578536771004,
+    "trend_dominant": "down",
+    "long_trade_pct": 0.0,
+    "long_trades_count": 0.0,
+    "short_trades_count": 31.0,
+    "episode_reward": 10.322455894641864,
+    "exit_reason_counts": {
+      "agent": 0,
+      "stop_loss": 25,
+      "catastrophe": 6,
+      "time_stop": 0,
+      "ruin": 0,
+      "other": 0
+    },
+    "exit_diagnostics": {
+      "closed_trades": 31,
+      "learned_exit_count": 0,
+      "learned_exit_fraction": 0.0,
+      "by_reason": {
+        "Stop Loss": {
+          "count": 11,
+          "recorded_pnl_usd": -14.348037156047383,
+          "win_rate": 0.0,
+          "avg_duration_steps": 32.90909090909091
+        },
+        "Catastrophe Stop Loss": {
+          "count": 6,
+          "recorded_pnl_usd": -0.7921124904489858,
+          "win_rate": 0.5,
+          "avg_duration_steps": 76.16666666666667
+        },
+        "Trailing Stop": {
+          "count": 14,
+          "recorded_pnl_usd": 26.01418551547924,
+          "win_rate": 1.0,
+          "avg_duration_steps": 67.64285714285714
+        }
+      },
+      "pnl_basis": "Recorded realized trade PnL; use account equity for all-cost return"
+    },
+    "policy_exit_requests": {
+      "requested_steps": 2,
+      "blocked_by_grace_steps": 0,
+      "eligible_steps": 2
+    },
+    "deterministic": true,
+    "vote_mean": 0.40002358707144536,
+    "vote_std": 0.5457710072896835,
+    "vote_abs_mean": 0.6541929407857394,
+    "sharpe_ratio": 2.180751841283362
+  },
+  "holdout_metrics": {
+    "profit_factor": 0.8075920964120631,
+    "profit_factor_raw": 0.8075920964120631,
+    "trade_sharpe": -0.044283396679489086,
+    "avg_return_pct": -0.0015688193784847216,
+    "cumulative_trade_return_pct": -0.026669929434240267,
+    "max_drawdown_pct": 0.060749464046293826,
+    "num_trades": 17.0,
+    "win_rate_pct": 58.82352941176471,
+    "avg_trade_duration": 45.0,
+    "min_trade_duration": 3.0,
+    "max_trade_duration": 148.0,
+    "final_net_worth": 98.71585201750877,
+    "total_return_pct": -0.012841479824783926,
+    "episode_length": 8976.0,
+    "pf_reliable": 1.0,
+    "max_trades_cap": 0.0,
+    "max_episode_steps": 8976.0,
+    "regime_trade_up_pct": 58.82352941176471,
+    "regime_trade_down_pct": 11.76470588235294,
+    "regime_trade_side_pct": 29.411764705882355,
+    "trend_regime_avg_up": 0.42018459860813173,
+    "trend_regime_avg_down": 0.38547540817296866,
+    "trend_regime_avg_side": 0.08536367350774228,
+    "trend_regime_samples": 8976.0,
+    "ema_trend_avg": 0.05236185383244207,
+    "trend_dominant": "up",
+    "long_trade_pct": 0.0,
+    "long_trades_count": 0.0,
+    "short_trades_count": 17.0,
+    "episode_reward": -1.292464436462301,
+    "exit_reason_counts": {
+      "agent": 0,
+      "stop_loss": 10,
+      "catastrophe": 7,
+      "time_stop": 0,
+      "ruin": 0,
+      "other": 0
+    },
+    "exit_diagnostics": {
+      "closed_trades": 17,
+      "learned_exit_count": 0,
+      "learned_exit_fraction": 0.0,
+      "by_reason": {
+        "Stop Loss": {
+          "count": 5,
+          "recorded_pnl_usd": -5.824648436133501,
+          "win_rate": 0.0,
+          "avg_duration_steps": 16.0
+        },
+        "Trailing Stop": {
+          "count": 5,
+          "recorded_pnl_usd": 4.216265598364984,
+          "win_rate": 0.6,
+          "avg_duration_steps": 34.4
+        },
+        "Catastrophe Stop Loss": {
+          "count": 7,
+          "recorded_pnl_usd": 0.32423485527728246,
+          "win_rate": 1.0,
+          "avg_duration_steps": 73.28571428571429
+        }
+      },
+      "pnl_basis": "Recorded realized trade PnL; use account equity for all-cost return"
+    },
+    "policy_exit_requests": {
+      "requested_steps": 0,
+      "blocked_by_grace_steps": 0,
+      "eligible_steps": 0
+    },
+    "deterministic": true,
+    "vote_mean": 0.5566147259517893,
+    "vote_std": 0.425360047904422,
+    "vote_abs_mean": 0.6824594086730013,
+    "sharpe_ratio": -0.4224114084698594
+  },
+  "verdict": {
+    "checks": {
+      "deterministic_policy_trades": false,
+      "net_return_positive": false,
+      "beats_buy_and_hold": false,
+      "drawdown_within_limit": true,
+      "profit_factor": false,
+      "sharpe": false,
+      "policy_not_constant": true
+    },
+    "approved_for_live_trading": false,
+    "holdout_trades": 17,
+    "holdout_net_return": -0.012841479824783926,
+    "holdout_max_drawdown": 0.060749464046293826,
+    "buy_and_hold_return": 0.18778176400643964
+  },
+  "train_metrics": {
+    "profit_factor": 1.1000482010019061,
+    "profit_factor_raw": 1.1000482010019061,
+    "trade_sharpe": 0.03792710674018484,
+    "avg_return_pct": 0.0025423672711266934,
+    "cumulative_trade_return_pct": 0.2644061961971761,
+    "max_drawdown_pct": 0.10847582921651117,
+    "num_trades": 104.0,
+    "win_rate_pct": 60.57692307692307,
+    "avg_trade_duration": 58.28846153846154,
+    "min_trade_duration": 2.0,
+    "max_trade_duration": 254.0,
+    "final_net_worth": 105.57352795213485,
+    "total_return_pct": 0.05573527952079117,
+    "episode_length": 49057.0,
+    "pf_reliable": 1.0,
+    "max_trades_cap": 0.0,
+    "max_episode_steps": 49057.0,
+    "regime_trade_up_pct": 45.63106796116505,
+    "regime_trade_down_pct": 9.70873786407767,
+    "regime_trade_side_pct": 44.66019417475729,
+    "trend_regime_avg_up": 0.3765219620177036,
+    "trend_regime_avg_down": 0.3557428116421214,
+    "trend_regime_avg_side": 0.1432984865542584,
+    "trend_regime_samples": 49057.0,
+    "ema_trend_avg": 0.04286849990826997,
+    "trend_dominant": "up",
+    "long_trade_pct": 0.0,
+    "long_trades_count": 0.0,
+    "short_trades_count": 103.0,
+    "episode_reward": 5.42374715865668,
+    "exit_reason_counts": {
+      "agent": 7,
+      "stop_loss": 64,
+      "catastrophe": 32,
+      "time_stop": 0,
+      "ruin": 0,
+      "other": 0
+    },
+    "exit_diagnostics": {
+      "closed_trades": 104,
+      "learned_exit_count": 7,
+      "learned_exit_fraction": 0.0673076923076923,
+      "by_reason": {
+        "Catastrophe Stop Loss": {
+          "count": 32,
+          "recorded_pnl_usd": -6.955063746173707,
+          "win_rate": 0.75,
+          "avg_duration_steps": 85.25
+        },
+        "Trailing Stop": {
+          "count": 39,
+          "recorded_pnl_usd": 59.22768068239262,
+          "win_rate": 0.9743589743589743,
+          "avg_duration_steps": 50.12820512820513
+        },
+        "Stop Loss": {
+          "count": 25,
+          "recorded_pnl_usd": -40.384491479711556,
+          "win_rate": 0.0,
+          "avg_duration_steps": 29.24
+        },
+        "Agent Decision - prior pressure": {
+          "count": 7,
+          "recorded_pnl_usd": -6.9435194346770714,
+          "win_rate": 0.0,
+          "avg_duration_steps": 80.57142857142857
+        },
+        "Episode End": {
+          "count": 1,
+          "recorded_pnl_usd": 0.6289219303045712,
+          "win_rate": 1.0,
+          "avg_duration_steps": 84.0
+        }
+      },
+      "pnl_basis": "Recorded realized trade PnL; use account equity for all-cost return"
+    },
+    "policy_exit_requests": {
+      "requested_steps": 12,
+      "blocked_by_grace_steps": 2,
+      "eligible_steps": 10
+    },
+    "deterministic": true,
+    "vote_mean": 0.551771807928661,
+    "vote_std": 0.4987131904403203,
+    "vote_abs_mean": 0.7308079463973826,
+    "sharpe_ratio": 0.36664773177191246
+  },
+  "settings": {
+    "bc_epochs": 30,
+    "dagger_iters": 3,
+    "dagger_epochs": 12,
+    "critic_warmup": 10000,
+    "finetune_steps": 80000,
+    "eval_every": 10000,
+    "max_bars": 0
+  },
+  "imitation_objective": "position_aware_class_balancing_and_macro_recall",
+  "seed": 7,
+  "cpu_threads": 4,
+  "periods": {
+    "train": [
+      "2024-09-18 11:30:00",
+      "2026-02-11 11:45:00"
+    ],
+    "validation": [
+      "2026-02-19 12:00:00",
+      "2026-06-08 23:45:00"
+    ],
+    "holdout": [
+      "2026-06-17 00:00:00",
+      "2026-09-18 12:00:00"
+    ]
+  },
+  "run_directory": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\seeds_gate\\bear_s7\\bear_guided_20260923T171836_p30948"
+}

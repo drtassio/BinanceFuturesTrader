@@ -1,7 +1,7 @@
 {
   "agent": "bear",
-  "promoted_at": "2026-09-22T15:33:47.639713+00:00",
-  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\exp_bear_filter\\bear_guided_20260921T170815_p23496",
+  "promoted_at": "2026-09-24T09:29:03.698100+00:00",
+  "source": "C:\\Users\\TAOLIVE\\OneDrive - Daimler Truck\\Desktop\\aprendiz\\BinanceFuturesTrader\\cloud\\artifacts\\seeds_gate\\bear_s7\\bear_guided_20260923T171836_p30948",
   "observation_size": 780,
   "feature_columns": [
     "log_return_15m",
@@ -183,9 +183,10 @@
     "hidden_feature_31",
     "sdae_recon_error"
   ],
-  "model_sha256": "69c08305484719baebf50057d02d66e6dfe392449e20ab21c7a0f8e5d62bcb33",
-  "scaler_sha256": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
+  "model_sha256": "4292bcbef29d2b1d66878e6775ee573274c1fbce8e11792374cfe80f4f00e2a0",
+  "scaler_sha256": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
   "stop_atr_timeframe": "1h",
+  "short_requires_trend_4h": true,
   "leverage_bounds": [
     1.0,
     3.0

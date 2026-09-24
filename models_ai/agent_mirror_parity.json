@@ -4,17 +4,22 @@
   "data": "data\\featured_data_causal_leg5m.parquet",
   "results": {
     "bull": {
-      "checks": 20,
+      "checks": 30,
       "mismatches": [],
-      "in_trade": 5
+      "in_trade": 3
+    },
+    "bear": {
+      "checks": 30,
+      "mismatches": [],
+      "in_trade": 3
     }
   },
   "artifact_hashes": {
-    "bull_specialist_sac.zip": "2430601b013dae664445cd6cf060aaf29357a3ff9bc09ff3ff8e835aab08332f",
-    "bull_specialist_scaler.joblib": "8c9e3850e5f3b8595c7afcef6ebcba97f016e3b3605b3d812fba556c53521092",
-    "bull_feature_contract.json": "a3aa7e5349df61275d1613bf3e6d46d9667dfb5cc29493cf1aff6e54a635ee4f",
-    "agent_mirror.py": "771879f7bafc29f8e24d3351f12b607eecad65b6a0ff1bb9935580a50c17ce68",
-    "trend_specialist.py": "6d04fc1091d301d7c1cf148d77640f6869166a7cc494124e9c60e7e40d477716",
-    "causal_features.py": "76d2d8cbb7a0607a5edadfaf3b3ed57c4203431a9ba92cdc4dedf5f28845fc41"
+    "bull_specialist_sac.zip": "da2b7adc56b56adcb963fe77836742745f741fe1cde841e954f92075c1bd4632",
+    "bull_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+    "bull_feature_contract.json": "d7d73e0687e49bbfeb734f8e089acbf9b27bf3d87b89406f8e6f6182e134d1f9",
+    "bear_specialist_sac.zip": "4292bcbef29d2b1d66878e6775ee573274c1fbce8e11792374cfe80f4f00e2a0",
+    "bear_specialist_scaler.joblib": "fc94049b0c7f98c457f7427e49f3773f2e5b61c3412d5e96e77a86decbe3e19c",
+    "bear_feature_contract.json": "93c2376723dc1798ee7e695d6191c33499e5fdf180d0e0878e345ac7dd4b2016"
   }
 }

@@ -1,5 +1,5 @@
 {
-    "input_dim": 198,
+    "input_dim": 159,
     "latent_dim": 32,
     "seq_length": 32,
     "cnn_out_channels": 64,
