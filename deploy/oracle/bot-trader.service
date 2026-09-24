@@ -1,0 +1,26 @@
+[Unit]
+Description=BinanceFuturesTrader (testnet) - espelho dos agentes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/BinanceFuturesTrader
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+Environment=CUDA_VISIBLE_DEVICES=-1
+Environment=TF_CPP_MIN_LOG_LEVEL=2
+# Sem terminal no servidor: so atualiza logs/charts/espelho.png, nao imprime imagem.
+Environment=MIRROR_CHART_MODE=png
+ExecStart=/home/ubuntu/BinanceFuturesTrader/.venv/bin/python run_bot.py
+Restart=on-failure
+RestartSec=60
+# Um bot so: se cair, o systemd religa este mesmo processo.
+KillSignal=SIGINT
+TimeoutStopSec=60
+StandardOutput=append:/home/ubuntu/BinanceFuturesTrader/logs/bot_service.log
+StandardError=append:/home/ubuntu/BinanceFuturesTrader/logs/bot_service.log
+
+[Install]
+WantedBy=multi-user.target

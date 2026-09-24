@@ -1,0 +1,31 @@
+# Pacotes para RODAR o bot num servidor Linux (x86_64 ou ARM/aarch64), so CPU.
+# Levantados importando o bot (run_bot, espelho, especialistas) e carregando os
+# modelos de models_ai. Versoes iguais as do ambiente em que os modelos foram
+# treinados: o scaler e os modelos do scikit-learn so carregam com 1.6.1.
+# O torch vem do indice CPU do PyTorch (o setup.sh instala antes deste arquivo).
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.15.3
+scikit-learn==1.6.1
+joblib==1.5.0
+hmmlearn==0.3.3
+statsmodels==0.14.6
+ta==0.11.0
+fastparquet==2024.11.0
+matplotlib==3.10.3
+pillow==11.2.1
+opencv-python-headless==4.11.0.86
+stable_baselines3==2.6.0
+gymnasium==1.1.1
+gym==0.26.2
+tensorflow==2.19.0
+keras==3.9.2
+optuna==4.3.0
+aiohttp==3.10.11
+aiodns==3.4.0
+requests==2.34.2
+python-dotenv==1.1.0
+colorlog==6.9.0
+tqdm==4.67.3
+pytz==2025.2
+python-dateutil==2.9.0.post0
