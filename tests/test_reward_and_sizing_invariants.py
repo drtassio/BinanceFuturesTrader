@@ -126,13 +126,19 @@ def test_reward_prefers_trading_when_trading_makes_money(frame):
         )
 
 
-def test_position_size_follows_conviction(frame):
+def test_position_size_follows_conviction(frame, monkeypatch):
     """Notional must respond to the agent, not sit pinned at a floor.
 
     Sizing used to read tp_prior_conf, a column absent from the dataset, so it
     resolved to the 0.1 clip floor on every trade: notional 2.00 on capital
     100, which scaled the profit signal to nothing.
+
+    Pinned at the default 2% risk per trade: a machine whose .env raises it
+    (0.10) sends every trade to the leverage cap, where size cannot follow the
+    vote any more.
     """
+    from config.settings import TradingConfig
+    monkeypatch.setattr(TradingConfig, "MAX_PORTFOLIO_RISK_PERCENT", 0.02)
     sizes = {}
     for vote in (0.2, 0.95):
         env = _environment(frame)

@@ -68,9 +68,93 @@ def record_account(bar, side: int, entry_price: float) -> None:
         fh.write(json.dumps({"bar": str(pd.Timestamp(bar)), "side": int(side), "entry_price": float(entry_price or 0.0)}) + "\n")
 
 
-def real_trades(close: pd.Series) -> List[dict]:
-    """Trades que o bot fez de fato na conta, a partir de conta_espelho.jsonl."""
+FILLS_LOG = ROOT / "logs" / "charts" / "execucoes_binance.jsonl"
+
+
+async def sync_fills(connector, symbol: str) -> int:
+    """Copia para FILLS_LOG as execucoes da conta que ainda nao estao nele.
+
+    As marcas do grafico saem destas execucoes, e nao do lado da conta visto a
+    cada candle: um trade fechado com o bot parado, ou por outra maquina na
+    mesma conta, aparecia fechado no candle em que o bot voltou, ao preco daquele
+    momento. So leitura (GET /fapi/v1/userTrades).
+    """
     import json
+    import time
+    known = _read_fills()
+    params = {"symbol": symbol, "limit": 1000}
+    if known:
+        params["fromId"] = max(int(f["id"]) for f in known) + 1
+    else:
+        params["startTime"] = int((time.time() - 7 * 86400) * 1000)
+    rows = await connector._make_request("GET", "/fapi/v1/userTrades", params=params, signed=True) or []
+    ids = {int(f["id"]) for f in known}
+    new = [r for r in rows if int(r["id"]) not in ids]
+    if new:
+        FILLS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with FILLS_LOG.open("a", encoding="utf-8") as fh:
+            for r in sorted(new, key=lambda r: int(r["id"])):
+                fh.write(json.dumps({k: r.get(k) for k in ("id", "time", "side", "qty", "price", "realizedPnl",
+                                                           "commission", "orderId")}) + "\n")
+    return len(new)
+
+
+def _read_fills() -> List[dict]:
+    import json
+    if not FILLS_LOG.exists():
+        return []
+    rows = []
+    for line in FILLS_LOG.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
+
+
+def trades_from_fills(fills: List[dict], close: pd.Series) -> List[dict]:
+    """Trades da conta a partir das execucoes: abre quando a posicao sai de zero,
+    fecha quando volta a zero. Precos medios ponderados e resultado liquido de
+    taxas; cada marca vai no candle de 15m em que a execucao aconteceu."""
+    trades, current, position = [], None, 0.0
+
+    def bar_of(ms):
+        bar = pd.Timestamp(int(ms), unit="ms", tz="UTC").floor("15min")
+        return bar.tz_convert(None) if close.index.tz is None else bar
+
+    for f in sorted(fills, key=lambda f: (int(f["time"]), int(f["id"]))):
+        qty = float(f["qty"]) * (1.0 if str(f["side"]).upper() == "BUY" else -1.0)
+        price = float(f["price"])
+        if current is None and abs(position) < 1e-12 and qty:
+            current = {"side": 1 if qty > 0 else -1, "entry_bar": bar_of(f["time"]), "agent": "bot",
+                       "_in_qty": 0.0, "_in_val": 0.0, "_out_qty": 0.0, "_out_val": 0.0, "pnl_usd": 0.0}
+        if current is not None:
+            if (qty > 0) == (current["side"] > 0):
+                current["_in_qty"] += abs(qty); current["_in_val"] += abs(qty) * price
+            else:
+                current["_out_qty"] += abs(qty); current["_out_val"] += abs(qty) * price
+            current["pnl_usd"] += float(f.get("realizedPnl") or 0.0) - float(f.get("commission") or 0.0)
+        position = round(position + qty, 8)
+        if current is not None and abs(position) < 1e-12:
+            entry = current["_in_val"] / current["_in_qty"]
+            exit_ = current["_out_val"] / current["_out_qty"]
+            current.update(entry_price=entry, exit_bar=bar_of(f["time"]), exit_price=exit_,
+                           result=current["side"] * (exit_ / entry - 1) * 100)
+            trades.append({k: v for k, v in current.items() if not k.startswith("_")})
+            current = None
+    if current is not None:
+        current["entry_price"] = current["_in_val"] / current["_in_qty"]
+        trades.append({k: v for k, v in current.items() if not k.startswith("_")})
+    return trades
+
+
+def real_trades(close: pd.Series) -> List[dict]:
+    """Trades que o bot fez de fato na conta: das execucoes da Binance quando o
+    bot as sincronizou (sync_fills), senao do lado da conta em conta_espelho.jsonl."""
+    import json
+    fills = _read_fills()
+    if fills:
+        return trades_from_fills(fills, close)
     if not ACCOUNT_LOG.exists():
         return []
     rows = []
@@ -281,7 +365,10 @@ def render_png(history: pd.DataFrame, paths: Dict[str, pd.DataFrame], view: Opti
             if "exit_bar" in tr and tr["exit_bar"] in x:
                 i = x[tr["exit_bar"]]
                 ax.scatter(i, tr["exit_price"], marker="X", s=100, color="black", zorder=5)
-                ax.annotate("SAI %+.1f%%" % tr["result"], (i, tr["exit_price"]), xytext=(6, -14),
+                label = "SAI %+.1f%%" % tr["result"]
+                if "pnl_usd" in tr:
+                    label += " ($%+.2f)" % tr["pnl_usd"]
+                ax.annotate(label, (i, tr["exit_price"]), xytext=(6, -14),
                             textcoords="offset points", fontsize=8, fontweight="bold")
     price = float((view or {}).get("close") or bars["close"].iloc[-1])
     ax.axhline(price, color="#1565c0", linestyle="--", linewidth=1.1)

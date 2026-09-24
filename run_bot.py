@@ -654,6 +654,14 @@ async def main_trading_loop():
                         system_state["mirror_chart_bar"] = str(_view.get("bar"))
                         try:
                             from trading import mirror_chart
+                            # Marcas do grafico a partir das execucoes reais da conta
+                            # (inclui trades fechados com o bot parado ou por outra maquina).
+                            _conn = getattr(execution_engine, "connector", None)
+                            if _conn is not None and hasattr(_conn, "_make_request"):
+                                try:
+                                    await mirror_chart.sync_fills(_conn, TradingConfig.PRIMARY_PAIR)
+                                except Exception as _fills_error:
+                                    logger.warning("[ESPELHO] Execucoes da conta nao sincronizadas: %s", _fills_error)
                             _pos = portfolio.positions.get(TradingConfig.PRIMARY_PAIR) if portfolio else None
                             mirror_chart.record_account(_view["bar"], _view.get("account_side", 0),
                                                         getattr(_pos, "entry_price", 0.0) if _pos else 0.0)
